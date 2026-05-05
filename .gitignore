@@ -1,0 +1,42 @@
+# Build artifacts
+bin/
+build/
+dist/
+*.exe
+*.test
+*.out
+
+# Go specific
+go.sum.bak
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Testing
+coverage.out
+coverage.html
+
+# Local config (not for repo)
+*.local.yaml
+*.local.json
+.env
+.env.local
+
+# Generated SQLite indices (derived data, never committed)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+*.log
+logs/
+
+# Sample/test JSONL data
+test-events/
+sample-events/
