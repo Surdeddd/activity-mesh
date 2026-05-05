@@ -6,7 +6,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={{BIN_PATH}} daemon --port 7459
+ExecStart={{BIN_PATH}} --port 7459 --sync-dir {{SYNC_DIR}} --state-dir {{STATE_DIR}}
 Restart=on-failure
 RestartSec=30s
 StandardOutput=append:{{LOG_DIR}}/daemon.log

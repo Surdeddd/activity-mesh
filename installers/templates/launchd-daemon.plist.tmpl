@@ -7,19 +7,17 @@
     <key>ProgramArguments</key>
     <array>
         <string>{{BIN_PATH}}</string>
-        <string>daemon</string>
         <string>--port</string>
         <string>7459</string>
+        <string>--sync-dir</string>
+        <string>{{SYNC_DIR}}</string>
+        <string>--state-dir</string>
+        <string>{{STATE_DIR}}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-        <key>Crashed</key>
-        <true/>
-    </dict>
+    <true/>
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>

@@ -49,6 +49,29 @@ activity-log query --hours 24
 
 # auto-capture daemon (started via launchd/systemd)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.activity-mesh.watcher.plist
+
+# query API daemon (SQLite + FTS5 indexer + HTTP)
+activity-mesh-daemon --port 7459 &
+curl http://localhost:7459/health
+curl 'http://localhost:7459/recent?scope=project:openclaw&hours=24&limit=20'
+curl 'http://localhost:7459/search?q=billing+oauth&limit=10'
+curl 'http://localhost:7459/digest?window=today&group_by=scope'
+```
+
+## Building the daemon
+
+The daemon needs cgo for the SQLite FTS5 driver:
+
+```bash
+# native build (any host)
+CGO_ENABLED=1 go build -tags sqlite_fts5 -o bin/activity-mesh-daemon ./server
+
+# darwin/arm64 + darwin/amd64 cross-compile from a Mac (works out of the box)
+GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -tags sqlite_fts5 -o bin/activity-mesh-daemon-darwin-arm64 ./server
+
+# linux/windows: cgo cross-compile from macOS requires a non-Apple toolchain
+# (zig cc, musl-cross-compile, ...). Easiest: build natively on the target host:
+ssh linux-host 'cd /path/activity-mesh && CGO_ENABLED=1 go build -tags sqlite_fts5 -o bin/activity-mesh-daemon ./server'
 ```
 
 ## Methodology
