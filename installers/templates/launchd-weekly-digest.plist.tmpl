@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.activity-mesh.weekly-digest</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{REPO_DIR}}/health/weekly-digest.sh</string>
+    </array>
+    <!-- Sunday 09:00 MSK = Sunday 06:00 UTC -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/weekly-digest.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/weekly-digest.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ACTIVITY_MESH_HOME</key>
+        <string>{{STATE_DIR}}</string>
+        <key>ACTIVITY_MESH_SYNC</key>
+        <string>{{SYNC_DIR}}</string>
+        <key>ACTIVITY_MESH_STATE</key>
+        <string>{{LOG_DIR}}</string>
+        <key>TELEGRAM_ENV</key>
+        <string>{{HOME}}/.claude/channels/telegram/.env</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
