@@ -1,0 +1,23 @@
+[Unit]
+Description=activity-mesh fswatch capture daemon
+Documentation=https://github.com/Surdeddd/activity-mesh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{WATCHER_BIN}} --config {{CONFIG_DIR}}/watcher.yaml
+Restart=on-failure
+RestartSec=30s
+StandardOutput=append:{{LOG_DIR}}/watcher.log
+StandardError=append:{{LOG_DIR}}/watcher.err
+Environment=ACTIVITY_MESH_HOME={{STATE_DIR}}
+Environment=ACTIVITY_MESH_SYNC={{SYNC_DIR}}
+WorkingDirectory={{HOME}}
+Nice=5
+# soft hardening — keep universal across distros
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
