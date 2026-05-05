@@ -1,0 +1,21 @@
+[Unit]
+Description=activity-mesh HTTP query daemon
+Documentation=https://github.com/Surdeddd/activity-mesh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{BIN_PATH}} daemon --port 7459
+Restart=on-failure
+RestartSec=30s
+StandardOutput=append:{{LOG_DIR}}/daemon.log
+StandardError=append:{{LOG_DIR}}/daemon.err
+Environment=ACTIVITY_MESH_HOME={{STATE_DIR}}
+Environment=ACTIVITY_MESH_SYNC={{SYNC_DIR}}
+WorkingDirectory={{HOME}}
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
