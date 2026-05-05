@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- INDEPENDENT process. Must NOT depend on com.activity-mesh.daemon being alive.
+         If the daemon dies, this is the watchdog that wakes Maxim up. -->
+    <key>Label</key>
+    <string>com.activity-mesh.heartbeat</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{REPO_DIR}}/health/dead-man-heartbeat.sh</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>3600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/heartbeat-cron.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/heartbeat-cron.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ACTIVITY_MESH_STATE</key>
+        <string>{{LOG_DIR}}</string>
+        <key>ACTIVITY_MESH_HEALTH_URL</key>
+        <string>http://127.0.0.1:7459/health</string>
+        <key>TELEGRAM_ENV</key>
+        <string>{{HOME}}/.claude/channels/telegram/.env</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+</dict>
+</plist>
