@@ -1,0 +1,117 @@
+# activity-mesh watcher config — 11 auto-capture sources from ARCHITECTURE.md.
+#
+# Place at ~/.config/activity-mesh/watcher.yaml or pass --config flag.
+# Edit paths/templates to taste; ~ is expanded to $HOME.
+
+activity_log_bin: /usr/local/bin/activity-log
+debounce_ms: 5000
+
+sources:
+  - name: skill-installed
+    path: ~/.claude/skills
+    pattern: "*/SKILL.md"
+    op: create
+    recursive: true
+    emit:
+      kind: install
+      scope: claude-mac
+      summary_template: "installed skill {{.Filename}} ({{.ParentDir}})"
+
+  - name: plugin-config
+    path: ~/.claude
+    pattern: "settings.json"
+    op: modify
+    diff_field: enabledPlugins
+    emit:
+      kind: config
+      scope: plugins
+      summary_template: "settings.json modified ({{.Path}})"
+
+  - name: memory-entry
+    path: ~/.claude/projects
+    pattern: "*.md"
+    op: create
+    recursive: true
+    emit:
+      kind: note
+      scope: memory
+      summary_template: "memory entry added: {{.Filename}}"
+
+  - name: wiki-compile
+    path: ~/Obsidian/llm-wiki/wiki
+    pattern: "**/*.md"
+    op: create
+    recursive: true
+    emit:
+      kind: compile
+      scope_template: "wiki:{{.ParentDir}}"
+      summary_template: "wiki entry compiled: {{.Filename}}"
+
+  - name: inbox-drop
+    path: ~/Obsidian/llm-wiki/inbox
+    pattern: "*.md"
+    op: create
+    recursive: true
+    emit:
+      kind: handoff
+      scope: wiki:inbox
+      summary_template: "inbox drop: {{.Filename}}"
+
+  - name: launchd-plist
+    path: ~/Library/LaunchAgents
+    pattern: "com.maxim.*.plist"
+    op: create_or_modify
+    emit:
+      kind: config
+      scope: launchd
+      summary_template: "launchd plist {{.Op}}: {{.Filename}}"
+
+  - name: plugin-cache
+    path: ~/.claude/plugins/cache
+    pattern: "*"
+    op: modify
+    recursive: true
+    emit:
+      kind: install
+      scope: plugins
+      summary_template: "plugin cache change: {{.ParentDir}}/{{.Filename}}"
+
+  - name: hermes-soul
+    path: ~/.hermes
+    pattern: "SOUL.md"
+    op: modify
+    emit:
+      kind: config
+      scope: hermes
+      priority: P2
+      summary_template: "Hermes SOUL.md updated"
+
+  - name: hermes-config
+    path: ~/.hermes
+    pattern: "config.yaml"
+    op: modify
+    emit:
+      kind: config
+      scope: hermes
+      priority: P2
+      summary_template: "Hermes config.yaml updated"
+
+  - name: openclaw-shared-kb
+    path: ~/openclaw/shared/KB
+    pattern: "*.md"
+    op: create
+    recursive: true
+    emit:
+      kind: note
+      scope: openclaw
+      summary_template: "openclaw KB entry: {{.Filename}}"
+
+  - name: claude-md
+    path: ~/.claude
+    pattern: "CLAUDE.md"
+    op: modify
+    emit:
+      kind: config
+      scope: claude-mac
+      priority: P1
+      summary_template: "CLAUDE.md modified"
