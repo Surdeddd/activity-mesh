@@ -1,0 +1,89 @@
+# activity-mesh — scope registry
+#
+# Scopes group events by domain. Long-lived scopes (infrastructure, named
+# agents, recurring projects) are listed here. Time-bounded scopes use the
+# `project:<name>` namespace and SHOULD set `expires`.
+#
+# Status enum: active | deprecated | archived
+#   active     — accept new emits, surface in queries
+#   deprecated — accept new emits but warn, surface in queries with marker
+#   archived   — reject new emits (CLI warns), still readable
+#
+# Convention: keep names lowercase + kebab-case. Namespaced scopes use `:`
+# as separator (e.g. `project:client-x`).
+schema_version: 1
+
+scopes:
+  # ----- core infra -----
+  - name: openclaw
+    description: "OpenClaw multi-agent system on mac-mini"
+    status: active
+    created: 2026-04-15
+  - name: hermes
+    description: "Hermes Agent — identity-bearing assistant on mac-mini"
+    status: active
+    created: 2026-04-15
+  - name: billing-proxy
+    description: "Anthropic billing proxy (Claude Max OAuth → API)"
+    status: active
+    created: 2026-04-15
+  - name: claude-mac
+    description: "Claude Code on the MacBook (interactive)"
+    status: active
+    created: 2026-04-15
+  - name: claude-mini
+    description: "Claude Code on the mac-mini (24/7 OpenClaw bots)"
+    status: active
+    created: 2026-04-15
+
+  # ----- named agents -----
+  - name: viktor
+    description: "Viktor — Codex-harness agent (gpt-5.5 via codex)"
+    status: active
+    created: 2026-05-04
+  - name: anton
+    description: "Anton — OpenClaw agent (claude-opus-4-7)"
+    status: active
+    created: 2026-04-15
+
+  # ----- products / projects -----
+  - name: paperclip
+    description: "Paperclip local AI project manager (localhost:3100)"
+    status: active
+    created: 2026-04-15
+  - name: open-design
+    description: "Open Design daemon (localhost:7456)"
+    status: active
+    created: 2026-05-02
+  - name: gramgpt
+    description: "GramGPT (gptgrammar) project"
+    status: active
+    created: 2026-04-15
+  - name: dogma
+    description: "Dogma.ru design project"
+    status: active
+    created: 2026-04-15
+
+  # ----- meta scope (system-level events) -----
+  - name: activity-mesh
+    description: "Self-events from activity-mesh itself (heartbeat, compile, canary)"
+    status: active
+    created: 2026-05-04
+
+  # ----- examples of lifecycle transitions -----
+  # template for a time-bounded engagement scope:
+  - name: project:client-x
+    description: "Example: time-bounded client engagement"
+    status: archived
+    created: 2026-05-04
+    expires: 2026-05-18
+    replaces: null
+    replaced_by: null
+
+  # template for a deprecated/superseded scope:
+  - name: legacy-bot
+    description: "Example: superseded by `viktor`"
+    status: deprecated
+    created: 2026-04-15
+    replaces: null
+    replaced_by: viktor

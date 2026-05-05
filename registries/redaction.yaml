@@ -1,0 +1,120 @@
+# activity-mesh — tier-1 redaction regex pack (declarative)
+#
+# This file is the *canonical* declaration of redaction patterns. The Go
+# package `pkg/redact` keeps a hand-written compiled copy for speed; this
+# YAML is the source of truth for documentation, audits, and any other
+# language binding (Python wiki-compiler, shell hooks, MCP server).
+#
+# Replacement form: [REDACTED:<type>:<len>] where {len} = original byte length.
+# Audit log records SHA-256 first-12 hex of the original (truncatable).
+#
+# Order matters: longer/more specific patterns first to avoid sub-matches.
+schema_version: 1
+
+patterns:
+  # ----- known credential formats -----
+  - name: anthropic_key
+    description: "Anthropic API/admin/oauth-app keys"
+    kind: credential
+    regex: 'sk-ant-(?:api03|admin01|oat01)-[A-Za-z0-9_\-]{93}AA'
+    replacement: '[REDACTED:anthropic_key:{len}]'
+
+  - name: openai_key
+    description: "OpenAI legacy + project-scoped keys"
+    kind: credential
+    regex: 'sk-(?:proj-)?[A-Za-z0-9_\-]{20,200}'
+    replacement: '[REDACTED:openai_key:{len}]'
+
+  - name: github_token
+    description: "GitHub PATs and fine-grained tokens"
+    kind: credential
+    regex: '\b(?:gh[ps]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b'
+    replacement: '[REDACTED:github_token:{len}]'
+
+  - name: aws_access_key
+    description: "AWS access key IDs (AKIA/ASIA/etc)"
+    kind: credential
+    regex: '\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b'
+    replacement: '[REDACTED:aws_key:{len}]'
+
+  - name: slack_token
+    description: "Slack xoxa/b/p/r/s tokens"
+    kind: credential
+    regex: 'xox[abrsp]-[A-Za-z0-9-]{10,72}'
+    replacement: '[REDACTED:slack_token:{len}]'
+
+  - name: telegram_bot
+    description: "Telegram bot tokens (bot_id:hash)"
+    kind: credential
+    regex: '\b\d{9,10}:[A-Za-z0-9_\-]{35}\b'
+    replacement: '[REDACTED:telegram_bot:{len}]'
+
+  - name: jwt
+    description: "JSON Web Tokens (any audience)"
+    kind: credential
+    regex: 'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9._+/=\-]+'
+    replacement: '[REDACTED:jwt:{len}]'
+
+  - name: private_key_pem
+    description: "PEM-encoded private keys (RSA/EC/DSA/OPENSSH/PGP)"
+    kind: credential
+    # multiline; producer-side already uses (?s) flag
+    regex: '-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----.+?-----END[^-]+-----'
+    replacement: '[REDACTED:private_key:{len}]'
+
+  - name: db_url
+    description: "Connection URLs with embedded creds (pg/mysql/mongo)"
+    kind: credential
+    regex: '(?:postgres|mysql|mongodb)(?:\+srv)?://[^:\s]+:[^@\s]+@[^\s/]+'
+    replacement: '[REDACTED:db_url:{len}]'
+
+  - name: eth_private_key
+    description: "Ethereum-style 32-byte hex private keys"
+    kind: credential
+    regex: '\b0x[a-fA-F0-9]{64}\b'
+    replacement: '[REDACTED:eth_key:{len}]'
+
+  - name: btc_address
+    description: "Bitcoin segwit/taproot addresses"
+    kind: pii
+    regex: '\bbc1[a-z0-9]{39,59}\b'
+    replacement: '[REDACTED:btc_addr:{len}]'
+
+  # ----- PII -----
+  - name: email
+    description: "Email addresses"
+    kind: pii
+    regex: '\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'
+    replacement: '[REDACTED:email:{len}]'
+
+  # ----- environment leaks -----
+  - name: user_path
+    description: "Maxim's home dir prefix (/Users/maksimkravcov)"
+    kind: env
+    regex: '/Users/maksimkravcov\b'
+    replacement: '[REDACTED:user_path:{len}]'
+
+  - name: lan_ip
+    description: "RFC1918 private LAN IPs (10/8, 192.168/16, 172.16/12)"
+    kind: env
+    regex: '\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b'
+    replacement: '[REDACTED:lan_ip:{len}]'
+
+# Allowlist: regex matches that should NEVER be redacted, even if they look
+# high-entropy. These are content addresses, not secrets.
+allowlist:
+  - name: uuid
+    description: "Canonical UUIDs (36-char with dashes) are not secrets"
+    regex: '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
+
+  - name: git_sha
+    description: "Git SHA-40 hex is content-addressed, not a secret"
+    regex: '\b[0-9a-f]{40}\b'
+
+  - name: sha256_hex
+    description: "SHA-256 hex digests are content-addressed"
+    regex: '\b[0-9a-f]{64}\b'
+
+  - name: ulid
+    description: "ULIDs (Crockford base32, 26 chars) are content-addressed"
+    regex: '\b[0-9A-HJKMNP-TV-Z]{26}\b'

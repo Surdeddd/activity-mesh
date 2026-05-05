@@ -1,0 +1,84 @@
+# activity-mesh — event kind registry
+#
+# Lifecycle: core kinds are version-locked (changing them is a v2 breaking
+# change). Extensions are namespaced (org/name) and can be added freely.
+#
+# Each kind ships a default severity (P0..P3) and an optional default
+# push channel (used when an event is escalated to a notification layer).
+# Producers MAY override; readers SHOULD trust the per-event priority field.
+#
+# Severity convention:
+#   P0 — pager-grade incident
+#   P1 — push-now (oncall)
+#   P2 — important; surfaces in daily digest
+#   P3 — informational; surfaces only on demand
+schema_version: 1
+
+core:
+  - name: install
+    description: "Plugin/skill/dependency installed or updated"
+    severity_default: P3
+    push_channel: ops
+  - name: config
+    description: "Configuration change (settings.json, env, plist, daemon plist)"
+    severity_default: P3
+  - name: decision
+    description: "Architectural or tactical decision recorded"
+    severity_default: P2
+  - name: task
+    description: "Task started/completed"
+    severity_default: P3
+  - name: note
+    description: "Free-form observation, memo, or context note"
+    severity_default: P3
+  - name: status
+    description: "Health/operational status update"
+    severity_default: P3
+  - name: error
+    description: "Error/exception/failure"
+    severity_default: P1
+    push_channel: ops
+  - name: handoff
+    description: "Agent-to-agent context transfer"
+    severity_default: P2
+  - name: heartbeat
+    description: "Liveness signal (silence detector)"
+    severity_default: P3
+  - name: canary
+    description: "Synthetic test event (health check)"
+    severity_default: P3
+  - name: project
+    description: "Git commit / project change"
+    severity_default: P3
+  - name: compile
+    description: "Wiki/index/derived artifact compiled"
+    severity_default: P3
+
+# Extensions: org/name namespace. Add freely. Readers MUST tolerate unknown
+# extensions (skip-or-pass-through, never reject the event).
+extensions:
+  ops/deploy:
+    description: "Production deploy event"
+    severity: P1
+    push_channel: ops
+  ops/incident:
+    description: "Active incident — pager territory"
+    severity: P0
+    push_channel: oncall
+  ops/rollback:
+    description: "Rollback initiated or completed"
+    severity: P1
+    push_channel: ops
+  metrics/threshold_breach:
+    description: "SLO/threshold breached"
+    severity: P2
+    push_channel: ops
+  metrics/threshold_recovered:
+    description: "Threshold recovered to nominal"
+    severity: P3
+  security/auth_event:
+    description: "Authentication or token event of interest"
+    severity: P2
+  security/secret_rotation:
+    description: "Credential rotated"
+    severity: P2

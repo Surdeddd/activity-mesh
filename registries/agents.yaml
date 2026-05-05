@@ -1,0 +1,160 @@
+# activity-mesh — agent registry
+#
+# Each writer that emits events declares itself here. Used by:
+#   - silence detector (per-agent expected-cadence threshold)
+#   - dead-man heartbeat (which agents MUST emit a heartbeat)
+#   - reader UIs (label resolution, host badges)
+#
+# Status enum: active | deprecated | archived
+#   active     — emits expected, missing-heartbeat alerts fire
+#   deprecated — emits accepted, no alerts
+#   archived   — emits not expected; permanent silence is not an incident
+#
+# `expected_silence: true` means this agent is intentionally not emitting;
+# the silence detector skips it. Use for paused / disabled agents.
+schema_version: 1
+
+agents:
+  # ----- claude code instances -----
+  - id: claude-mac
+    description: "Claude Code on the MacBook (interactive)"
+    runtime: claude-code
+    host: macbook
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: claude-mini
+    description: "Claude Code on the mac-mini (OpenClaw bots, 24/7)"
+    runtime: claude-code
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 2
+
+  # ----- standalone agents -----
+  - id: hermes
+    description: "Hermes Agent v0.11+ on mac-mini"
+    runtime: hermes-agent
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 4
+
+  - id: viktor
+    description: "Viktor — Codex-harness (gpt-5.5)"
+    runtime: codex-harness
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  # ----- openclaw bots -----
+  - id: anton
+    description: "Anton — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-billy
+    description: "Billy — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-marina
+    description: "Marina — OpenClaw bot (design)"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-eva
+    description: "Eva — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-jack
+    description: "Jack — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-luna
+    description: "Luna — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-nova
+    description: "Nova — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  - id: openclaw-sage
+    description: "Sage — OpenClaw bot"
+    runtime: openclaw
+    host: mac-mini
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 6
+
+  # ----- daemons / services -----
+  - id: billing-proxy
+    description: "Billing proxy daemon (Node)"
+    runtime: node-daemon
+    host: macbook
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 12
+
+  - id: paperclip
+    description: "Paperclip backend (localhost:3100)"
+    runtime: paperclip-server
+    host: macbook
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 24
+
+  # ----- bridge / channels -----
+  - id: bridge-telegram
+    description: "Claude bridge Telegram channel agent"
+    runtime: claude-code
+    host: macbook
+    status: active
+    expected_silence: false
+    silence_threshold_hours: 12
+
+  # ----- archived (permanently disabled) -----
+  - id: reina
+    description: "Reina — disabled 2026-04-28 per Maxim's directive"
+    runtime: openclaw
+    host: mac-mini
+    status: archived
+    archived_at: 2026-04-28
+    expected_silence: true
+    reason: "permanent disable — does not generate revenue"
+
+  - id: crypto-bot
+    description: "Crypto trading bot — disabled 2026-04-28"
+    runtime: openclaw
+    host: mac-mini
+    status: archived
+    archived_at: 2026-04-28
+    expected_silence: true
+    reason: "permanent disable — does not generate revenue"
