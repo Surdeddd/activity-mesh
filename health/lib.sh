@@ -13,14 +13,16 @@ set -uo pipefail
 : "${ACTIVITY_MESH_LOG:=$HOME/.local/state/activity-mesh}"
 mkdir -p "$ACTIVITY_MESH_STATE" "$ACTIVITY_MESH_LOG" 2>/dev/null || true
 
-# host detection (reused by silence/canary/sync-lag)
+# host detection (reused by silence/canary/sync-lag).
+# Returns the FULL hostname matching JSONL shard naming used by Go emitters
+# (which use os.Hostname()). Strips trailing .local on Darwin since Go does too
+# in the file naming convention (e.g. "MacBook-Pro-Maksim.local" → kept verbatim).
+# Note: shard files are named events-<hostname>.jsonl where <hostname> is os.Hostname()
+# unmodified. This function returns that exact value.
 am_host() {
     case "$(uname -s)" in
-        Darwin) hn=$(hostname -s 2>/dev/null || echo unknown)
-                case "$hn" in *macbook*|*MacBook*) echo macbook ;;
-                              *macmini*|*Mac-mini*|*mini*) echo mac-mini ;;
-                              *) echo "$hn" ;; esac ;;
-        Linux)  hostname -s 2>/dev/null || echo linux ;;
+        Darwin) hostname 2>/dev/null || echo unknown ;;
+        Linux)  hostname 2>/dev/null || echo linux ;;
         *)      echo unknown ;;
     esac
 }
