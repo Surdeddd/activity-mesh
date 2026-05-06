@@ -36,6 +36,28 @@ if command -v curl >/dev/null 2>&1; then
     case "$code" in 200|204) ok=1 ;; esac
 fi
 
+# emit hourly canary event into the shard so the canary health-check sees life.
+# Independent of daemon-alive status — emits regardless. Picks first available
+# binary; silent fail if none. Bounded to <2s by command-budget chain.
+emit_canary() {
+    local bin
+    for bin in \
+        "$HOME/Desktop/Проекты/activity-mesh/bin/activity-log-darwin-arm64" \
+        "$HOME/Desktop/Проекты/activity-mesh/bin/activity-log-darwin-amd64" \
+        "/usr/local/bin/activity-log" \
+        "$(command -v activity-log 2>/dev/null)"; do
+        [ -n "$bin" ] && [ -x "$bin" ] || continue
+        "$bin" emit \
+            --kind canary \
+            --scope infra:heartbeat \
+            --agent heartbeat \
+            --summary "hourly heartbeat $(date -u +%FT%TZ) ok=$1" \
+            >/dev/null 2>&1
+        return 0
+    done
+}
+emit_canary "$ok" || true
+
 # 2. update miss counter
 prev=$(read_int "$MISS_FILE")
 if [ "$ok" -eq 1 ]; then
