@@ -97,16 +97,28 @@ tb_pct=$(( tb_avg * 100 / 500 ))
 
 # verdict from health/last-health.json
 verdict="OK"
+verdict_emoji="✅"
+verdict_level_en="OK"
+verdict_level_ru="OK"
 if [ -f "$STATE/last-health.json" ]; then
     mt=$(/usr/bin/jq -r '.summary.max_tier // 0' "$STATE/last-health.json" 2>/dev/null)
-    case "$mt" in 3) verdict="DEGRADED";; 4) verdict="CRITICAL";; *) verdict="OK";; esac
+    case "$mt" in
+        3) verdict="DEGRADED"; verdict_emoji="⚠️"; verdict_level_en="WARN"; verdict_level_ru="ВНИМАНИЕ" ;;
+        4) verdict="CRITICAL"; verdict_emoji="🚨"; verdict_level_en="CRITICAL"; verdict_level_ru="КРИТИЧНО" ;;
+        *) verdict="OK"; verdict_emoji="✅"; verdict_level_en="OK"; verdict_level_ru="OK" ;;
+    esac
 fi
 
-DIGEST=$(cat <<EOF
-*activity-mesh weekly* — ${iso_week}
+ts_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+host_short=$(hostname -s 2>/dev/null || echo "?")
 
-**${verdict}**
-• ${events_now} events captured ${trend}
+DIGEST=$(cat <<EOF
+📊 *Activity-mesh weekly digest / Недельный дайджест Activity-mesh* · ${verdict_emoji} ${verdict_level_en} / ${verdict_level_ru}
+
+Week ${iso_week}. Status: **${verdict}**.
+
+📊 Details:
+• events captured: ${events_now} ${trend}
 • top scopes: ${top_scopes:-none}
 • top agents: ${top_agents:-none}
 • alerts fired: ${alerts_count}
@@ -115,6 +127,25 @@ DIGEST=$(cat <<EOF
 
 per-host counts:
 ${host_lines}
+⚡ Action: automatic — keep watching (silence ≠ OK)
+
+━━━━━━━━━━━━━━━━━
+
+🇷🇺 Неделя ${iso_week}. Status: **${verdict}**.
+
+📊 Детали:
+• events captured: ${events_now} ${trend}
+• top scopes: ${top_scopes:-none}
+• top agents: ${top_agents:-none}
+• alerts fired: ${alerts_count}
+• self-heals: ${heals_count}
+• token budget avg: ${tb_avg}/500 ambient (${tb_pct}% от cap)
+
+per-host counts:
+${host_lines}
+⚡ Действие: автоматически — следить (silence ≠ OK)
+
+\`${ts_iso} · ${host_short}\`
 EOF
 )
 
