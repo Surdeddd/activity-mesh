@@ -88,7 +88,38 @@ fi
 CHAT_ID="${TELEGRAM_CHAT_ID:-466332453}"   # Maxim's user_id default
 
 host=$(hostname -s 2>/dev/null || echo unknown)
-TEXT="ACTIVITY-MESH P1: daemon dead. host=$host misses=$misses url=$DAEMON_URL ts=$(date -u +%FT%TZ). RB-6 launchd-stuck."
+ts_iso=$(date -u +%FT%TZ)
+TEXT="🚨 *activity-mesh daemon down* · CRITICAL / КРИТИЧНО
+
+Daemon not responding to /health for $misses consecutive checks — operational history is being lost.
+
+📊 Details:
+• host: $host
+• url: $DAEMON_URL
+• misses: $misses in a row (threshold $THRESHOLD)
+• runbook: RB-6 launchd-stuck
+
+⚡ Action: revive daemon
+\`launchctl list | grep activity-mesh\`
+\`launchctl kickstart -k gui/\$UID/com.maxim.activity-mesh.daemon\`
+log: \`$LOG\`
+
+━━━━━━━━━━━━━━━━━
+
+🇷🇺 Демон не отвечает на /health подряд $misses раз — operational history теряется.
+
+📊 Детали:
+• host: $host
+• url: $DAEMON_URL
+• misses: $misses подряд (threshold $THRESHOLD)
+• runbook: RB-6 launchd-stuck
+
+⚡ Действие: revive daemon
+\`launchctl list | grep activity-mesh\`
+\`launchctl kickstart -k gui/\$UID/com.maxim.activity-mesh.daemon\`
+log: \`$LOG\`
+
+\`$ts_iso · $host\`"
 
 if [ -n "$TOKEN" ] && command -v curl >/dev/null 2>&1; then
     resp=$(curl -s -m 10 -X POST \
