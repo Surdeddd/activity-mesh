@@ -120,9 +120,12 @@ EOF
 
 printf '%s\n' "$DIGEST"
 
-# Snapshot
+# Snapshot — markdown for humans + JSON state for digest-freshness check.
 mkdir -p "$STATE" 2>/dev/null || true
 printf '%s\n' "$DIGEST" > "$STATE/last-weekly-digest.md" 2>/dev/null || true
+printf '{"generated_at":%d,"window":"%s","events":%d,"verdict":"%s"}\n' \
+    "$now" "$iso_week" "$events_now" "$verdict" \
+    > "$STATE/last-digest.json" 2>/dev/null || true
 
 [ "$DRY_RUN" -eq 1 ] && exit 0
 
