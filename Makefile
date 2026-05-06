@@ -4,7 +4,9 @@ BIN_DIR := bin
 CMD     := ./cmd/activity-log
 WATCHER := ./cmd/activity-watcher
 DAEMON  := ./server
-VERSION ?= dev
+# Version source: VERSION file (committed) → fallback `dev`. Override on the
+# CLI for ad-hoc builds: `make build VERSION=0.2.1-rc.1`.
+VERSION ?= $(shell cat VERSION 2>/dev/null || echo dev)
 
 GO ?= go
 GOFLAGS := -trimpath -ldflags="-s -w -X main.version=$(VERSION)"
