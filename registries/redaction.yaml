@@ -31,6 +31,12 @@ patterns:
     regex: '\b(?:gh[ps]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b'
     replacement: '[REDACTED:github_token:{len}]'
 
+  - name: npm_token
+    description: "npm registry auth tokens (npm_xxx, 40 chars total)"
+    kind: credential
+    regex: '\bnpm_[A-Za-z0-9]{36}\b'
+    replacement: '[REDACTED:npm_token:{len}]'
+
   - name: aws_access_key
     description: "AWS access key IDs (AKIA/ASIA/etc)"
     kind: credential
