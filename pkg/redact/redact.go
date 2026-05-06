@@ -55,6 +55,12 @@ var rules = []*rule{
 		re:      regexp.MustCompile(`\b(?:gh[ps]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`),
 	},
 	{
+		name:    "npm_token",
+		kind:    "credential",
+		repType: "npm_token",
+		re:      regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`),
+	},
+	{
 		name:    "aws_access_key",
 		kind:    "credential",
 		repType: "aws_key",

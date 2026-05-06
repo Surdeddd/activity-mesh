@@ -1,108 +1,125 @@
 # activity-mesh
 
-> Cross-agent activity layer for multi-machine, multi-runtime AI agent setups. Agents naturally know what other agents do — without explicit tool calls, without bloating context, across all OSes.
+> Shared activity log for multi-machine, multi-runtime AI agent setups. Agents see what other agents did — without explicit tool calls, without bloating context, across all OSes.
 
-**Status**: v1 in development. Open source (MIT). Single-user / personal-infra focus; multi-tenant explicitly out of scope.
+**Status**: v1 in development. MIT. Single-user / personal-infra focus.
 
 ## The problem
 
-You run multiple AI agent systems across multiple machines:
-- **Claude Code** sessions on macbook + mac-mini
-- **Hermes Agent** on mac-mini
-- **OpenClaw** swarm of 13 specialized bots on mac-mini
-- **Codex** (Виктор) bot via codex-harness
-- *future*: Linux PC, Windows machine, new SDKs (Gemini, Ollama, ...)
+Run AI agents across multiple machines and runtimes — Claude Code sessions, custom agents on remote hosts, scheduled bots, CLI tools. Each agent has its own memory: provider auto-memory, project notes, vector stores, wiki-style knowledge bases.
 
-Each system has **its own memory** — Claude Code auto-memory, Hermes SOUL.md, OpenClaw shared/KB, mempalace MCP, Obsidian llm-wiki, bridge channel memory. Total: 5+ parallel memory layers.
+**The gap**: when one agent does something important, other agents don't know. Cross-system awareness is missing. Existing options don't fit personal infra: vendor-locked SaaS (Mem0/Letta/Zep), heavy databases (Postgres), or ad-hoc shared files that drift.
 
-**The gap**: when one agent does something important, **other agents don't know**. You ask Claude on macbook "что Hermes делал на mac-mini" — Claude has no idea. You install a plugin on macbook in evening, ask Hermes about it next morning — Hermes can't see it. You git-commit a project, OpenClaw bot doesn't notice. Cross-system awareness is missing.
+## What it solves
 
-**Existing solutions don't fit**:
-- Mem0/Letta/Zep — vendor lock, monthly bill, designed for cloud-first SaaS
-- Postgres — daemon dependency, single point of failure
-- Slack/Notion — out of scope, not personal-infra
-- DIY ad-hoc files — drift, conflicts, no auto-pickup
+A shared activity log that is:
 
-## What activity-mesh provides
+1. **Auto-captured** — filesystem watchers + git hooks + session hooks emit events without agent intervention.
+2. **Auto-injected** — `UserPromptSubmit` hook detects intent and injects a scoped slice into the agent's context invisibly. Empty when no events match.
+3. **Token-cheap** — typical injection ~180 tokens; explicit budget envelope.
+4. **Cross-machine** — per-host JSONL shards synced via Syncthing (zero conflicts by construction).
+5. **Cross-OS** — single Go binary cross-compiled for macOS/Linux/Windows; YAML-described supervisors (launchd/systemd/Task Scheduler) and watchers (fswatch/inotify/USN).
+6. **Coexists** — adds a *history* layer (when/who) on top of existing memory layers (state truth, knowledge, semantic recall) — clear boundary rules, no replacement.
+7. **Self-monitoring** — 19 health checks, dead-man heartbeat (independent process), weekly digest, recovery runbook.
+8. **Privacy-first** — 3-tier redaction (regex + entropy + NER) at write time, before file hits disk.
 
-A **shared activity log** that:
-1. **Auto-captures important events** without agent intervention (filesystem watchers, git hooks, session hooks, tool trackers — 11 sources today)
-2. **Auto-injects relevant context** when agents need it (UserPromptSubmit hook detects intent, fetches scoped slice, injects invisibly)
-3. **Costs ~0 tokens ambient** when no events are relevant (typical: 178 tokens; empty: 48; worst: 798 — explicit budget envelope)
-4. **Syncs across all your machines** via Syncthing (per-host shards = zero conflicts ever)
-5. **Survives all OSes** — macOS, Linux, Windows (single Go binary cross-compiled, abstraction YAML for supervisor/watcher)
-6. **Layers on top of existing memory systems**, not replaces them — clear boundary rules: state truth → MEMORY.md, knowledge → wiki, history → activity-mesh, semantic → mempalace
-7. **Self-monitors and self-heals** — 19 health checks, dead-man heartbeat (independent process), weekly "all OK" digest, recovery runbook
-8. **Privacy-first** — 3-tier redaction (regex + entropy + NER) at write time, before file even hits disk
+## How it works
 
-## Quick start (will be live after P2)
+```
+┌─────────────────┐                         ┌─────────────────┐
+│  host A         │   Syncthing             │  host B         │
+│                 │ ◄────────────────────► │                 │
+│  per-host JSONL │  per-host JSONL shards  │  per-host JSONL │
+│  daemon :7459   │                         │  daemon :7459   │
+│  MCP server     │                         │  MCP server     │
+└────────▲────────┘                         └────────▲────────┘
+         │                                           │
+         │  query / emit / inject                    │
+         │                                           │
+   ┌─────┴─────┐                              ┌─────┴─────┐
+   │  agent A  │                              │  agent B  │
+   └───────────┘                              └───────────┘
+```
+
+- **Append-only** per-host JSONL shards (one host writes one shard, never two writers per file → zero merge conflicts).
+- **ULID + monotonic_seq** for deterministic ordering.
+- **SQLite + FTS5** indexer for sub-100ms search.
+- **HTTP daemon** at `:7459` for query and emit; **MCP server** for IDE/agent integrations.
+- **Open registries** (`kinds.yaml`, `scopes.yaml`, `agents.yaml`, `redaction.yaml`) — schema is data, not code.
+
+## Quick start
 
 ```bash
 # install (mac/linux)
 curl -fsSL https://raw.githubusercontent.com/Surdeddd/activity-mesh/main/installers/bootstrap.sh | bash
 
-# emit event manually
+# emit
 activity-log emit --kind decision --scope project:foo --summary "switched to Bun.fetch"
 
-# query recent
+# query
 activity-log query --hours 24
 
-# auto-capture daemon (started via launchd/systemd)
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.activity-mesh.watcher.plist
-
-# query API daemon (SQLite + FTS5 indexer + HTTP)
-activity-mesh-daemon --port 7459 &
-curl http://localhost:7459/health
-curl 'http://localhost:7459/recent?scope=project:openclaw&hours=24&limit=20'
+# query daemon (HTTP)
+curl 'http://localhost:7459/recent?scope=project:foo&hours=24&limit=20'
 curl 'http://localhost:7459/search?q=billing+oauth&limit=10'
 curl 'http://localhost:7459/digest?window=today&group_by=scope'
+
+# health
+bash health/master.sh | jq .summary
 ```
 
-## Building the daemon
-
-The daemon needs cgo for the SQLite FTS5 driver:
+## Building
 
 ```bash
-# native build (any host)
-CGO_ENABLED=1 go build -tags sqlite_fts5 -o bin/activity-mesh-daemon ./server
-
-# darwin/arm64 + darwin/amd64 cross-compile from a Mac (works out of the box)
-GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -tags sqlite_fts5 -o bin/activity-mesh-daemon-darwin-arm64 ./server
-
-# linux/windows: cgo cross-compile from macOS requires a non-Apple toolchain
-# (zig cc, musl-cross-compile, ...). Easiest: build natively on the target host:
-ssh linux-host 'cd /path/activity-mesh && CGO_ENABLED=1 go build -tags sqlite_fts5 -o bin/activity-mesh-daemon ./server'
+make build         # cross-compile CLI + watcher (no cgo)
+make build-daemon  # native build daemon (cgo + sqlite_fts5)
+make verify        # vet + test + shellcheck
 ```
 
-## Methodology
+The daemon needs cgo for the SQLite FTS5 driver. Cross-compile from macOS to other Macs works; for Linux/Windows build natively on the target.
 
-Built via **agent swarm research + super-plan iteration**:
-- 8+ parallel agents on Claude Opus 4.7 surveyed: industry frameworks (Letta/Mem0/Zep/CrewAI), distributed event log patterns, Karpathy LLM Wiki principles, multi-runtime SDK integration, privacy/redaction tooling, clock consensus mechanics
-- 5 super-plan iterations (v1 → v4) refined design
-- 3 adversarial premortems caught 30+ edge cases before deploy
-- All decisions documented with explicit acceptance criteria + premortem mitigations
+## Layout
 
-See [METHODOLOGY.md](./METHODOLOGY.md) for full research bibliography.
+```
+cmd/activity-log/      # Cobra CLI (init, emit, query, status)
+cmd/activity-watcher/  # fsnotify daemon
+server/                # HTTP query daemon (:7459)
+pkg/event/             # ULID + redaction + sanitize
+pkg/redact/            # 14 regex patterns + Shannon entropy ≥4.5
+pkg/index/             # SQLite FTS5
+pkg/registry/          # YAML loader/validator
+mcp/                   # Node stdio MCP server
+hooks/                 # SessionStart digest + UserPromptSubmit auto-context
+health/                # 19 checks + dead-man heartbeat + master runner
+installers/            # bootstrap.sh / .ps1 + launchd/systemd templates
+registries/            # kinds.yaml / scopes.yaml / agents.yaml / redaction.yaml
+```
 
-## Architecture
+## Layered memory model
 
-5 read layers + 11 auto-capture sources + per-host JSONL + SQLite FTS5 + HTTP daemon. Full spec in [ARCHITECTURE.md](./ARCHITECTURE.md).
+activity-mesh is a single layer in a stack — it's the **history** layer. Recommended boundary:
+
+| layer | role | example query |
+|---|---|---|
+| state truth | active rules, current preferences | "what's our policy on X?" |
+| knowledge wiki | patterns, decisions, methodology | "how do we handle Y?" |
+| **activity-mesh** | **operational history** | **"when did Z happen / who did Z?"** |
+| semantic index | recall by association | "things related to X" |
+
+History does not replace state truth. Don't cite activity events as canonical state — query the state layer first.
 
 ## Roadmap
 
-- **v1** (this repo) = observability layer. Agents **know** what other agents did.
-- **v2** (separate project) = action propagation. "Hermes installed X → Claude installs X too." Different class — needs orchestrator. Honestly scoped out.
+- v1: cross-machine sync, auto-context injection, MCP integration, health monitoring (current)
+- v2: tier-3 NER redaction (offline weekly batch), digest snapshots, compactor for >90-day events
+- v3: Linux + Windows installer parity, multi-runtime SDK adapters
 
-See [ROADMAP.md](./ROADMAP.md) for detailed phases.
+See `ROADMAP.md` for detailed milestones.
+
+## Inspiration
+
+This project was inspired by **Andrej Karpathy's LLM Wiki** essay and his broader thinking on LLMs as compilers — separate the *spec source* (versioned schema, redaction rules, registries) from the *output artifact* (events). The same separation drives the design here: registries are spec; events are artifact.
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
-
-## Acknowledgments
-
-Heavy inspiration from:
-- Andrej Karpathy — [LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f), Sequoia Ascent 2026 keynote on agentic engineering
-- Forrest Chang — [andrej-karpathy-skills CLAUDE.md](https://github.com/forrestchang/andrej-karpathy-skills) (60K stars, 4 behavioral principles)
-- Mem0 — token-efficient retrieval algorithms
-- Anthropic — Skills progressive disclosure pattern
+MIT.
