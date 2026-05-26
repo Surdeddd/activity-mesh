@@ -214,13 +214,25 @@ sources:
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Pre-create the bin so resolveBin's existence check passes and the
+	// value round-trips through fillDefaults unchanged (no PATH fallback).
+	binPath := filepath.Join(dir, "activity-log")
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Patch yaml in place: swap /tmp/activity-log for the tmpdir path so the
+	// test stays hermetic regardless of what's on the host's PATH.
+	patched := strings.Replace(yaml, "/tmp/activity-log", binPath, 1)
+	if err := os.WriteFile(cfgPath, []byte(patched), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
 	cfg.fillDefaults()
-	if cfg.ActivityLogBin != "/tmp/activity-log" {
-		t.Errorf("bin: %q", cfg.ActivityLogBin)
+	if cfg.ActivityLogBin != binPath {
+		t.Errorf("bin: %q (want %q)", cfg.ActivityLogBin, binPath)
 	}
 	if cfg.DebounceMs != 7500 || cfg.Debounce != 7500*time.Millisecond {
 		t.Errorf("debounce ms=%d dur=%s", cfg.DebounceMs, cfg.Debounce)

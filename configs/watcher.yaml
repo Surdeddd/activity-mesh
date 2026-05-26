@@ -1,9 +1,11 @@
 # activity-mesh watcher config — 11 auto-capture sources from ARCHITECTURE.md.
 #
 # Place at ~/.config/activity-mesh/watcher.yaml or pass --config flag.
-# Edit paths/templates to taste; ~ is expanded to $HOME.
+# Edit paths/templates to taste; ~ is expanded to $HOME (including
+# activity_log_bin). If the absolute path doesn't exist, the watcher falls
+# back to PATH lookup by basename so cross-machine drift is survivable.
 
-activity_log_bin: /usr/local/bin/activity-log
+activity_log_bin: ~/.local/bin/activity-log
 debounce_ms: 5000
 
 sources:

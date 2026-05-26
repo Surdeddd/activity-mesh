@@ -73,6 +73,7 @@ func (c *Config) fillDefaults() {
 	if c.ActivityLogBin == "" {
 		c.ActivityLogBin = defaultActivityLog
 	}
+	c.ActivityLogBin = resolveBin(expandHome(c.ActivityLogBin))
 	if c.DebounceMs > 0 {
 		c.Debounce = time.Duration(c.DebounceMs) * time.Millisecond
 	} else {
@@ -92,6 +93,30 @@ func expandHome(p string) string {
 		if h, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(h, p[2:])
 		}
+	}
+	return p
+}
+
+// resolveBin returns the bin path to use for fork/exec. If the configured
+// absolute path doesn't exist, fall back to a PATH lookup by basename so the
+// daemon survives common cross-machine drift (e.g. binary installed to
+// ~/.local/bin vs /usr/local/bin). The original path is kept as-is when it
+// exists or when PATH lookup also fails — the actual exec will produce the
+// real error in that case.
+func resolveBin(p string) string {
+	if p == "" {
+		return p
+	}
+	// Bare name: let exec.LookPath via Go's stdlib handle PATH.
+	if !strings.ContainsRune(p, filepath.Separator) {
+		return p
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	if alt, err := exec.LookPath(filepath.Base(p)); err == nil {
+		log.Printf("activity_log_bin: configured %q missing, falling back to %q from PATH", p, alt)
+		return alt
 	}
 	return p
 }
