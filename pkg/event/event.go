@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -213,7 +214,11 @@ func nextSeq(storeDir, host string) (uint64, error) {
 		return 0, err
 	}
 	defer flockRelease(f) //nolint:errcheck
-	buf, err := os.ReadFile(path)
+	// Read from the locked handle, not a fresh os.ReadFile(path): on Windows
+	// LockFileEx is a mandatory byte-range lock, so a second handle reading the
+	// locked region fails ("another process has locked a portion of the file").
+	// The handle holding the lock can always read it.
+	buf, err := io.ReadAll(f)
 	if err != nil {
 		return 0, err
 	}
