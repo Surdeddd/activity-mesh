@@ -27,6 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `~/.config/activity-mesh/scopes-cache` is absent, but with a populated
     cache (one bare scope per line) prompts mentioning a project name now
     inject that project's recent slice.
+- L2 `session-start-digest.sh` was silently dead for the same reason: it
+  called `--format digest` / `--format ulid` (only `text|json` exist),
+  `--since-ulid` and `--priority` (no such flags). The CLI has no ULID
+  cursor and `--since` takes only durations, so the per-session
+  ULID-delta is gone; the digest now queries a 24h recent window plus
+  `--kind error --since 30d` for incidents. Header unchanged.
+- `nextSeq` read the monotonic-counter file via a second handle
+  (`os.ReadFile(path)`) while holding an exclusive lock on the first.
+  On Windows `LockFileEx` is a mandatory byte-range lock, so that read
+  failed ("another process has locked a portion of the file") — the
+  Windows `test` CI job had been red since v0.2.0. Now reads from the
+  locked handle (`io.ReadAll(f)`); behaviour is unchanged on POSIX.
 
 ## [0.2.0] — 2026-05-06
 
