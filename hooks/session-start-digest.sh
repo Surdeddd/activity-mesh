@@ -1,8 +1,8 @@
 #!/bin/bash
 # session-start-digest — Layer 2 of read stack.
-# Reads SessionStart hook JSON from stdin, queries activity-log for events since
-# last seen ULID for this session, outputs Claude Code hookSpecificOutput JSON.
-# Silent (zero token cost) when no new events. Always exit 0.
+# Reads SessionStart hook JSON from stdin, queries activity-log for recent
+# events, outputs Claude Code hookSpecificOutput JSON.
+# Silent (zero token cost) when no events. Always exit 0.
 
 set -uo pipefail
 
@@ -22,16 +22,13 @@ if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
     exit 0
 fi
 
-LAST_SEEN_FILE="$STATE_DIR/last-seen-$SESSION_ID"
-LAST_SEEN=""
-[ -f "$LAST_SEEN_FILE" ] && LAST_SEEN=$(/usr/bin/tr -d '[:space:]' < "$LAST_SEEN_FILE" 2>/dev/null || echo "")
+# Recent activity window. The current activity-log CLI has no ULID cursor
+# (--since-ulid) and --since accepts only durations, not absolute times — so a
+# 24h window is the closest proxy for "since last session".
+DIGEST=$("$BIN" query --since 24h --limit 8 --format text 2>/dev/null || true)
 
-# Query: delta since cursor (≤8) + always include P0/P1 from last 7d (priority cap)
-QUERY_ARGS=(query --limit 8 --format digest)
-[ -n "$LAST_SEEN" ] && QUERY_ARGS+=(--since-ulid "$LAST_SEEN")
-DIGEST=$("$BIN" "${QUERY_ARGS[@]}" 2>/dev/null || true)
-
-PRIORITY=$("$BIN" query --priority "P0,P1" --since 7d --limit 5 --format digest 2>/dev/null || true)
+# Incidents: error events are rare, so widen to 30d (matches user-prompt-router).
+PRIORITY=$("$BIN" query --kind error --since 30d --limit 5 --format text 2>/dev/null || true)
 
 # Combine; if both empty, silent exit
 COMBINED=""
@@ -51,10 +48,6 @@ MAX_CHARS=1000
 if [ "${#COMBINED}" -gt "$MAX_CHARS" ]; then
     COMBINED="$(printf '%s' "$COMBINED" | /usr/bin/cut -c 1-"$MAX_CHARS")…[truncated]"
 fi
-
-# Save new last-seen ULID (newest from current digest, querying head row)
-NEW_LAST=$("$BIN" query --limit 1 --format ulid 2>/dev/null | /usr/bin/tr -d '[:space:]' || echo "")
-[ -n "$NEW_LAST" ] && printf '%s' "$NEW_LAST" > "$LAST_SEEN_FILE" 2>/dev/null
 
 # Emit Claude Code hook JSON
 HEADER="recent activity since last session:"
