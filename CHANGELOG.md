@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed ("another process has locked a portion of the file") — the
   Windows `test` CI job had been red since v0.2.0. Now reads from the
   locked handle (`io.ReadAll(f)`); behaviour is unchanged on POSIX.
+- Both read hooks resolved the `activity-log` binary only via `command -v`,
+  which misses it under launchd / non-interactive shells that lack
+  `~/.local/bin` on PATH (e.g. the Mac-mini agents) — so the hooks silently
+  no-op'd there. Added a `$HOME/.local/bin/activity-log` fallback to both
+  hooks' binary resolution.
 
 ## [0.2.0] — 2026-05-06
 

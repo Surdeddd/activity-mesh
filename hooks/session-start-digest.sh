@@ -17,6 +17,8 @@ SESSION_ID=$(echo "$INPUT" | /usr/bin/jq -r '.session_id // "unknown"' 2>/dev/nu
 
 # Resolve activity-log binary (graceful degrade if missing — P2 not yet shipped)
 BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
+# Fallback: launchd/non-interactive shells often lack ~/.local/bin on PATH.
+[ -z "$BIN" ] && [ -x "$HOME/.local/bin/activity-log" ] && BIN="$HOME/.local/bin/activity-log"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
     log "skip session=$SESSION_ID: activity-log binary not found"
     exit 0

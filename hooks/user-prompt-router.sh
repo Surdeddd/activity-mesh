@@ -69,6 +69,9 @@ fi
 
 # Resolve binary (graceful degrade)
 BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
+# Fallback: launchd/non-interactive shells (e.g. mac-mini agents) often lack
+# ~/.local/bin on PATH, so command -v misses the binary that is actually there.
+[ -z "$BIN" ] && [ -x "$HOME/.local/bin/activity-log" ] && BIN="$HOME/.local/bin/activity-log"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then log "skip intent=$INTENT: no binary"; exit 0; fi
 
 # Build query args
