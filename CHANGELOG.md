@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `~/.local/bin` on PATH (e.g. the Mac-mini agents) — so the hooks silently
   no-op'd there. Added a `$HOME/.local/bin/activity-log` fallback to both
   hooks' binary resolution.
+- `activity-watcher` recursively added an fsnotify watch for every
+  subdirectory of a recursive source, including `node_modules`, `.git`,
+  vendored binaries and caches. On a node_modules-heavy tree
+  (`~/.openclaw/agents`) this consumed 61k+ file descriptors and hit
+  `kern.maxfilesperproc`, wedging the watcher with "too many open files"
+  so it silently stopped emitting. Recursive walks now skip dependency /
+  VCS / build / cache dirs (`skipWatchDir`), at both init-walk and the
+  runtime create-watch path.
 
 ## [0.2.0] — 2026-05-06
 

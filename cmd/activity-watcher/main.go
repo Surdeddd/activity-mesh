@@ -297,6 +297,21 @@ func runEmit(ctx context.Context, bin string, src Source, ev fsnotify.Event) err
 }
 
 // watchSource runs one fsnotify watcher loop bound to a single Source.
+// skipWatchDir reports dirs that explode the recursive watch/fd count without
+// ever carrying a signal we emit on (dependency trees, VCS, build output,
+// caches). macOS kqueue costs one fd per watched dir, so descending into a
+// node_modules-heavy tree (e.g. ~/.openclaw/agents) can blow past
+// kern.maxfilesperproc and wedge the watcher with "too many open files".
+func skipWatchDir(name string) bool {
+	switch name {
+	case "node_modules", ".git", ".hg", ".svn", "vendor",
+		".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache",
+		"dist", "build", "target", ".next", ".turbo", ".cache":
+		return true
+	}
+	return false
+}
+
 // Recursively walks the path on init to add subdirectories when src.Recursive.
 func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) error {
 	w, err := fsnotify.NewWatcher()
@@ -324,6 +339,9 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 				return nil
 			}
 			if d.IsDir() && p != addRoot {
+				if skipWatchDir(d.Name()) {
+					return filepath.SkipDir
+				}
 				_ = w.Add(p)
 			}
 			return nil
@@ -346,7 +364,7 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 				continue
 			}
 			if src.Recursive && ev.Op&fsnotify.Create != 0 {
-				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
+				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() && !skipWatchDir(filepath.Base(ev.Name)) {
 					_ = w.Add(ev.Name)
 				}
 			}
