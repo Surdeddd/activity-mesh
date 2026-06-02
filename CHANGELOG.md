@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `--kind error --since 30d` (no `--priority` flag; `error` is the
     incident `kind`, and the window is widened because error events are
     rare — a 7d window is empty in practice).
+  - `scope` intent now passes `--since 30d` (was the CLI default of 24h).
+    Project-scoped events are infrequent, so a 24h window made named-scope
+    recall almost always empty. The router still no-ops gracefully when
+    `~/.config/activity-mesh/scopes-cache` is absent, but with a populated
+    cache (one bare scope per line) prompts mentioning a project name now
+    inject that project's recent slice.
 
 ## [0.2.0] — 2026-05-06
 

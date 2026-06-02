@@ -77,7 +77,7 @@ case "$INTENT" in
     temporal) ARGS+=(--since 24h) ;;
     status)   ARGS+=(--kind status --since 48h --limit 10) ;;
     incident) ARGS+=(--kind error --since 30d --limit 5) ;;
-    scope)    ARGS+=(--scope "$SCOPE_FILTER" --limit 15) ;;
+    scope)    ARGS+=(--scope "$SCOPE_FILTER" --since 30d --limit 15) ;;
     agent)    ARGS+=(--agent "$AGENT_FILTER" --limit 10) ;;
 esac
 [ -n "$AGENT_FILTER" ] && [ "$INTENT" != "agent" ] && ARGS+=(--agent "$AGENT_FILTER")
