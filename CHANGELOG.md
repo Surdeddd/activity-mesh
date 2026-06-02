@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- L3 `user-prompt-router.sh` was silently dead: it invoked `activity-log
+  query` with flags the v0.2.0 CLI no longer exposes, so every intent
+  produced an empty slice (stderr swallowed by `2>/dev/null`, stdout
+  empty → silent exit). Remapped to the current CLI surface
+  (`--agent --format --host --kind --scope --since --limit`):
+  - `--format compact` → `--format text` (only `text|json` are valid),
+    reviving the `temporal` / `scope` / `agent` intents.
+  - `status` intent `--status active` → `--kind status --since 48h`
+    (no `--status` flag exists; status is now a first-class `kind`).
+  - `incident` intent `--priority "P0,P1" --since 7d` →
+    `--kind error --since 30d` (no `--priority` flag; `error` is the
+    incident `kind`, and the window is widened because error events are
+    rare — a 7d window is empty in practice).
+
 ## [0.2.0] — 2026-05-06
 
 ### Added

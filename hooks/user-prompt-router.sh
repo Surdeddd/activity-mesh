@@ -72,11 +72,11 @@ BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then log "skip intent=$INTENT: no binary"; exit 0; fi
 
 # Build query args
-ARGS=(query --format compact --limit 8)
+ARGS=(query --format text --limit 8)
 case "$INTENT" in
     temporal) ARGS+=(--since 24h) ;;
-    status)   ARGS+=(--status active --limit 10) ;;
-    incident) ARGS+=(--priority "P0,P1" --since 7d) ;;
+    status)   ARGS+=(--kind status --since 48h --limit 10) ;;
+    incident) ARGS+=(--kind error --since 30d --limit 5) ;;
     scope)    ARGS+=(--scope "$SCOPE_FILTER" --limit 15) ;;
     agent)    ARGS+=(--agent "$AGENT_FILTER" --limit 10) ;;
 esac
