@@ -45,10 +45,12 @@ if [ -z "$COMBINED" ]; then
     exit 0
 fi
 
-# Token cap ≤250 (1 token ≈ 4 chars conservative → 1000 char cap)
+# Token cap ≤250 (1 token ≈ 4 chars conservative → 1000 char cap).
+# Whole-stream bash substring — `cut -c` counts per LINE and never capped
+# multi-line digests (observed ~2050 chars slipping through).
 MAX_CHARS=1000
 if [ "${#COMBINED}" -gt "$MAX_CHARS" ]; then
-    COMBINED="$(printf '%s' "$COMBINED" | /usr/bin/cut -c 1-"$MAX_CHARS")…[truncated]"
+    COMBINED="${COMBINED:0:$MAX_CHARS}…[truncated]"
 fi
 
 # Emit Claude Code hook JSON

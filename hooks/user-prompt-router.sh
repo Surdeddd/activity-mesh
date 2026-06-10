@@ -20,14 +20,18 @@ SESSION_ID="${JQ_OUT##*"${SEP}"}"
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown"
 [ -z "$PROMPT" ] && exit 0
 
-# Per-session token cap — once over budget (>2000), silent for rest of session
-TOKENS_FILE="/tmp/activity-tokens-$SESSION_ID"
+# Per-session token cap — once over budget (>2000), silent for rest of session.
+# Lives in STATE_DIR (not /tmp): respects test isolation, survives /tmp purges,
+# and stale budgets are reaped instead of accumulating forever.
+TOKENS_FILE="$STATE_DIR/tokens-$SESSION_ID"
+/usr/bin/find "$STATE_DIR" -name 'tokens-*' -mtime +1 -delete 2>/dev/null || true
 TOKENS_USED=0
 [ -f "$TOKENS_FILE" ] && { read -r TOKENS_USED < "$TOKENS_FILE" || TOKENS_USED=0; }
 case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
 [ "$TOKENS_USED" -gt 2000 ] && { log "session=$SESSION_ID over budget, silent"; exit 0; }
 
-LOWER=$(printf '%s' "$PROMPT" | /usr/bin/tr '[:upper:]' '[:lower:]')
+# Hooks run with C locale; force UTF-8 or tr leaves Cyrillic uppercase intact
+LOWER=$(printf '%s' "$PROMPT" | LC_ALL=en_US.UTF-8 /usr/bin/tr '[:upper:]' '[:lower:]')
 
 # Anti-triggers (definition / how-to / creation — NOT recall)
 ANTI_RE='что такое|как сделать|как (написать|создать)|напиши|создай|сделай мне|what is|how (do|to|can)|write me|generate|create a'
@@ -54,16 +58,19 @@ if [ -f "$SCOPES_CACHE" ]; then
     done < "$SCOPES_CACHE"
 fi
 
-# Agent-named with alias normalisation
+# Agent-named with alias normalisation. A bare generic "клод/claude" almost
+# always means Claude-the-tool, not the claude-mac agent — it may qualify an
+# already-detected intent but never creates one on its own.
 if [[ "$LOWER" =~ $AGENT_RE ]]; then
+    GENERIC_CLAUDE=0
     case "$LOWER" in
         *хермес*|*hermes*)             AGENT_FILTER="hermes" ;;
         *виктор*|*viktor*)             AGENT_FILTER="viktor" ;;
         *клод-mac*|*claude-mac*)       AGENT_FILTER="claude-mac" ;;
-        *клод*|*claude*)               AGENT_FILTER="claude-mac" ;;
+        *клод*|*claude*)               AGENT_FILTER="claude-mac"; GENERIC_CLAUDE=1 ;;
         *anton*|*antоn*)               AGENT_FILTER="anton" ;;
     esac
-    [ -z "$INTENT" ] && INTENT="agent"
+    [ -z "$INTENT" ] && [ "$GENERIC_CLAUDE" -eq 0 ] && INTENT="agent"
 fi
 [ -z "$INTENT" ] && exit 0
 
@@ -74,10 +81,10 @@ BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
 [ -z "$BIN" ] && [ -x "$HOME/.local/bin/activity-log" ] && BIN="$HOME/.local/bin/activity-log"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then log "skip intent=$INTENT: no binary"; exit 0; fi
 
-# Build query args
-ARGS=(query --format text --limit 8)
+# Build query args — exactly one --limit per intent
+ARGS=(query --format text)
 case "$INTENT" in
-    temporal) ARGS+=(--since 24h) ;;
+    temporal) ARGS+=(--since 24h --limit 8) ;;
     status)   ARGS+=(--kind status --since 48h --limit 10) ;;
     incident) ARGS+=(--kind error --since 30d --limit 5) ;;
     scope)    ARGS+=(--scope "$SCOPE_FILTER" --since 30d --limit 15) ;;
@@ -89,10 +96,11 @@ esac
 RESULT=$("$BIN" "${ARGS[@]}" 2>/dev/null || true)
 [ -z "$RESULT" ] && { log "no events intent=$INTENT"; exit 0; }
 
-# Token cap ≤500 (≈2000 chars). Truncate to top 8 lines, then char-cut
+# Token cap ≤500 (≈2000 chars). Trim to top 8 lines, then hard-cap the whole
+# stream (bash substring — `cut -c` counts per LINE and never capped anything)
 MAX_CHARS=2000
 [ "${#RESULT}" -gt "$MAX_CHARS" ] && RESULT=$(printf '%s\n' "$RESULT" | /usr/bin/head -n 8)
-[ "${#RESULT}" -gt "$MAX_CHARS" ] && RESULT="$(printf '%s' "$RESULT" | /usr/bin/cut -c 1-"$MAX_CHARS")…[truncated]"
+[ "${#RESULT}" -gt "$MAX_CHARS" ] && RESULT="${RESULT:0:$MAX_CHARS}…[truncated]"
 
 NEW_TOKENS=$(( TOKENS_USED + ${#RESULT} / 4 ))
 echo "$NEW_TOKENS" > "$TOKENS_FILE" 2>/dev/null

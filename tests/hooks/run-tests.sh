@@ -169,21 +169,21 @@ end_case
 begin_case "router: temporal intent -> --since 24h"
 run "$ROUTER" "$(pj 'что было сегодня' temporal)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-temporal"
 assert_rc0
-assert_argv "query --format text --limit 8 --since 24h"
+assert_argv "query --format text --since 24h --limit 8"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-temporal"
 end_case
 
 begin_case "router: status intent -> --kind status --since 48h --limit 10"
 run "$ROUTER" "$(pj 'статус по задачам' status)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-status"
 assert_rc0
-assert_argv "query --format text --limit 8 --kind status --since 48h --limit 10"
+assert_argv "query --format text --kind status --since 48h --limit 10"
 assert_emits "UserPromptSubmit" "(status match)" "evt-status"
 end_case
 
 begin_case "router: incident intent -> --kind error --since 30d --limit 5"
 run "$ROUTER" "$(pj 'что упало вчера' incident)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-incident"
 assert_rc0
-assert_argv "query --format text --limit 8 --kind error --since 30d --limit 5"
+assert_argv "query --format text --kind error --since 30d --limit 5"
 assert_emits "UserPromptSubmit" "(incident match)" "evt-incident"
 end_case
 
@@ -192,22 +192,34 @@ mkdir -p "$HOMEDIR/.config/activity-mesh"
 printf 'billing-proxy\n' > "$HOMEDIR/.config/activity-mesh/scopes-cache"
 run "$ROUTER" "$(pj 'billing-proxy deploy logs' scope)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-scope"
 assert_rc0
-assert_argv "query --format text --limit 8 --scope billing-proxy --since 30d --limit 15"
+assert_argv "query --format text --scope billing-proxy --since 30d --limit 15"
 assert_emits "UserPromptSubmit" "(scope match)" "evt-scope"
 end_case
 
 begin_case "router: agent intent -> --agent hermes --limit 10"
 run "$ROUTER" "$(pj 'глянь hermes kanban' agent)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-agent"
 assert_rc0
-assert_argv "query --format text --limit 8 --agent hermes --limit 10"
+assert_argv "query --format text --agent hermes --limit 10"
 assert_emits "UserPromptSubmit" "(agent match)" "evt-agent"
 end_case
 
 begin_case "router: temporal+agent combo -> --since 24h --agent hermes"
 run "$ROUTER" "$(pj 'что делал hermes сегодня' combo)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-combo"
 assert_rc0
-assert_argv "query --format text --limit 8 --since 24h --agent hermes"
+assert_argv "query --format text --since 24h --limit 8 --agent hermes"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-combo"
+end_case
+
+begin_case "router: UPPERCASE Cyrillic prompt -> intents still match (LC_ALL fix)"
+run "$ROUTER" "$(pj 'ЧТО ДЕЛАЛ HERMES СЕГОДНЯ' upcyr)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-upcyr"
+assert_rc0
+assert_argv "query --format text --since 24h --limit 8 --agent hermes"
+assert_emits "UserPromptSubmit" "(temporal match)" "evt-upcyr"
+end_case
+
+begin_case "router: bare generic 'claude' mention -> NOT an agent intent"
+run "$ROUTER" "$(pj 'claude code hooks documentation' bareclaude)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-bare"
+assert_rc0; assert_silent; assert_stub_not_called
 end_case
 
 begin_case "router: malformed JSON stdin -> exit 0, silent"
