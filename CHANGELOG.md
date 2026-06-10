@@ -41,8 +41,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `activity-log query` / `status` return correct results from a fresh
   sync dir with no daemon running (untagged, runs under plain
   `go test ./...`).
+- `activity-log refresh-scopes` — regenerates the L3 router's
+  `scopes-cache` (`$ACTIVITY_MESH_CONFIG`, default
+  `~/.config/activity-mesh/`) from the scopes registry instead of
+  hand-maintaining it. Registry resolution: `--registry PATH`, else the
+  canonical live copy `<sync>/scopes.yaml` (the Syncthing-replicated
+  location `health/checks/schema-drift.sh` already reads), else the
+  repo-checkout seed `./registries/scopes.yaml`. Writes active scopes
+  only, minus those marked `router: false`, atomically (temp file +
+  rename); on read/parse failure it exits non-zero and leaves the
+  existing cache untouched. `--dry-run` prints the would-be content;
+  every run prints a one-line summary (N written, M excluded). The
+  dead-man heartbeat now refreshes the cache hourly (best-effort, same
+  pattern as `clock-sync`).
+- Scopes registry: optional per-scope `router: false` (default true)
+  excludes a scope from the router cache. Set on `hermes`, `viktor`,
+  `claude-mac`, `anton` — the names that collide with the router's
+  agent-intent names (`AGENT_FILTER` case-arms in
+  `hooks/user-prompt-router.sh`); with both intents active the router
+  double-filters `--scope`+`--agent` to an empty slice. Also registered
+  the previously hand-cached-only `rentier` and `deploy` scopes so the
+  generated cache is a superset of the old hand-written whitelist.
 
 ### Fixed
+- `installers/templates/launchd-heartbeat.plist.tmpl` set
+  `ACTIVITY_MESH_STATE={{LOG_DIR}}`, so a template-rendered heartbeat
+  wrote the `clock-sync` offset cache (and miss counters) into the *log*
+  dir while env-less emitters read the default state dir
+  (`~/.local/state/activity-mesh`) — the offset never reached emitted
+  events. Now uses a `{{STATE_DIR}}` placeholder with a comment pinning
+  the correct render value; note that `bootstrap.sh`'s `$STATE_DIR`
+  variable is the `~/.local/share` store dir and must not be reused
+  verbatim here (bootstrap does not render this template). The same
+  stale pattern still exists in `launchd-health.plist.tmpl` and
+  `launchd-weekly-digest.plist.tmpl` (flagged here, deliberately not
+  changed in this pass).
 - ARCHITECTURE.md claimed daemon failure triggers "automatic fallback to
   local" via a client lib. Traced the real paths: the CLI, both read
   hooks, and the stdio MCP server read the JSONL shards directly and
