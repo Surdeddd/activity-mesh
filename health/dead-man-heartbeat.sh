@@ -36,10 +36,8 @@ if command -v curl >/dev/null 2>&1; then
     case "$code" in 200|204) ok=1 ;; esac
 fi
 
-# emit hourly canary event into the shard so the canary health-check sees life.
-# Independent of daemon-alive status — emits regardless. Picks first available
-# binary; silent fail if none. Bounded to <2s by command-budget chain.
-emit_canary() {
+# find the first available activity-log binary (shared by canary + clock-sync).
+find_activity_log() {
     local bin
     for bin in \
         "$HOME/Desktop/Проекты/activity-mesh/bin/activity-log-darwin-arm64" \
@@ -47,16 +45,34 @@ emit_canary() {
         "/usr/local/bin/activity-log" \
         "$(command -v activity-log 2>/dev/null)"; do
         [ -n "$bin" ] && [ -x "$bin" ] || continue
-        "$bin" emit \
-            --kind canary \
-            --scope infra:heartbeat \
-            --agent heartbeat \
-            --summary "hourly heartbeat $(date -u +%FT%TZ) ok=$1" \
-            >/dev/null 2>&1
+        echo "$bin"
         return 0
     done
+    return 1
+}
+AL_BIN=$(find_activity_log) || AL_BIN=""
+
+# emit hourly canary event into the shard so the canary health-check sees life.
+# Independent of daemon-alive status — emits regardless. Picks first available
+# binary; silent fail if none. Bounded to <2s by command-budget chain.
+emit_canary() {
+    [ -n "$AL_BIN" ] || return 0
+    "$AL_BIN" emit \
+        --kind canary \
+        --scope infra:heartbeat \
+        --agent heartbeat \
+        --summary "hourly heartbeat $(date -u +%FT%TZ) ok=$1" \
+        >/dev/null 2>&1
+    return 0
 }
 emit_canary "$ok" || true
+
+# refresh the cached NTP clock offset hourly (feeds clock_offset_ms on every
+# emitted event). Best-effort: the subcommand has its own 3s SNTP timeout and
+# leaves the previous cache untouched on failure — never blocks the heartbeat.
+if [ -n "$AL_BIN" ]; then
+    "$AL_BIN" clock-sync >/dev/null 2>&1 || log "clock-sync failed (offset cache stale)"
+fi
 
 # 2. update miss counter
 prev=$(read_int "$MISS_FILE")

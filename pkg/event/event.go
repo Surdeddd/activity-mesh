@@ -101,6 +101,11 @@ func New(storeDir, kind, scope, summary string, opts ...Option) (*Event, error) 
 		Summary:      summary,
 		MonotonicSeq: seq,
 	}
+	// Cached NTP offset (written by `activity-log clock-sync`). Cheap single
+	// read; missing/garbage file → field omitted, never an error.
+	if ms, ok := readClockOffsetMS(ClockOffsetPath()); ok {
+		e.ClockOffsetMS = ms
+	}
 	for _, o := range opts {
 		o(e)
 	}
