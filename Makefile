@@ -55,3 +55,8 @@ install: ## Install binaries to /usr/local/bin (requires sudo)
 
 clean: ## Remove built binaries
 	rm -rf $(BIN_DIR)
+
+# Appended target — kept at the end (separate from Go `test`) to minimize merge conflicts.
+.PHONY: test-hooks
+test-hooks: ## Run Claude Code hook regression tests (plain bash, no deps)
+	bash tests/hooks/run-tests.sh
