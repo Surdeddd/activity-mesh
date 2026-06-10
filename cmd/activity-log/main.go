@@ -6,6 +6,7 @@
 //	activity-log emit  --kind X --scope Y --summary Z   append a redacted event
 //	activity-log query --since 24h [filters]            read+filter events
 //	activity-log status                                 print last event per host
+//	activity-log compact --keep 90d                     archive old events from this host's shard
 package main
 
 import (
@@ -50,6 +51,7 @@ func main() {
 	root.AddCommand(emitCmd())
 	root.AddCommand(queryCmd())
 	root.AddCommand(statusCmd())
+	root.AddCommand(compactCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

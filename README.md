@@ -68,6 +68,28 @@ curl 'http://localhost:7459/digest?window=today&group_by=scope'
 bash health/master.sh | jq .summary
 ```
 
+## Shard compaction
+
+Shards are append-only and grow unbounded; `compact` keeps the live file lean without losing history:
+
+```bash
+activity-log compact --dry-run     # report what would move, write nothing
+activity-log compact               # archive events older than 90d (default)
+activity-log compact --keep 30d    # custom retention window
+```
+
+Only this host's shard is touched (single-writer invariant). Events older than
+`--keep` move, grouped by month, into `<sync>/archive/events-<host>-YYYY-MM.jsonl.gz`;
+re-runs append additional gzip members, which plain `zcat` reads transparently.
+The live shard is rewritten atomically (temp file + rename + fsync) under the
+same per-host lock `emit` uses, and malformed lines are preserved verbatim —
+never silently dropped. Running daemons re-ingest the rewritten shard safely:
+the index dedupes by ULID and rescans from offset 0 when the file shrinks.
+
+A monthly launchd template ships in `installers/templates/launchd-compact.plist.tmpl`
+(1st of month, 04:40, label `com.activity-mesh.compact`) — render the `{{...}}`
+placeholders and `launchctl bootstrap` it yourself; `bootstrap.sh` does not install it.
+
 ## Building
 
 ```bash
@@ -81,7 +103,7 @@ The daemon needs cgo for the SQLite FTS5 driver. Cross-compile from macOS to oth
 ## Layout
 
 ```
-cmd/activity-log/      # Cobra CLI (init, emit, query, status)
+cmd/activity-log/      # Cobra CLI (init, emit, query, status, compact)
 cmd/activity-watcher/  # fsnotify daemon
 server/                # HTTP query daemon (:7459)
 pkg/event/             # ULID + redaction + sanitize

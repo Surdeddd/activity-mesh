@@ -81,11 +81,7 @@ func WithParentID(id string) Option { return func(e *Event) { e.ParentID = id } 
 // New constructs a fresh event. ULID, timestamp, and monotonic_seq are filled
 // automatically from the SeqStore at storeDir.
 func New(storeDir, kind, scope, summary string, opts ...Option) (*Event, error) {
-	host, _ := os.Hostname()
-	host = strings.TrimSpace(host)
-	if host == "" {
-		host = "unknown"
-	}
+	host := HostName()
 	id, err := newULID()
 	if err != nil {
 		return nil, fmt.Errorf("ulid: %w", err)

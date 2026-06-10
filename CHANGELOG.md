@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `activity-log compact` — shard compaction for this host's
+  `events-<host>.jsonl`. Events older than `--keep` (default `90d`, same
+  duration syntax as `query --since`) move, grouped by month, into
+  `<sync>/archive/events-<host>-YYYY-MM.jsonl.gz`; when a monthly archive
+  already exists the batch is appended as an additional gzip member
+  (concatenated members are valid gzip, plain `zcat` reads them). The
+  live shard is rewritten atomically (temp file in the same dir + fsync +
+  rename) while holding the same per-host exclusive flock the emit path
+  uses (`seq-<host>`); malformed / blank / unterminated lines are
+  preserved verbatim, never archived, never dropped. `--dry-run` reports
+  without writing; `--sync-dir` overrides the configured sync directory.
+  Daemon-safe by construction: the indexer dedupes by ULID
+  (`UNIQUE` + `INSERT OR IGNORE`) and resets its byte cursor to 0 when a
+  shard shrinks, so the post-compaction rescan inserts no duplicates.
+- `installers/templates/launchd-compact.plist.tmpl` — monthly launchd
+  job template (1st of month, 04:40, label `com.activity-mesh.compact`).
+  Template only; `bootstrap.sh` does not load or install it.
+
 ### Fixed
 - L3 `user-prompt-router.sh` was silently dead: it invoked `activity-log
   query` with flags the v0.2.0 CLI no longer exposes, so every intent
