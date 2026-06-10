@@ -126,7 +126,10 @@ Supervisor unit templates live in `installers/templates/`. They use `{{PLACEHOLD
 Placeholders:
 - `{{BIN_PATH}}` — full path to `activity-log` binary (used by daemon unit)
 - `{{WATCHER_BIN}}` — full path to `activity-watcher` binary (used by watcher unit)
-- `{{STATE_DIR}}` — per-host state (`~/.local/share/activity-mesh` or `%LOCALAPPDATA%\activity-mesh`)
+- `{{STATE_DIR}}` — per-host state (`~/.local/share/activity-mesh` or `%LOCALAPPDATA%\activity-mesh`).
+  Exception: the manually-rendered heartbeat template uses it for `ACTIVITY_MESH_STATE`,
+  which must be the *runtime* state dir `~/.local/state/activity-mesh` (see comment in
+  `launchd-heartbeat.plist.tmpl`)
 - `{{CONFIG_DIR}}` — config dir holding `watcher.yaml`
 - `{{SYNC_DIR}}` — Syncthing-replicated source-of-truth
 - `{{LOG_DIR}}` — daemon stdout/stderr path

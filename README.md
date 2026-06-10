@@ -80,6 +80,20 @@ timeout, pure Go) and atomically writes the rounded ms offset to
 automatically; on hosts without the heartbeat schedule it with one cron
 line: `0 * * * * /usr/local/bin/activity-log clock-sync`.
 
+## Router scopes-cache
+
+The L3 router (`hooks/user-prompt-router.sh`) matches prompts against
+`~/.config/activity-mesh/scopes-cache` (one scope name per line).
+`activity-log refresh-scopes` regenerates it from the scopes registry —
+active scopes only, minus those marked `router: false` (scope names that
+collide with the router's agent-intent names, e.g. `hermes`, would
+double-filter `--scope`+`--agent` to empty). It reads the live
+`<sync>/scopes.yaml` when published (falling back to the repo's
+`registries/scopes.yaml`, or `--registry PATH`), writes atomically, and on
+any read/parse failure leaves the existing cache untouched. `--dry-run`
+previews. The dead-man heartbeat refreshes the cache hourly, so registry
+edits propagate to both hosts without hand-editing.
+
 ## Shard compaction
 
 Shards are append-only and grow unbounded; `compact` keeps the live file lean without losing history:
@@ -115,7 +129,7 @@ The daemon needs cgo for the SQLite FTS5 driver. Cross-compile from macOS to oth
 ## Layout
 
 ```
-cmd/activity-log/      # Cobra CLI (init, emit, query, status, compact)
+cmd/activity-log/      # Cobra CLI (init, emit, query, status, compact, clock-sync, refresh-scopes)
 cmd/activity-watcher/  # fsnotify daemon
 server/                # HTTP query daemon (:7459)
 pkg/event/             # ULID + redaction + sanitize

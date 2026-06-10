@@ -20,12 +20,19 @@ diff <(...) <(...)
    - Typo → fix the writer (`activity-log emit --kind ...`) and add migration entry.
    - Malicious / wild → reject by adding to a deny-list and patch the writer.
 2. Commit registry change to `~/Sync/activity` (Syncthing replicates).
-3. Refresh the L3 router's `~/.config/activity-mesh/scopes-cache` — one bare
-   scope per line. There is no `activity-log scopes export` subcommand yet;
-   the cache is hand-maintained. Derive candidates from live data and pick the
-   short, unambiguous ones (avoid generic words like `memory`/`plugins` that
-   would match ordinary prompts, and agent names like `hermes` that the agent
-   intent already covers — those double-filter `--scope`+`--agent` to empty):
+3. Refresh the L3 router's `~/.config/activity-mesh/scopes-cache`:
+
+   ```sh
+   activity-log refresh-scopes            # or --dry-run to preview
+   ```
+
+   The cache is generated from the scopes registry (active scopes minus
+   `router: false`) and also refreshed hourly by the dead-man heartbeat.
+   When registering a new scope, avoid generic words like `memory`/`plugins`
+   that would match ordinary prompts, and mark agent names like `hermes`
+   with `router: false` — the agent intent already covers them, and the
+   double filter `--scope`+`--agent` yields empty slices. Derive candidates
+   from live data:
 
    ```sh
    activity-log query --format json --since 30d --limit 0 | jq -r '.scope' | sort -u

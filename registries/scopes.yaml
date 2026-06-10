@@ -11,6 +11,12 @@
 #
 # Convention: keep names lowercase + kebab-case. Namespaced scopes use `:`
 # as separator (e.g. `project:client-x`).
+#
+# Optional `router: false` (default true) excludes a scope from the L3
+# router scopes-cache (`activity-log refresh-scopes`). Required for scope
+# names that collide with the router's agent-intent names
+# (hooks/user-prompt-router.sh AGENT_FILTER: hermes / viktor / claude-mac /
+# anton) — otherwise scope intent and agent intent double-filter to empty.
 schema_version: 1
 
 scopes:
@@ -23,6 +29,7 @@ scopes:
     description: "Hermes Agent — identity-bearing assistant on mac-mini"
     status: active
     created: 2026-04-15
+    router: false # agent-overlap: routed via agent intent
   - name: billing-proxy
     description: "Anthropic billing proxy (Claude Max OAuth → API)"
     status: active
@@ -31,6 +38,7 @@ scopes:
     description: "Claude Code on the MacBook (interactive)"
     status: active
     created: 2026-04-15
+    router: false # agent-overlap: routed via agent intent
   - name: claude-mini
     description: "Claude Code on the mac-mini (24/7 OpenClaw bots)"
     status: active
@@ -41,10 +49,12 @@ scopes:
     description: "Viktor — Codex-harness agent (gpt-5.5 via codex)"
     status: active
     created: 2026-05-04
+    router: false # agent-overlap: routed via agent intent
   - name: anton
     description: "Anton — OpenClaw agent (claude-opus-4-7)"
     status: active
     created: 2026-04-15
+    router: false # agent-overlap: routed via agent intent
 
   # ----- products / projects -----
   - name: paperclip
@@ -63,6 +73,14 @@ scopes:
     description: "Dogma.ru design project"
     status: active
     created: 2026-04-15
+  - name: rentier
+    description: "Rentier SaaS booking — Nx monorepo (NestJS+gRPC+React)"
+    status: active
+    created: 2026-06-10
+  - name: deploy
+    description: "Deployments / releases across projects"
+    status: active
+    created: 2026-06-10
 
   # ----- meta scope (system-level events) -----
   - name: activity-mesh

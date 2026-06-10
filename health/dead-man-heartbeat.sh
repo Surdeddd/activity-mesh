@@ -74,6 +74,14 @@ if [ -n "$AL_BIN" ]; then
     "$AL_BIN" clock-sync >/dev/null 2>&1 || log "clock-sync failed (offset cache stale)"
 fi
 
+# regenerate the L3 router scopes-cache from the scopes registry hourly
+# (active scopes minus router:false). Best-effort: on registry read/parse
+# failure the subcommand exits non-zero and leaves the existing cache
+# untouched — never blocks the heartbeat.
+if [ -n "$AL_BIN" ]; then
+    "$AL_BIN" refresh-scopes >/dev/null 2>&1 || log "refresh-scopes failed (scopes-cache stale)"
+fi
+
 # 2. update miss counter
 prev=$(read_int "$MISS_FILE")
 if [ "$ok" -eq 1 ]; then

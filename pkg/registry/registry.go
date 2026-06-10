@@ -81,7 +81,17 @@ type Scope struct {
 	Expires     string `yaml:"expires,omitempty"`
 	Replaces    string `yaml:"replaces,omitempty"`
 	ReplacedBy  string `yaml:"replaced_by,omitempty"`
+	// Router controls inclusion in the L3 router scopes-cache written by
+	// `activity-log refresh-scopes`. Unset/true → included; false →
+	// excluded. Scopes whose names collide with the router's agent-intent
+	// names (hooks/user-prompt-router.sh AGENT_FILTER) must set false, or
+	// scope+agent intents double-filter every query to empty.
+	Router *bool `yaml:"router,omitempty"`
 }
+
+// RouterEnabled reports whether the scope participates in the L3 router
+// scopes-cache. Absent flag means true — exclusion is the explicit opt-out.
+func (s Scope) RouterEnabled() bool { return s.Router == nil || *s.Router }
 
 // ----- AGENTS -----
 
@@ -195,6 +205,18 @@ func LoadFromBytes(kinds, scopes, agents, redaction []byte) (*Registry, error) {
 	}
 	r.buildIndexes()
 	return r, nil
+}
+
+// LoadScopesFile reads and validates a standalone scopes.yaml — the
+// schema_version gate and lifecycle-status enum still apply, but the other
+// three registry files are not required. For callers that only need the
+// scope registry (e.g. `activity-log refresh-scopes`).
+func LoadScopesFile(path string) (*Registry, error) {
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadFromBytes(nil, buf, nil, nil)
 }
 
 func loadYAML(path string, target any) error {
@@ -346,6 +368,20 @@ func (r *Registry) ActiveScopes() []Scope {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// RouterScopes returns ActiveScopes minus entries marked `router: false` —
+// exactly the whitelist `activity-log refresh-scopes` writes to the L3
+// router scopes-cache. Sorted by name.
+func (r *Registry) RouterScopes() []Scope {
+	active := r.ActiveScopes()
+	out := make([]Scope, 0, len(active))
+	for _, s := range active {
+		if s.RouterEnabled() {
+			out = append(out, s)
+		}
+	}
 	return out
 }
 

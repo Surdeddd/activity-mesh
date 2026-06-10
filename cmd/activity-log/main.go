@@ -7,6 +7,7 @@
 //	activity-log query --since 24h [filters]            read+filter events
 //	activity-log status                                 print last event per host
 //	activity-log compact --keep 90d                     archive old events from this host's shard
+//	activity-log refresh-scopes                         regenerate the L3 router scopes-cache
 package main
 
 import (
@@ -54,6 +55,7 @@ func main() {
 	root.AddCommand(statusCmd())
 	root.AddCommand(compactCmd())
 	root.AddCommand(clockSyncCmd())
+	root.AddCommand(refreshScopesCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -145,6 +145,75 @@ func TestActiveScopesAndAgents(t *testing.T) {
 	}
 }
 
+// TestScopeRouterFlag — `router: false` opts a scope out of RouterScopes;
+// absent and explicit-true both mean included. Non-active scopes never
+// appear regardless of the flag.
+func TestScopeRouterFlag(t *testing.T) {
+	yaml := []byte(`schema_version: 1
+scopes:
+  - name: zeta
+    status: active
+  - name: alpha
+    status: active
+    router: true
+  - name: agent-overlap
+    status: active
+    router: false
+  - name: gone
+    status: archived
+  - name: fading
+    status: deprecated
+    router: true
+`)
+	r, err := LoadFromBytes(nil, yaml, nil, nil)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	s, ok := r.GetScope("agent-overlap")
+	if !ok || s.RouterEnabled() {
+		t.Errorf("agent-overlap: ok=%v RouterEnabled=%v, want found + false", ok, s.RouterEnabled())
+	}
+	if s, _ := r.GetScope("zeta"); !s.RouterEnabled() {
+		t.Errorf("absent router flag must default to enabled")
+	}
+	got := r.RouterScopes()
+	want := []string{"alpha", "zeta"} // sorted; active + router-enabled only
+	if len(got) != len(want) {
+		t.Fatalf("RouterScopes len=%d, want %d (%v)", len(got), len(want), got)
+	}
+	for i, name := range want {
+		if got[i].Name != name {
+			t.Errorf("RouterScopes[%d]=%q, want %q", i, got[i].Name, name)
+		}
+	}
+}
+
+// TestRouterScopes_RealFiles pins the canonical registry: every scope name
+// that collides with a router agent-intent (hooks/user-prompt-router.sh
+// AGENT_FILTER case-arms) must be excluded from the router cache, while the
+// known whitelist scopes stay in.
+func TestRouterScopes_RealFiles(t *testing.T) {
+	r := mustLoad(t)
+	inCache := map[string]bool{}
+	for _, s := range r.RouterScopes() {
+		inCache[s.Name] = true
+	}
+	for _, overlap := range []string{"hermes", "viktor", "claude-mac", "anton"} {
+		if _, ok := r.GetScope(overlap); !ok {
+			t.Errorf("expected scope %q in registry", overlap)
+			continue
+		}
+		if inCache[overlap] {
+			t.Errorf("scope %q collides with a router agent-intent name and must be router: false", overlap)
+		}
+	}
+	for _, want := range []string{"openclaw", "billing-proxy", "rentier", "deploy"} {
+		if !inCache[want] {
+			t.Errorf("expected scope %q in the router cache", want)
+		}
+	}
+}
+
 // TestSchemaVersionMismatch ensures we refuse YAML written for a future
 // schema rather than silently misinterpret.
 func TestSchemaVersionMismatch(t *testing.T) {
