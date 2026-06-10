@@ -57,7 +57,10 @@ curl -fsSL https://raw.githubusercontent.com/Surdeddd/activity-mesh/main/install
 activity-log emit --kind decision --scope project:foo --summary "switched to Bun.fetch"
 
 # query
-activity-log query --hours 24
+activity-log query --since 24h
+
+# cache local↔NTP clock offset (fills clock_offset_ms on emitted events)
+activity-log clock-sync
 
 # query daemon (HTTP)
 curl 'http://localhost:7459/recent?scope=project:foo&hours=24&limit=20'
@@ -67,6 +70,15 @@ curl 'http://localhost:7459/digest?window=today&group_by=scope'
 # health
 bash health/master.sh | jq .summary
 ```
+
+`clock-sync` performs one SNTP round-trip (UDP to `time.apple.com`, 3s
+timeout, pure Go) and atomically writes the rounded ms offset to
+`$ACTIVITY_MESH_STATE/clock-offset-ms` (default
+`~/.local/state/activity-mesh/`). Hosts running the dead-man heartbeat
+(`health/dead-man-heartbeat.sh`, hourly via
+`installers/templates/launchd-heartbeat.plist.tmpl`) refresh it
+automatically; on hosts without the heartbeat schedule it with one cron
+line: `0 * * * * /usr/local/bin/activity-log clock-sync`.
 
 ## Building
 

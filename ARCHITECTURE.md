@@ -4,7 +4,7 @@
 
 1. **Per-host shards** — each machine writes to `events-<host>.jsonl`. Single writer per file = zero Syncthing conflicts ever.
 2. **Universal CLI is primary contract** — any agent/SDK works via shell-out. MCP/skills are optimizations on top.
-3. **Daemon-as-cache** — every host can run the HTTP daemon. mac-mini primary; failure = automatic fallback to local. No SPOF.
+3. **Local-first reads, daemon-as-cache** — the CLI, the hooks, and the stdio MCP server read the replicated JSONL shards directly and never touch the daemon. The HTTP daemon (`:7459`) is an optional query cache for HTTP-only consumers. Daemon down ⇒ primary contract unaffected (see "Daemon dependence" below). No SPOF.
 4. **Open registries** — kinds.yaml, scopes.yaml, agents.yaml. Adding new = YAML edit, not code change.
 5. **Forced visibility** — failures must be **noisy**. Silence ≠ "all OK". Weekly green-light digest + dead-man heartbeat (independent process).
 
@@ -73,6 +73,13 @@
   "priority": "P0|P1|P2|P3"
 }
 ```
+
+`clock_offset_ms` is the emitting host's clock skew (local − true, in ms) at
+emit time. Emitters read it from the per-host cache
+`<state>/clock-offset-ms` (state dir = `$ACTIVITY_MESH_STATE`, default
+`~/.local/state/activity-mesh`), refreshed hourly by `activity-log
+clock-sync` from the dead-man heartbeat. Cache missing/unparsable → field
+omitted.
 
 ## 11 auto-capture sources
 
@@ -194,17 +201,20 @@ def migrate(event):
 - Major bump (v1→v2) requires coordinated rollout
 - Archives never rewritten — readers adapt
 
-## Daemon-as-cache (no SPOF)
+## Daemon dependence (no SPOF — verified)
 
-`~/Sync/activity/daemon-config.yaml`:
-```yaml
-primary: mac-mini:7459
-fallbacks:
-  - localhost:7459          # auto-spawn if primary unreachable >30s
-health_check: GET /health every 60s
-```
+What actually talks to the daemon versus reading the JSONL shards directly:
 
-Every host's Go binary contains the daemon code. Idle by default. If primary unreachable, client lib auto-fails-over to local. Since data layer is Syncthing-replicated JSONL, any daemon serves any query.
+| consumer | read path | when daemon (`:7459`) is down |
+|---|---|---|
+| `activity-log query` / `status` (CLI) | reads `events-*.jsonl` from the sync dir directly | **unaffected** — daemon is never in the path (scenario test: `tests/query_no_daemon_test.go`) |
+| `activity-log emit` (CLI) | appends to the per-host shard directly | **unaffected** |
+| L2/L3 hooks (`session-start-digest.sh`, `user-prompt-router.sh`) | shell out to the CLI | **unaffected** |
+| stdio MCP server (`mcp/server.mjs` — Claude Code, Codex) | spawns the CLI per tool call | **unaffected** |
+| Hermes MCP (HTTP variant, `:7459/mcp`) | HTTP to the daemon | **down** — no automatic fallback |
+| ad-hoc HTTP (`/recent`, `/search`, `/digest`) | HTTP to the daemon | **down** — no automatic fallback |
+
+There is no client-side "auto-failover" logic, because the primary contract (CLI + hooks + stdio MCP) is local-first by construction and needs none — since the data layer is Syncthing-replicated JSONL, every host already holds every shard. The daemon is purely a cache/index for HTTP-only consumers; when it dies those consumers fail until the independent dead-man heartbeat alerts (RB-6 in the runbook). An earlier draft described a `daemon-config.yaml` primary/fallback chain with auto-failover — that was never implemented and is superseded by this table.
 
 ## Health checks (19) + dead-man heartbeat
 

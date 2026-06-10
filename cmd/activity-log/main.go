@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ func main() {
 	root.AddCommand(emitCmd())
 	root.AddCommand(queryCmd())
 	root.AddCommand(statusCmd())
+	root.AddCommand(clockSyncCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -529,6 +531,68 @@ func lastEvent(path string) (*event.Event, int, error) {
 		last = &dup
 	}
 	return last, count, sc.Err()
+}
+
+// ----- clock-sync -----
+
+// clockSyncTimeout bounds the whole SNTP round-trip (dial + send + recv).
+const clockSyncTimeout = 3 * time.Second
+
+func clockSyncCmd() *cobra.Command {
+	var server string
+	cmd := &cobra.Command{
+		Use:   "clock-sync",
+		Short: "Measure local clock offset via SNTP and cache it for emitters.",
+		Long: "Performs one SNTP query (UDP, 3s timeout) and atomically writes the\n" +
+			"rounded offset (local−true, ms) to <state>/clock-offset-ms, where\n" +
+			"emitters pick it up as the optional clock_offset_ms event field.\n" +
+			"On network failure the previous cached value is left untouched.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := event.ClockOffsetPath()
+			if path == "" {
+				return errors.New("cannot resolve state dir (no $ACTIVITY_MESH_STATE and no home dir)")
+			}
+			offset, err := measureClockOffset(server, clockSyncTimeout)
+			if err != nil {
+				return fmt.Errorf("clock-sync via %s failed: %w (cached offset left untouched)", server, err)
+			}
+			ms := offset.Round(time.Millisecond).Milliseconds()
+			if err := atomicWriteFile(path, []byte(strconv.FormatInt(ms, 10)+"\n")); err != nil {
+				return fmt.Errorf("write %s: %w", path, err)
+			}
+			fmt.Printf("clock offset %+dms (local−true, via %s) → %s\n", ms, server, path)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&server, "server", "time.apple.com:123", "NTP server host:port")
+	return cmd
+}
+
+// atomicWriteFile writes data to path via a temp file + rename in the same
+// directory, so readers never observe a partial write.
+func atomicWriteFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) //nolint:errcheck — noop after successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // ----- io helpers -----

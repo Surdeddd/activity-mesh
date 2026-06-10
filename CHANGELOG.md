@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `activity-log clock-sync`: minimal pure-Go SNTP client (one UDP
+  round-trip to `time.apple.com`, 3s timeout, no new dependencies) that
+  measures the local clock offset and atomically writes the rounded ms
+  value to `<state>/clock-offset-ms` (state dir = `$ACTIVITY_MESH_STATE`,
+  default `~/.local/state/activity-mesh`). On network failure it exits
+  non-zero and leaves the previous cache untouched. The dead-man
+  heartbeat now refreshes the cache hourly (best-effort).
+- Emitters populate the schema's `clock_offset_ms` field — declared
+  optional since v1 but never written — from that cache on every
+  `event.New`. Semantics: local − true, in ms (positive = local clock
+  ahead). Missing/unparsable cache → field omitted; no error, no log
+  spam.
+- Black-box scenario test `tests/query_no_daemon_test.go` proving
+  `activity-log query` / `status` return correct results from a fresh
+  sync dir with no daemon running (untagged, runs under plain
+  `go test ./...`).
+
 ### Fixed
+- ARCHITECTURE.md claimed daemon failure triggers "automatic fallback to
+  local" via a client lib. Traced the real paths: the CLI, both read
+  hooks, and the stdio MCP server read the JSONL shards directly and
+  never contact the daemon — no fallback exists because none is needed.
+  Only HTTP consumers (Hermes MCP variant, ad-hoc `curl`) depend on
+  `:7459`, with no auto-failover. The "Daemon-as-cache" section is
+  replaced by a per-consumer dependence table; the unimplemented
+  `daemon-config.yaml` primary/fallback design is marked superseded.
+- README quick-start showed `activity-log query --hours 24` — the flag
+  does not exist; corrected to `--since 24h`.
 - L3 `user-prompt-router.sh` was silently dead: it invoked `activity-log
   query` with flags the v0.2.0 CLI no longer exposes, so every intent
   produced an empty slice (stderr swallowed by `2>/dev/null`, stdout
