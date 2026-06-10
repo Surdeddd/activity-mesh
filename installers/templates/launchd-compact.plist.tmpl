@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.activity-mesh.compact</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{BIN_PATH}}</string>
+        <string>compact</string>
+        <string>--keep</string>
+        <string>90d</string>
+    </array>
+    <!-- Monthly: 1st of month, 04:40 local. NOT auto-installed by
+         bootstrap.sh — render the placeholders and load manually:
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.activity-mesh.compact.plist -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/compact.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/compact.err</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ACTIVITY_MESH_HOME</key>
+        <string>{{STATE_DIR}}</string>
+        <key>ACTIVITY_MESH_SYNC</key>
+        <string>{{SYNC_DIR}}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{HOME}}</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
