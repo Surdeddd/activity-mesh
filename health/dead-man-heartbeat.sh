@@ -40,9 +40,10 @@ fi
 find_activity_log() {
     local bin
     for bin in \
-        "$HOME/Desktop/Проекты/activity-mesh/bin/activity-log-darwin-arm64" \
-        "$HOME/Desktop/Проекты/activity-mesh/bin/activity-log-darwin-amd64" \
+        "$HOME/.local/bin/activity-log" \
         "/usr/local/bin/activity-log" \
+        "$HOME/Projects/activity-mesh/bin/activity-log-darwin-arm64" \
+        "$HOME/Projects/Personal/activity-mesh/bin/activity-log-darwin-arm64" \
         "$(command -v activity-log 2>/dev/null)"; do
         [ -n "$bin" ] && [ -x "$bin" ] || continue
         echo "$bin"
