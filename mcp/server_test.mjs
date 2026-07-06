@@ -11,13 +11,17 @@ const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SERVER = resolve(HERE, "server.mjs");
 
 // Minimal mock binary that pretends to be `activity-log query --format json`.
-// Emits one JSONL event per call so the server can parse it.
-function makeMockBin(scenario = "ok") {
+// Emits one JSONL event per call so the server can parse it. `tsIso`
+// overrides both event timestamps (digest windowing bounds by calendar day,
+// so those tests pass a today-dated value).
+function makeMockBin(scenario = "ok", tsIso) {
   const dir = mkdtempSync(join(tmpdir(), "amesh-mock-"));
   const bin = join(dir, "activity-log");
+  const t1 = tsIso || "2026-05-04T10:00:00.000000Z";
+  const t2 = tsIso || "2026-05-04T11:00:00.000000Z";
   const events = [
-    { v: 1, id: "01HRX1", ts: "2026-05-04T10:00:00.000000Z", host: "macbook", agent: "claude-mac", kind: "decision", scope: "project:foo", summary: "switched to Bun.fetch", tags: ["bun"] },
-    { v: 1, id: "01HRX2", ts: "2026-05-04T11:00:00.000000Z", host: "macbook", agent: "hermes", kind: "task", scope: "project:bar", summary: "deployed billing-proxy" },
+    { v: 1, id: "01HRX1", ts: t1, host: "macbook", agent: "claude-mac", kind: "decision", scope: "project:foo", summary: "switched to Bun.fetch", tags: ["bun"] },
+    { v: 1, id: "01HRX2", ts: t2, host: "macbook", agent: "hermes", kind: "task", scope: "project:bar", summary: "deployed billing-proxy" },
   ];
   let body;
   if (scenario === "fail") {
@@ -55,8 +59,27 @@ test("initialize handshake", async () => {
   assert.equal(r.jsonrpc, "2.0");
   assert.equal(r.id, 1);
   assert.equal(r.result.serverInfo.name, "activity-mesh");
-  assert.equal(r.result.protocolVersion, "2024-11-05");
+  // No client protocolVersion requested → server returns its preferred.
+  assert.equal(r.result.protocolVersion, "2025-06-18");
   assert.ok(r.result.capabilities.tools);
+});
+
+test("initialize negotiates the client's protocol version when supported", async () => {
+  const bin = makeMockBin();
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } });
+  assert.equal(replies[0].result.protocolVersion, "2024-11-05");
+});
+
+test("tools carry read-only annotations", async () => {
+  const bin = makeMockBin();
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const list = replies.find(r => r.id === 2);
+  for (const t of list.result.tools) {
+    assert.equal(t.annotations?.readOnlyHint, true, `${t.name} must be read-only`);
+  }
 });
 
 test("tools/list returns 3 tools", async () => {
@@ -98,7 +121,10 @@ test("tools/call activity_search filters by query", async () => {
 });
 
 test("tools/call activity_digest groups by scope", async () => {
-  const bin = makeMockBin();
+  // window:today bounds by the current UTC calendar day, so the mock must
+  // emit today-dated events (10:00 today).
+  const today = new Date().toISOString().slice(0, 10) + "T10:00:00.000000Z";
+  const bin = makeMockBin("ok", today);
   const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
     { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
     { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "activity_digest", arguments: { window: "today", group_by: "scope" } } });
@@ -107,6 +133,16 @@ test("tools/call activity_digest groups by scope", async () => {
   assert.equal(payload.total, 2);
   assert.ok(payload.markdown.includes("project:foo"));
   assert.ok(payload.markdown.includes("project:bar"));
+});
+
+test("tools/call activity_digest yesterday excludes today", async () => {
+  const today = new Date().toISOString().slice(0, 10) + "T10:00:00.000000Z";
+  const bin = makeMockBin("ok", today);
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "activity_digest", arguments: { window: "yesterday" } } });
+  const payload = JSON.parse(replies.find(x => x.id === 2).result.content[0].text);
+  assert.equal(payload.total, 0, "today's events must not appear under yesterday");
 });
 
 test("tools/call invalid name returns error", async () => {

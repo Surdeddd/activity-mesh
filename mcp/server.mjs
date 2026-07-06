@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // activity-mesh MCP stdio server (Layer 4 lazy tool).
-// Exposes 3 tools (recent/search/digest) + 2 resources to any MCP client.
-// Node 20+ stdlib only. JSON-RPC 2.0 over stdin/stdout. Logs to stderr.
+// Exposes 3 read-only tools (recent/search/digest) + 2 resource templates to
+// any MCP client. Node 20+ stdlib only. JSON-RPC 2.0 over stdin/stdout; logs
+// to stderr. Protocol version is negotiated on initialize (supports
+// 2025-06-18 / 2025-03-26 / 2024-11-05).
 //
 // Binary resolution: $ACTIVITY_LOG_BIN -> `activity-log` on PATH ->
 // repo-local ./bin/activity-log-<os>-<arch>. Tests override via env.
@@ -14,9 +16,13 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 import os from "node:os";
 
-const PROTOCOL = "2024-11-05";
+// Protocol versions we can speak, newest first. On initialize we echo the
+// client's requested version when we support it, else fall back to our
+// preferred (newest). 2024-11-05 stays in the list for old clients.
+const SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+const PREFERRED_PROTOCOL = SUPPORTED_PROTOCOLS[0];
 const NAME = "activity-mesh";
-const VERSION = "0.1.0";
+const VERSION = "0.3.0";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const log = (...a) => process.stderr.write(`[${NAME}] ${a.join(" ")}\n`);
@@ -73,13 +79,26 @@ async function activitySearch({ query, since = "7d", until, limit = 20 } = {}) {
   return out;
 }
 
+// dayBounds returns [startMs, endMs) for a whole UTC calendar day N days ago
+// (0 = today, 1 = yesterday), so "yesterday" excludes today's events.
+function dayBounds(daysAgo) {
+  const now = new Date();
+  const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo);
+  return [start, start + 86400000];
+}
+
 async function activityDigest({ window = "today", group_by = "scope" } = {}) {
-  let since = "24h";
-  if (window === "today") since = "24h";
-  else if (window === "yesterday") since = "48h";
+  // Pull a wide enough window, then bound in JS so "yesterday" is a real
+  // calendar day rather than "the last 48h" (which leaked today's events).
+  let since = "24h", lo = null, hi = null;
+  if (window === "today") { since = "24h"; [lo, hi] = dayBounds(0); }
+  else if (window === "yesterday") { since = "48h"; [lo, hi] = dayBounds(1); }
   else if (window === "7d") since = "7d";
   else if (window?.startsWith?.("since:")) since = "30d"; // ULID — fallback wide window
-  const events = parseJsonl(await run(resolveBin(), ["query", "--since", since, "--limit", "0", "--format", "json"]));
+  let events = parseJsonl(await run(resolveBin(), ["query", "--since", since, "--limit", "0", "--format", "json"]));
+  if (lo !== null) {
+    events = events.filter(e => { const t = Date.parse(e.ts); return t >= lo && t < hi; });
+  }
   const groups = {};
   for (const e of events) {
     const key = e[group_by] || "(none)";
@@ -95,16 +114,23 @@ async function activityDigest({ window = "today", group_by = "scope" } = {}) {
   return { window, group_by, total: events.length, groups: Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.length])), markdown: lines.join("\n") };
 }
 
+// All three tools are read-only (they shell out to `activity-log query`,
+// which never writes). readOnlyHint lets clients surface them without a
+// write-confirmation prompt (MCP tool annotations, 2025-03-26+).
+const READONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const TOOLS = [
   { name: "activity_recent",
     description: "Get N most recent activity events, optionally filtered by scope/agent/host/time. Use when user asks 'что было', 'recent', or needs timeline context.",
-    inputSchema: { type: "object", properties: { scope: { type: "string" }, agent: { type: "string" }, host: { type: "string" }, hours: { type: "number", default: 24 }, limit: { type: "number", default: 20 } } } },
+    inputSchema: { type: "object", properties: { scope: { type: "string" }, agent: { type: "string" }, host: { type: "string" }, hours: { type: "number", default: 24 }, limit: { type: "number", default: 20 } } },
+    annotations: { title: "Recent activity", ...READONLY } },
   { name: "activity_search",
-    description: "Full-text search activity log with FTS5. Use when user mentions specific keyword/project not in scope vocabulary.",
-    inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" }, since: { type: "string", default: "7d" }, until: { type: "string" }, limit: { type: "number", default: 20 } } } },
+    description: "Case-insensitive substring search over recent activity events (summary/scope/agent/tags), newest first. Local-first: scans the JSONL shards via the CLI, not the daemon's FTS index. Widen `since` to search further back.",
+    inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" }, since: { type: "string", default: "7d" }, until: { type: "string" }, limit: { type: "number", default: 20 } } },
+    annotations: { title: "Search activity", ...READONLY } },
   { name: "activity_digest",
     description: "Get pre-summarized digest of activity for a time window. Use for 'статус', 'что было сегодня', weekly review.",
-    inputSchema: { type: "object", properties: { window: { type: "string", enum: ["today", "yesterday", "7d"], default: "today" }, group_by: { type: "string", enum: ["scope", "agent", "kind"], default: "scope" } } } },
+    inputSchema: { type: "object", properties: { window: { type: "string", enum: ["today", "yesterday", "7d"], default: "today" }, group_by: { type: "string", enum: ["scope", "agent", "kind"], default: "scope" } } },
+    annotations: { title: "Activity digest", ...READONLY } },
 ];
 
 const RESOURCE_TEMPLATES = [
@@ -132,7 +158,11 @@ async function readResource(uri) {
 async function handle(req) {
   const { id, method, params } = req;
   try {
-    if (method === "initialize") return { jsonrpc: "2.0", id, result: { protocolVersion: PROTOCOL, capabilities: { tools: {}, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: NAME, version: VERSION } } };
+    if (method === "initialize") {
+      const want = params?.protocolVersion;
+      const proto = SUPPORTED_PROTOCOLS.includes(want) ? want : PREFERRED_PROTOCOL;
+      return { jsonrpc: "2.0", id, result: { protocolVersion: proto, capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: NAME, version: VERSION } } };
+    }
     if (method === "initialized" || method === "notifications/initialized") return null;
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
     if (method === "tools/call") {
