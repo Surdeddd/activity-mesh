@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -46,13 +47,40 @@ var rules = []*rule{
 		name:    "openai_key",
 		kind:    "credential",
 		repType: "openai_key",
-		re:      regexp.MustCompile(`sk-(?:proj-)?[A-Za-z0-9_\-]{20,200}`),
+		// \b left boundary: without it "risk-assessment-2026-priority" style
+		// prose matched mid-word and was irreversibly mangled on disk.
+		re: regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,200}`),
 	},
 	{
 		name:    "github_token",
 		kind:    "credential",
 		repType: "github_token",
-		re:      regexp.MustCompile(`\b(?:gh[ps]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`),
+		// ghp/ghs personal+server, gho oauth, ghu user-to-server, ghr refresh
+		re: regexp.MustCompile(`\b(?:gh[posur]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`),
+	},
+	{
+		name:    "gitlab_token",
+		kind:    "credential",
+		repType: "gitlab_token",
+		re:      regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}\b`),
+	},
+	{
+		name:    "google_api_key",
+		kind:    "credential",
+		repType: "google_api_key",
+		re:      regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}\b`),
+	},
+	{
+		name:    "stripe_key",
+		kind:    "credential",
+		repType: "stripe_key",
+		re:      regexp.MustCompile(`\b[rs]k_(?:live|test)_[A-Za-z0-9]{24,99}\b`),
+	},
+	{
+		name:    "huggingface_token",
+		kind:    "credential",
+		repType: "hf_token",
+		re:      regexp.MustCompile(`\bhf_[A-Za-z0-9]{30,}\b`),
 	},
 	{
 		name:    "npm_token",
@@ -121,16 +149,41 @@ var rules = []*rule{
 		name:    "user_path",
 		kind:    "env",
 		repType: "user_path",
-		// RE2: \b is a word boundary, anchors after the username so we don't
-		// match longer usernames like /Users/maksimkravcovsky/.
-		re: regexp.MustCompile(`/Users/maksimkravcov\b`),
+		re:      userPathRe(),
 	},
 	{
 		name:    "lan_ip",
 		kind:    "env",
 		repType: "lan_ip",
-		re:      regexp.MustCompile(`\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b`),
+		// All three RFC1918 branches require four octets: the old 10.x
+		// variant matched three ("10.15.7" version strings false-positived,
+		// and real 10.a.b.c addresses leaked their last octet).
+		re: regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b`),
 	},
+}
+
+// userPathRe builds the home-directory redaction pattern dynamically: the
+// current user's home plus any extra prefixes from
+// $ACTIVITY_MESH_REDACT_HOMES (colon-separated) — no hardcoded usernames.
+func userPathRe() *regexp.Regexp {
+	var homes []string
+	if h, err := os.UserHomeDir(); err == nil && len(h) > 1 {
+		homes = append(homes, h)
+	}
+	for _, h := range strings.Split(os.Getenv("ACTIVITY_MESH_REDACT_HOMES"), ":") {
+		if h = strings.TrimSpace(h); len(h) > 1 {
+			homes = append(homes, h)
+		}
+	}
+	if len(homes) == 0 {
+		// never-matching fallback (no home resolvable)
+		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
+	}
+	quoted := make([]string, len(homes))
+	for i, h := range homes {
+		quoted[i] = regexp.QuoteMeta(strings.TrimRight(h, "/\\"))
+	}
+	return regexp.MustCompile(`(?:` + strings.Join(quoted, "|") + `)\b`)
 }
 
 // allowlist matches strings we never redact even if they look high-entropy:

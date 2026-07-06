@@ -1,9 +1,21 @@
 package redact
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
+
+// mustHome returns the test runner's home dir — the user_path rule is built
+// from it dynamically, so tests must be too.
+func mustHome(t *testing.T) string {
+	t.Helper()
+	h, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	return h
+}
 
 // each entry has a positive case (must be redacted) and a negative case
 // (similar-shaped string that must NOT be redacted).
@@ -67,8 +79,8 @@ func TestTier1Patterns(t *testing.T) {
 		},
 		{
 			name:     "user_path",
-			positive: "the file is /Users/maksimkravcov/Projects/foo",
-			negative: "/Users/somebody-else/Projects/foo",
+			positive: "the file is " + mustHome(t) + "/Projects/foo",
+			negative: "/Users/somebody-else-entirely/Projects/foo",
 			marker:   "user_path",
 		},
 		{
@@ -162,7 +174,7 @@ func TestApplyJSONNested(t *testing.T) {
 		"summary": "leak " + "sk-ant-api03-" + strings.Repeat("A", 93) + "AA",
 		"tags":    []any{"ok", "user@test.com"},
 		"meta": map[string]any{
-			"path": "/Users/maksimkravcov/foo",
+			"path": mustHome(t) + "/foo",
 		},
 	}
 	out, hits := ApplyJSON(tree)
