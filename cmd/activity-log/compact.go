@@ -79,6 +79,11 @@ func compactCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !dryRun {
+				// Close the decay-daemon monitoring loop: record that
+				// compaction ran (whether or not it archived anything).
+				writeDecayState()
+			}
 			printCompactSummary(os.Stdout, res)
 			return nil
 		},
@@ -305,6 +310,20 @@ func rewriteShard(shardPath string, content []byte) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// writeDecayState records the compaction run time to
+// <state>/decay-state.json, the signal the decay-daemon health check reads.
+// Best-effort: a write failure must never fail the compaction itself.
+func writeDecayState() {
+	dir := event.StateDir()
+	if dir == "" {
+		return
+	}
+	path := filepath.Join(dir, "decay-state.json")
+	// time.Now via the CLI is fine here (not inside a workflow/replay context).
+	payload := fmt.Sprintf(`{"last_run_ts":%d}`+"\n", time.Now().Unix())
+	_ = atomicWriteFile(path, []byte(payload))
 }
 
 func printCompactSummary(w io.Writer, res *compactResult) {
