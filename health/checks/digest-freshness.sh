@@ -12,7 +12,11 @@ NAME=digest-freshness
 F="$ACTIVITY_MESH_STATE/last-digest.json"
 
 if [ ! -f "$F" ]; then
-    am_emit "$NAME" 2 warn "no digest snapshot yet"; exit 0
+    # Absent is fine: the weekly digest is a whole-mesh summary that runs on a
+    # single designated host; secondary hosts (and fresh installs) legitimately
+    # have no local snapshot. A STALE digest on the primary still trips the
+    # drift thresholds below.
+    am_emit "$NAME" 0 ok "no local digest (runs on the designated digest host)"; exit 0
 fi
 
 gen=$(/usr/bin/jq -r '.generated_at // 0' "$F" 2>/dev/null || echo 0)

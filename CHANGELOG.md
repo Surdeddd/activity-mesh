@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-07-07
+
+Security + correctness hardening, cgo-free builds, and a genericised,
+publishable repo. Deployed to both hosts.
+
+### Security (P0)
+- **Lost-append race fixed.** `emit` now holds the per-host flock across the
+  whole seq→marshal→append sequence, and compaction holds it across its
+  read→rewrite→rename — so an append can no longer land inside a rewrite and
+  be destroyed. New `pkg/shard.AppendLocked` is the single append primitive
+  used by both the CLI and the daemon (regression-tested with `-race`).
+- **`/push` hardened.** The host label is validated against the shard
+  filename alphabet (path-traversal guard — `"host":"../.."` previously wrote
+  to arbitrary files), the `id` must be a strict ULID, `ts` is parsed, and the
+  payload runs through the same redaction pipeline as CLI emit before being
+  written (pushes were a side door around redaction). Extended schema fields
+  now survive the round-trip.
+- **Daemon binds `127.0.0.1` by default** (`--bind` / `ACTIVITY_MESH_BIND` to
+  widen) — it served the full history and accepted unauthenticated writes on
+  all interfaces.
+
+### Redaction
+- `sk-` gets a left word-boundary (prose like "risk-assessment-…" was
+  irreversibly mangled); `lan_ip` requires all four octets (version strings
+  like "10.15.7" no longer false-positive, and real `10.a.b.c` addresses no
+  longer leak their last octet); `user_path` is built at runtime from `$HOME`
+  + `$ACTIVITY_MESH_REDACT_HOMES` (no hardcoded username).
+- New credential patterns: `gho_`/`ghu_`/`ghr_` GitHub, `glpat-` GitLab,
+  `AIza` Google, `sk/rk_live|test` Stripe, `hf_` HuggingFace.
+
+### Indexer
+- Cursor identity (v2): a first-line hash is stored with the byte offset, so a
+  shard rewritten to a size still larger than the cursor (compaction, or a
+  Syncthing replace) forces a full rescan instead of silently skipping the
+  unread tail. Reads are incremental (`Seek`, not whole-file). Ingested count
+  uses `RowsAffected` (dedup no longer inflates it). Multi-word FTS queries no
+  longer require adjacency. Cursor entries for deleted shards are GC'd.
+
+### cgo-free
+- SQLite swapped from `mattn/go-sqlite3` to `modernc.org/sqlite` (FTS5
+  compiled in). All three binaries are now cgo-free and cross-compile for
+  macOS/Linux/Windows from any host — no build tags, no native daemon matrix.
+
+### Router / hooks
+- Agent intent is driven by a generated `agents-cache` (`refresh-caches`
+  renders it from `agents.yaml`: id / aliases / weak-aliases). Fixes Cyrillic
+  agent names (e.g. "антон") never matching, and removes the hardcoded agent
+  list from the hook. `refresh-scopes` → `refresh-caches` (alias kept).
+- Session digest excludes monitoring noise structurally (`--exclude-kind
+  canary,heartbeat`) instead of a substring grep. `jq` is resolved via PATH
+  then the usual homes. `secret-redactor.sh` gained the `~/.local/bin`
+  fallback (it silently ran in pass-through — no redaction — under launchd).
+
+### Health / operability
+- **Real alerting.** `am_notify` routes through `ACTIVITY_MESH_NOTIFY_CMD` →
+  `notify-maxim` → direct Telegram, and surfaces undeliverable alerts on
+  stderr — a missing notifier no longer means weeks of silent red. No
+  hardcoded chat id anywhere (creds via env / `TELEGRAM_ENV`).
+- De-noised permanent reds: `digest-freshness` threshold 2h → 8d (writer is
+  the weekly job; absent snapshot on a secondary host is OK, not a fail);
+  `decay-daemon` 14d → 40d (compact is monthly) and `compact` now writes
+  `decay-state.json`; `token-budget` reads the router's real state path;
+  `schema-drift` matches the actual `- name:` YAML shape (it flagged every
+  event, including registered kinds); `launchd-jobs` checks all six units with
+  an `ACTIVITY_MESH_EXPECTED_JOBS` override.
+- Heartbeat canary emits the registered `activity-mesh` scope (was the
+  unregistered `infra:heartbeat`, ~half of all events).
+
+### MCP
+- `initialize` negotiates the client's protocol version (supports
+  2025-06-18 / 2025-03-26 / 2024-11-05); all tools carry read-only
+  annotations; `activity_search`'s description is honest (substring scan, not
+  FTS5); `activity_digest`'s `yesterday` is a bounded calendar day.
+
+### Universal / publishable
+- `registries/{scopes,agents}.yaml` are now generic examples (real
+  personalised copies live only in the sync dir); no private infrastructure,
+  chat ids, or personal paths in shipping code, templates, or docs.
+- `.goreleaser.yaml` (v2): all binaries × all platforms, sha256 checksums,
+  SBOM, cosign keyless signing; release workflow on tag push. `bootstrap.sh`
+  downloads the archive, **verifies its sha256**, installs all six supervisor
+  units, and seeds registries into the sync dir. Supervisor templates use one
+  two-dir contract (`ACTIVITY_MESH_HOME` store vs `ACTIVITY_MESH_STATE`) —
+  fixing the split that starved the health snapshots.
+- Docs reconciled with reality: cgo-free build, bind + `/push` behaviour, the
+  two-dir contract; `age`-encrypted audit and tier-3 NER are now honestly
+  marked "planned, not yet implemented".
+
+### Added
+- `activity-log install-git-hook [--repo PATH]` — installs an idempotent
+  `post-commit` hook emitting a `project` event per commit (a capture source
+  documented since v1 but never shippable before).
+- `activity-log --version`.
+
 ## [Unreleased]
 
 ### Added
