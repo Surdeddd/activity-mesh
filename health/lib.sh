@@ -79,7 +79,7 @@ am_human_bytes() {
 # No hardcoded chat ids. Returns non-zero when undeliverable.
 am_notify_telegram() {
     local msg="$1" token="${TELEGRAM_BOT_TOKEN:-}" chat="${TELEGRAM_CHAT_ID:-}" envf resp
-    envf="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
+    envf="${TELEGRAM_ENV:-$HOME/.config/activity-mesh/telegram.env}"
     if [ -z "$token" ] && [ -f "$envf" ]; then
         token=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$envf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
     fi

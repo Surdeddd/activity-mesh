@@ -14,17 +14,24 @@
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{{LOG_DIR}}/health.log</string>
+    <string>{{STATE_DIR}}/health.log</string>
     <key>StandardErrorPath</key>
-    <string>{{LOG_DIR}}/health.err</string>
+    <string>{{STATE_DIR}}/health.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>ACTIVITY_MESH_HOME</key>
-        <string>{{STATE_DIR}}</string>
+        <string>{{STORE_DIR}}</string>
         <key>ACTIVITY_MESH_SYNC</key>
         <string>{{SYNC_DIR}}</string>
+        <!-- Health snapshots (last-health.json) MUST land in the same STATE
+             dir the token-budget / digest-freshness checks read from. -->
         <key>ACTIVITY_MESH_STATE</key>
-        <string>{{LOG_DIR}}</string>
+        <string>{{STATE_DIR}}</string>
+        <!-- Alert delivery: set one of these, else health runs but stays quiet.
+             ACTIVITY_MESH_NOTIFY_CMD reads the message on stdin (any notifier);
+             or provide Telegram creds via TELEGRAM_ENV / TELEGRAM_BOT_TOKEN. -->
+        <key>TELEGRAM_ENV</key>
+        <string>{{TELEGRAM_ENV}}</string>
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>

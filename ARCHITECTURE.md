@@ -21,18 +21,28 @@
   agents.yaml                             open registry
   redaction.yaml                          tier-1 regex pack
 
-~/.local/share/activity-mesh/             [PER-HOST, NOT synced — derived/state]
+~/.local/share/activity-mesh/             [PER-HOST, NOT synced — store]
   index.db                                SQLite FTS5, rebuildable from JSONL
-  cursors.json                            per-source byte-offset for incremental ingest
+  cursors.json                            per-source byte-offset + head-hash for incremental ingest
   seq-<host>                              monotonic counter (persisted)
-  audit/redactions-YYYY-MM.jsonl.age     encrypted redaction audit
-  state.json                              daemon health state
+  audit/redactions-YYYY-MM.jsonl         redaction audit (metadata only — never the secret)
+
+~/.local/state/activity-mesh/             [PER-HOST, NOT synced — runtime state + logs]
+  clock-offset-ms                         cached SNTP offset (feeds clock_offset_ms)
+  tokens-<session>                        L3 router per-session token budget
+  last-health.json / last-digest.json    health + digest snapshots
+  heartbeat-misses / *.log               dead-man state + all unit logs
 ```
+
+**Two local dirs, never a third**: `~/.local/share` (the store) and
+`~/.local/state` (runtime state + logs). Every supervisor unit sets
+`ACTIVITY_MESH_HOME` to the former, `ACTIVITY_MESH_STATE` to the latter —
+mixing them (an earlier bug) split health snapshots from the checks reading them.
 
 **Why split source-of-truth (synced) vs derived (local)**:
 - JSONL is append-only, idempotent — Syncthing's strong suit.
-- SQLite has WAL semantics that **break on synced filesystems** ([SQLite docs explicit](https://www.sqlite.org/wal.html)). Each host rebuilds its own index from JSONL in seconds.
-- Audit log encrypted with `age` so even if the FS is exposed, redaction history isn't readable.
+- SQLite has WAL semantics that **break on synced filesystems** ([SQLite docs explicit](https://www.sqlite.org/wal.html)). Each host rebuilds its own index from JSONL in seconds — cgo-free via `modernc.org/sqlite`, so the daemon cross-compiles like the other binaries.
+- The audit log stores only `{ts, event, hits:[{type, len, sha256_first12}]}` — the secret itself is never written, so it is safe at rest by construction. (Optional `age` encryption of the audit dir is a documented future hardening, not yet implemented.)
 
 ## Event schema (JSONL, one line per event)
 
@@ -46,7 +56,7 @@
   "host": "macbook",
   "agent": "claude-mac",
   "kind": "decision",
-  "scope": "project:openclaw",
+  "scope": "demo-app",
   "summary": "≤500 chars, redacted, UTF-8 validated"
 }
 ```
@@ -61,8 +71,8 @@
   "session_id": "...",
   "parent_id": "01HRW...",
   "caused_by": "01HRV...",
-  "actor": "claude-mac",
-  "originator": "hermes",
+  "actor": "assistant",
+  "originator": "worker",
   "ref": "wiki://path | git://hash | file://relative",
   "tags": ["bug", "fix"],
   "duration_ms": 1842,
@@ -92,12 +102,19 @@ omitted.
 | inbox drop | fswatch `wiki/inbox/*.md` create | `handoff` |
 | git commit | post-commit hook in watched repos | `project` |
 | plugin updated | fswatch `~/.claude/plugins/cache/*/` mtime | `install` |
-| daemon registered | fswatch `~/Library/LaunchAgents/com.maxim.*.plist` | `config` |
+| daemon registered | fswatch `~/Library/LaunchAgents/*.plist` (glob configurable) | `config` |
 | daemon restart | `launchctl list` 5min diff | `status` |
-| Hermes config change | fswatch `~/.hermes/{SOUL.md, config.yaml}` | `config` |
-| OpenClaw post-task | existing plugin runtime hook | `task` |
+| agent config change | fswatch a configured config path | `config` |
+| custom runtime post-task | your runtime's existing hook shells out to `activity-log emit` | `task` |
 
-Plus existing hooks: `session-end-flush.sh`, `bridge-tool-tracker-end.sh` already wire activity emission.
+The watched paths and launchd label globs are declared in `configs/watcher.yaml`
+— schema is data, so adapting to a different setup is a config edit, not a code
+change.
+
+**git capture**: `activity-log install-git-hook [--repo PATH]` writes (or
+idempotently appends to) `.git/hooks/post-commit`, so every commit emits a
+`project` event with the subject, short SHA, and a `git://` ref. It is not
+auto-installed by the watcher — run it once per repo you want tracked.
 
 ## 5 read layers (invisible auto-pickup)
 
@@ -131,8 +148,8 @@ Claude responds naturally with awareness
 |---|---|---|
 | temporal recall | `что (было\|делал[а]?\|произошло)` ; `сегодня`, `вчера`, `за день\|неделю` ; `what (did\|happened)`, `today`, `yesterday`, `this week`, `recent` | digest of last N events in time window |
 | status / current | `статус`, `чё там`, `что (в работе\|пендинг)` ; `status`, `pending`, `active tasks`, `what's going on` | active sessions + tasks + last 10 events |
-| scope-named | known scopes from registry: `billing-proxy`, `openclaw`, `hermes`, `viktor`, ... | last 15 events in that scope |
-| agent-named | `что хермес делал`, `from <agent>` | last 10 events for that agent |
+| scope-named | known scopes from the generated `scopes-cache` (e.g. `demo-app`, `infra`, ...) | last 15 events in that scope |
+| agent-named | agent aliases from the generated `agents-cache` (e.g. "what did <agent> do", any language) | last 10 events for that agent |
 | incident | `incident`, `авария`, `падал`, `сломал`, `crashed`, `failed` | P0/P1 events last 7 days |
 
 **Anti-triggers** (suppress injection): `что такое X`, `как сделать X`, `напиши X` — these are definition / how-to / creation, not recall.
@@ -165,9 +182,9 @@ activity_digest(window="today" | "yesterday" | "7d" | "since:ULID", group_by="sc
 
 **Tier 2** (entropy, 5-15ms, blocking): Shannon ≥4.5 on substrings ≥32 chars from base64-ish charset. Skip allowlist (UUIDs, git SHAs, plugin slugs starting with sk-).
 
-**Tier 3** (NER, weekly batch): GLiNER-pii-edge model scans archive. If PII found → alert + retroactive redact + rotate suspected creds.
+**Tier 3** (NER, weekly batch — **planned, not yet implemented**): an offline NER model (e.g. GLiNER-pii-edge) scans the archive for PII the regex+entropy tiers miss; on a hit → alert + retroactive redact + rotate suspected creds. Tiers 1 and 2 run today; tier 3 is a v2 milestone (see `ROADMAP.md`).
 
-Audit log: `~/.local/share/activity-mesh/audit/` encrypted with `age` (key in macOS Keychain). Stores only `{ts, file, line, field, type, sha256, len}` — never original.
+Audit log: `~/.local/share/activity-mesh/audit/` stores only `{ts, event, hits:[{type, len, sha256_first12}]}` — never the original secret. (Optional at-rest `age` encryption of this dir is a documented future hardening.)
 
 ## Cross-OS support matrix
 
@@ -211,8 +228,14 @@ What actually talks to the daemon versus reading the JSONL shards directly:
 | `activity-log emit` (CLI) | appends to the per-host shard directly | **unaffected** |
 | L2/L3 hooks (`session-start-digest.sh`, `user-prompt-router.sh`) | shell out to the CLI | **unaffected** |
 | stdio MCP server (`mcp/server.mjs` — Claude Code, Codex) | spawns the CLI per tool call | **unaffected** |
-| Hermes MCP (HTTP variant, `:7459/mcp`) | HTTP to the daemon | **down** — no automatic fallback |
-| ad-hoc HTTP (`/recent`, `/search`, `/digest`) | HTTP to the daemon | **down** — no automatic fallback |
+| any HTTP-only consumer (`/recent`, `/search`, `/digest`) | HTTP to the daemon | **down** — no automatic fallback |
+
+The daemon binds `127.0.0.1:7459` by default (it serves the full history and
+accepts unauthenticated `/push` writes); exposing it LAN-wide is an explicit
+`--bind 0.0.0.0` / `ACTIVITY_MESH_BIND` decision. `/push` validates the host
+label (path-traversal guard), requires a strict ULID `id`, and runs the same
+redaction pipeline as CLI emit before writing — HTTP pushes are not a side door
+around redaction.
 
 There is no client-side "auto-failover" logic, because the primary contract (CLI + hooks + stdio MCP) is local-first by construction and needs none — since the data layer is Syncthing-replicated JSONL, every host already holds every shard. The daemon is purely a cache/index for HTTP-only consumers; when it dies those consumers fail until the independent dead-man heartbeat alerts (RB-6 in the runbook). An earlier draft described a `daemon-config.yaml` primary/fallback chain with auto-failover — that was never implemented and is superseded by this table.
 

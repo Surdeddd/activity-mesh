@@ -4,7 +4,7 @@
 # Usage: bash bootstrap.sh [--dry-run] [--version vX.Y.Z] [--prefix DIR]
 set -euo pipefail
 
-REPO="Surdeddd/activity-mesh"
+REPO="${ACTIVITY_MESH_REPO:-Surdeddd/activity-mesh}"
 VERSION="${VERSION:-latest}"
 PREFIX="${PREFIX:-/usr/local/bin}"
 DRY_RUN=0
@@ -44,38 +44,53 @@ HOST="$(hostname -s 2>/dev/null || hostname)"
 info "host=$HOST os=$OS arch=$ARCH version=$VERSION dry_run=$DRY_RUN"
 
 # ---- paths -----------------------------------------------------------------
+# Two dirs, no third (see the template header comment):
+#   STORE = ~/.local/share  index.db, cursors, seq, audit, config  (ACTIVITY_MESH_HOME)
+#   STATE = ~/.local/state  logs, tokens, clock-offset, health/heartbeat state (ACTIVITY_MESH_STATE)
 LOG_BIN="$PREFIX/activity-log"
 WATCHER_BIN="$PREFIX/activity-watcher"
-STATE_DIR="$HOME/.local/share/activity-mesh"
-LOG_DIR="$HOME/.local/log/activity-mesh"
+DAEMON_BIN="$PREFIX/activity-mesh-daemon"
+STORE_DIR="$HOME/.local/share/activity-mesh"
+STATE_DIR="$HOME/.local/state/activity-mesh"
 SYNC_DIR="$HOME/Sync/activity"
 CONFIG_DIR="$HOME/.config/activity-mesh"
+# Telegram env file for alerts (override via env). am_notify also honours
+# ACTIVITY_MESH_NOTIFY_CMD and TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID directly.
+TELEGRAM_ENV="${TELEGRAM_ENV:-$CONFIG_DIR/telegram.env}"
 
-# ---- 1. download + install binaries ----------------------------------------
-fetch_bin() {
-    # $1=binary basename (activity-log|activity-watcher); $2=destination path
-    local name="$1" dest="$2"
-    local asset="${name}-${OS}-${ARCH}"
-    local tmp; tmp="$(mktemp)"
-    if [[ $DRY_RUN -eq 1 ]]; then
-        info "DRY: would download $asset → $dest"; return 0
+# ---- 1. download + verify + install the release archive --------------------
+# The release ships one archive per platform holding all three binaries, plus
+# a signed checksums.txt. We verify sha256 before installing anything.
+install_release() {
+    if [[ $DRY_RUN -eq 1 ]]; then info "DRY: would download+verify+install $OS/$ARCH archive"; return 0; fi
+    command -v curl >/dev/null 2>&1 || { err "curl required"; return 1; }
+    local tag="$VERSION"
+    if [[ "$tag" == "latest" ]]; then
+        tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+                | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
+        [[ -n "$tag" ]] || { warn "cannot resolve latest tag from GitHub API"; return 1; }
     fi
-    if command -v gh >/dev/null 2>&1; then
-        local tag="$VERSION"; [[ "$tag" == "latest" ]] && tag=""
-        if gh release download "$tag" --repo "$REPO" --pattern "$asset" --output "$tmp" 2>/dev/null; then
-            install_bin "$tmp" "$dest"; return 0
-        fi
-        warn "gh download failed for $asset, falling back to curl"
-    fi
-    if ! command -v curl >/dev/null 2>&1; then err "neither gh nor curl available"; exit 1; fi
-    local tagseg="latest"; [[ "$VERSION" != "latest" ]] && tagseg="$VERSION"
-    local url="https://github.com/${REPO}/releases/${tagseg}/download/${asset}"
-    info "fetching $url"
-    if ! curl -fsSL --max-time 60 "$url" -o "$tmp"; then
-        warn "release not found at $url — skipping. Build locally: go build -o $dest ./cmd/${name}"
-        rm -f "$tmp"; return 1
-    fi
-    install_bin "$tmp" "$dest"
+    local ver="${tag#v}"
+    local archive="activity-mesh_${ver}_${OS}_${ARCH}.tar.gz"
+    local base="https://github.com/${REPO}/releases/download/${tag}"
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+    info "fetching $archive"
+    curl -fsSL "$base/$archive"      -o "$tmp/$archive"      || { warn "archive download failed"; return 1; }
+    curl -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt" || { warn "checksums download failed"; return 1; }
+    # verify sha256
+    local want got
+    want="$(grep " $archive\$" "$tmp/checksums.txt" | awk '{print $1}')"
+    [[ -n "$want" ]] || { err "no checksum entry for $archive"; return 1; }
+    if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$tmp/$archive" | awk '{print $1}')"
+    else got="$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')"; fi
+    [[ "$want" == "$got" ]] || { err "checksum MISMATCH for $archive (want $want got $got)"; return 1; }
+    ok "checksum verified ($archive)"
+    tar -xzf "$tmp/$archive" -C "$tmp"
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        [[ -f "$tmp/$b" ]] || { warn "$b missing from archive"; continue; }
+        install_bin "$tmp/$b" "$PREFIX/$b"
+    done
 }
 install_bin() {
     local src="$1" dest="$2"
@@ -85,14 +100,15 @@ install_bin() {
     else
         install -m 0755 "$src" "$dest"
     fi
-    rm -f "$src"; ok "binary installed → $dest"
+    ok "binary installed → $dest"
 }
 
-fetch_bin activity-log     "$LOG_BIN"     || warn "no activity-log binary; CLI smoke will be skipped"
-fetch_bin activity-watcher "$WATCHER_BIN" || warn "no activity-watcher binary; watcher unit will fail until built"
+if ! install_release; then
+    warn "release install failed — build locally instead: make install (needs Go)"
+fi
 
 # ---- 2. scaffold directories ----------------------------------------------
-for d in "$STATE_DIR" "$LOG_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
+for d in "$STORE_DIR" "$STATE_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
     if [[ -d "$d" ]]; then ok "exists $d"
     else run "mkdir -p \"$d\""; ok "mkdir $d"; fi
 done
@@ -103,9 +119,24 @@ if [[ -f "$SCRIPT_DIR/../configs/watcher.yaml" ]] && [[ ! -f "$CONFIG_DIR/watche
     ok "installed default watcher.yaml"
 fi
 
+# publish registries to the sync dir (canonical live location the CLI, the
+# router cache generator, and schema-drift.sh all read). Never overwrite a
+# live copy — only seed missing ones.
+if [[ -d "$SCRIPT_DIR/../registries" ]]; then
+    for reg in kinds scopes agents redaction; do
+        src="$SCRIPT_DIR/../registries/$reg.yaml"
+        dst="$SYNC_DIR/$reg.yaml"
+        if [[ -f "$src" ]] && [[ ! -f "$dst" ]]; then
+            run "cp \"$src\" \"$dst\""
+            ok "seeded registry → $dst"
+        fi
+    done
+fi
+
 if command -v "$LOG_BIN" >/dev/null 2>&1 && [[ $DRY_RUN -eq 0 ]]; then
-    "$LOG_BIN" init --state "$STATE_DIR" --sync "$SYNC_DIR" 2>/dev/null \
-        || warn "activity-log init returned non-zero (subcommand may not exist yet)"
+    "$LOG_BIN" init --sync-dir "$SYNC_DIR" --yes 2>/dev/null \
+        || warn "activity-log init returned non-zero"
+    "$LOG_BIN" refresh-caches 2>/dev/null || warn "refresh-caches returned non-zero"
 else
     info "skip 'activity-log init' (binary missing or dry-run)"
 fi
@@ -117,10 +148,13 @@ render_template() {
     local c; c="$(cat "$tmpl")"
     c="${c//\{\{BIN_PATH\}\}/$LOG_BIN}"
     c="${c//\{\{WATCHER_BIN\}\}/$WATCHER_BIN}"
+    c="${c//\{\{DAEMON_BIN\}\}/$DAEMON_BIN}"
+    c="${c//\{\{STORE_DIR\}\}/$STORE_DIR}"
     c="${c//\{\{STATE_DIR\}\}/$STATE_DIR}"
     c="${c//\{\{SYNC_DIR\}\}/$SYNC_DIR}"
     c="${c//\{\{CONFIG_DIR\}\}/$CONFIG_DIR}"
-    c="${c//\{\{LOG_DIR\}\}/$LOG_DIR}"
+    c="${c//\{\{TELEGRAM_ENV\}\}/$TELEGRAM_ENV}"
+    c="${c//\{\{REPO_DIR\}\}/$(cd "$SCRIPT_DIR/.." && pwd)}"
     c="${c//\{\{HOME\}\}/$HOME}"
     c="${c//\{\{USER\}\}/${USER:-$(id -un)}}"
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -128,11 +162,17 @@ render_template() {
     else printf '%s\n' "$c" > "$dest"; fi
 }
 
+# All units bootstrap knows about. watcher+daemon are long-running services;
+# health/heartbeat/compact/weekly-digest are periodic (launchd StartInterval /
+# systemd timers shipped as templates).
+MAC_UNITS=(watcher daemon health heartbeat compact weekly-digest)
+
 install_macos() {
     local agents="$HOME/Library/LaunchAgents"; run "mkdir -p \"$agents\""
-    for unit in watcher daemon; do
-        local plist="$agents/com.activity-mesh.${unit}.plist"
-        render_template "$SCRIPT_DIR/templates/launchd-${unit}.plist.tmpl" "$plist" || continue
+    for unit in "${MAC_UNITS[@]}"; do
+        local tmpl plist="$agents/com.activity-mesh.${unit}.plist"
+        tmpl="$SCRIPT_DIR/templates/launchd-${unit}.plist.tmpl"
+        render_template "$tmpl" "$plist" || continue
         ok "rendered $plist"
         if [[ $DRY_RUN -eq 0 ]]; then
             launchctl bootout "gui/$(id -u)/com.activity-mesh.${unit}" 2>/dev/null || true
@@ -145,6 +185,7 @@ install_macos() {
 
 install_linux() {
     local user_dir="$HOME/.config/systemd/user"; run "mkdir -p \"$user_dir\""
+    # long-running services
     for unit in watcher daemon; do
         local svc="$user_dir/activity-mesh-${unit}.service"
         render_template "$SCRIPT_DIR/templates/systemd-${unit}.service.tmpl" "$svc" || continue
@@ -156,6 +197,7 @@ install_linux() {
             else warn "systemctl enable failed for ${unit}"; fi
         else info "DRY: systemctl --user enable --now activity-mesh-${unit}"; fi
     done
+    warn "periodic jobs (health/heartbeat/compact/weekly-digest): add systemd timers or cron — see installers/README.md"
     if [[ $DRY_RUN -eq 0 ]]; then
         loginctl enable-linger "$USER" 2>/dev/null \
             || warn "enable-linger failed (services pause when logged out)"
@@ -167,9 +209,10 @@ install_linux() {
 
 # ---- 4. verify -------------------------------------------------------------
 if command -v "$LOG_BIN" >/dev/null 2>&1 && [[ $DRY_RUN -eq 0 ]]; then
-    info "running: $LOG_BIN status"
+    info "running: $LOG_BIN --version"
+    "$LOG_BIN" --version 2>/dev/null || true
     "$LOG_BIN" status || warn "status returned non-zero"
-    "$LOG_BIN" emit --kind status --scope bootstrap \
+    "$LOG_BIN" emit --kind status --scope activity-mesh \
         --summary "installed on $HOST" || warn "smoke emit failed"
     ok "verification done"
 else info "skip verify (binary missing or dry-run)"; fi

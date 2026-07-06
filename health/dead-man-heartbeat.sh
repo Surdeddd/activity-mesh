@@ -58,9 +58,11 @@ AL_BIN=$(find_activity_log) || AL_BIN=""
 # binary; silent fail if none. Bounded to <2s by command-budget chain.
 emit_canary() {
     [ -n "$AL_BIN" ] || return 0
+    # scope=activity-mesh is the registered meta scope for self-events
+    # (heartbeat/compile/canary) — keeps schema-drift clean.
     "$AL_BIN" emit \
         --kind canary \
-        --scope infra:heartbeat \
+        --scope activity-mesh \
         --agent heartbeat \
         --summary "hourly heartbeat $(date -u +%FT%TZ) ok=$1" \
         >/dev/null 2>&1
@@ -104,13 +106,13 @@ if [ "$last" -gt 0 ] && [ $(( now - last )) -lt "$ALERT_COOLDOWN" ]; then
     exit 0
 fi
 
-# 4. INDEPENDENT alert path: read token from telegram channel .env, curl to bot api
-TG_ENV="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
-TOKEN=""
-if [ -f "$TG_ENV" ]; then
-    TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$TG_ENV" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-fi
-CHAT_ID="${TELEGRAM_CHAT_ID:-466332453}"   # Maxim's user_id default
+# 4. INDEPENDENT alert path. Delivery via am_notify_telegram from lib.sh
+# (env / TELEGRAM_ENV creds, no hardcoded chat id) — lib.sh has no daemon
+# dependency, so the dead-man process stays independent of the thing it
+# watches. Sourced late so a broken lib never blocks the health probe above.
+HERE_DMH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+. "$HERE_DMH/lib.sh"
 
 host=$(hostname -s 2>/dev/null || echo unknown)
 ts_iso=$(date -u +%FT%TZ)
@@ -126,7 +128,7 @@ Daemon not responding to /health for $misses consecutive checks — operational 
 
 ⚡ Action: revive daemon
 \`launchctl list | grep activity-mesh\`
-\`launchctl kickstart -k gui/\$UID/com.maxim.activity-mesh.daemon\`
+\`launchctl kickstart -k gui/\$UID/com.activity-mesh.daemon\`
 log: \`$LOG\`
 
 ━━━━━━━━━━━━━━━━━
@@ -141,24 +143,16 @@ log: \`$LOG\`
 
 ⚡ Действие: revive daemon
 \`launchctl list | grep activity-mesh\`
-\`launchctl kickstart -k gui/\$UID/com.maxim.activity-mesh.daemon\`
+\`launchctl kickstart -k gui/\$UID/com.activity-mesh.daemon\`
 log: \`$LOG\`
 
 \`$ts_iso · $host\`"
 
-if [ -n "$TOKEN" ] && command -v curl >/dev/null 2>&1; then
-    resp=$(curl -s -m 10 -X POST \
-        "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-        --data-urlencode "chat_id=${CHAT_ID}" \
-        --data-urlencode "text=${TEXT}" 2>/dev/null) || resp=""
-    if printf '%s' "$resp" | grep -q '"ok":true'; then
-        log "alert sent to chat_id=${CHAT_ID}"
-        echo "$now" > "$LAST_ALERT_FILE" 2>/dev/null
-    else
-        log "alert FAILED resp=${resp:0:200}"
-    fi
+if am_notify "$TEXT"; then
+    log "alert sent"
+    echo "$now" > "$LAST_ALERT_FILE" 2>/dev/null
 else
-    log "no token / curl: cannot send alert"
+    log "alert FAILED (no notify cmd / no telegram creds / curl missing)"
 fi
 
 exit 0

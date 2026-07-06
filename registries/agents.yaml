@@ -1,168 +1,77 @@
-# activity-mesh — agent registry
+# activity-mesh — agent registry (EXAMPLE)
+#
+# This file ships as a generic example. The live, personalised copy lives in
+# the sync dir (~/Sync/activity/agents.yaml); `refresh-caches` reads that copy
+# first and falls back to this seed. Edit the sync copy for your own agents;
+# keep this file generic so the public repo carries no private infrastructure.
 #
 # Each writer that emits events declares itself here. Used by:
 #   - silence detector (per-agent expected-cadence threshold)
-#   - dead-man heartbeat (which agents MUST emit a heartbeat)
-#   - reader UIs (label resolution, host badges)
+#   - dead-man heartbeat (which agents MUST emit)
+#   - the L3 router agents-cache (alias → agent-intent matching)
 #
 # Status enum: active | deprecated | archived
-#   active     — emits expected, missing-heartbeat alerts fire
+#   active     — emits expected; missing-heartbeat alerts fire
 #   deprecated — emits accepted, no alerts
 #   archived   — emits not expected; permanent silence is not an incident
 #
-# `expected_silence: true` means this agent is intentionally not emitting;
-# the silence detector skips it. Use for paused / disabled agents.
+# `expected_silence: true` skips the agent in the silence detector.
+# `aliases` create an agent intent in the L3 router when matched in prompt
+# text (any language). `weak_aliases` only qualify an already-detected intent
+# (e.g. a bare generic term that usually means the tool, not this agent).
 schema_version: 1
 
 agents:
-  # ----- claude code instances -----
-  # `aliases` create an agent intent in the L3 router; `weak_aliases` only
-  # qualify an already-detected intent (a bare "claude/клод" almost always
-  # means Claude-the-tool, not this agent).
-  - id: claude-mac
-    description: "Claude Code on the MacBook (interactive)"
-    runtime: claude-code
-    host: macbook
+  - id: assistant
+    description: "Example interactive AI assistant"
+    runtime: example
+    host: host-a
     status: active
     expected_silence: false
     silence_threshold_hours: 6
-    aliases: [claude-mac, клод-mac, клод-мак]
-    weak_aliases: [claude, клод]
+    aliases: [assistant]
 
-  - id: claude-mini
-    description: "Claude Code on the mac-mini (OpenClaw bots, 24/7)"
-    runtime: claude-code
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 2
-
-  # ----- standalone agents -----
-  - id: hermes
-    description: "Hermes Agent v0.11+ on mac-mini"
-    runtime: hermes-agent
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 4
-    aliases: [hermes, хермес, гермес]
-
-  - id: viktor
-    description: "Viktor — Codex-harness (gpt-5.5)"
-    runtime: codex-harness
-    host: mac-mini
+  - id: worker
+    description: "Example background worker agent"
+    runtime: example
+    host: host-b
     status: active
     expected_silence: false
     silence_threshold_hours: 6
-    aliases: [viktor, виктор]
+    aliases: [worker]
 
-  # ----- openclaw bots -----
-  - id: anton
-    description: "Anton — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-    aliases: [anton, антон]
-
-  - id: openclaw-billy
-    description: "Billy — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  - id: openclaw-marina
-    description: "Marina — OpenClaw bot (design)"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  - id: openclaw-eva
-    description: "Eva — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  - id: openclaw-jack
-    description: "Jack — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  - id: openclaw-luna
-    description: "Luna — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  - id: openclaw-nova
-    description: "Nova — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  - id: openclaw-sage
-    description: "Sage — OpenClaw bot"
-    runtime: openclaw
-    host: mac-mini
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 6
-
-  # ----- daemons / services -----
-  - id: billing-proxy
-    description: "Billing proxy daemon (Node)"
-    runtime: node-daemon
-    host: macbook
+  - id: scheduler
+    description: "Example scheduled-jobs agent"
+    runtime: example
+    host: host-b
     status: active
     expected_silence: false
     silence_threshold_hours: 12
 
-  - id: paperclip
-    description: "Paperclip backend (localhost:3100)"
-    runtime: paperclip-server
-    host: macbook
-    status: active
-    expected_silence: false
-    silence_threshold_hours: 24
-
-  # ----- bridge / channels -----
-  - id: bridge-telegram
-    description: "Claude bridge Telegram channel agent"
-    runtime: claude-code
-    host: macbook
+  - id: indexer
+    description: "Example indexing service"
+    runtime: example
+    host: host-a
     status: active
     expected_silence: false
     silence_threshold_hours: 12
 
-  # ----- archived (permanently disabled) -----
-  - id: reina
-    description: "Reina — disabled 2026-04-28 per Maxim's directive"
-    runtime: openclaw
-    host: mac-mini
-    status: archived
-    archived_at: 2026-04-28
+  # The default CLI emitter label (`activity-log emit` uses agent=cli unless
+  # $ACTIVITY_AGENT overrides). Keep it registered so silence/adoption checks
+  # resolve it.
+  - id: cli
+    description: "Default activity-log CLI emitter"
+    runtime: cli
+    host: any
+    status: active
     expected_silence: true
-    reason: "permanent disable — does not generate revenue"
 
-  - id: crypto-bot
-    description: "Crypto trading bot — disabled 2026-04-28"
-    runtime: openclaw
-    host: mac-mini
+  # ----- archived example (permanently disabled) -----
+  - id: retired-bot
+    description: "Example archived agent — permanent silence is expected"
+    runtime: example
+    host: host-b
     status: archived
-    archived_at: 2026-04-28
+    archived_at: 2026-01-15
     expected_silence: true
-    reason: "permanent disable — does not generate revenue"
+    reason: "example of a decommissioned agent"

@@ -56,6 +56,7 @@ func main() {
 	root.AddCommand(compactCmd())
 	root.AddCommand(clockSyncCmd())
 	root.AddCommand(refreshScopesCmd())
+	root.AddCommand(installGitHookCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -160,25 +160,8 @@ printf '{"generated_at":%d,"window":"%s","events":%d,"verdict":"%s"}\n' \
 
 [ "$DRY_RUN" -eq 1 ] && exit 0
 
-# Push: notify-maxim wrapper preferred; fallback direct telegram
-sent=0
-for n in notify-maxim "$HOME/.local/bin/notify-maxim"; do
-    if command -v "$n" >/dev/null 2>&1 || [ -x "$n" ]; then
-        printf '%s' "$DIGEST" | "$n" 2>/dev/null && sent=1 && break
-    fi
-done
-if [ "$sent" -eq 0 ]; then
-    TG_ENV="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
-    TOKEN=""
-    [ -f "$TG_ENV" ] && TOKEN=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$TG_ENV" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-    CHAT_ID="${TELEGRAM_CHAT_ID:-466332453}"
-    if [ -n "$TOKEN" ] && command -v curl >/dev/null 2>&1; then
-        curl -s -m 10 -X POST \
-            "https://api.telegram.org/bot${TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${CHAT_ID}" \
-            --data-urlencode "parse_mode=Markdown" \
-            --data-urlencode "text=${DIGEST}" >/dev/null 2>&1 || true
-    fi
-fi
+# Push through the shared notifier chain (custom cmd → notify-maxim →
+# direct Telegram). No hardcoded chat id — creds come from env / TELEGRAM_ENV.
+am_notify "$DIGEST" || printf 'warn: weekly digest undeliverable\n' >&2
 
 exit 0

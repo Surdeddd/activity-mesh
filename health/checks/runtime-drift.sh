@@ -1,7 +1,13 @@
 #!/bin/bash
-# runtime-drift — versions of Claude Code, Codex, Hermes vs known-compatible.
-# Compatible list: $ACTIVITY_MESH_SYNC/compat-versions.txt (one "tool=ver" per line).
-# If file absent, just record current versions as info.
+# runtime-drift — versions of the tools you care about vs a known-compatible
+# list. The tool set is data, not code:
+#   $ACTIVITY_MESH_SYNC/compat-versions.txt — one "tool=version" per line,
+#   where `tool` is a command on PATH that answers `--version`.
+# Absent file → just record the observed versions as info (no drift concept).
+#
+# Example compat-versions.txt:
+#   claude=2.1.0
+#   codex=0.9.3
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -15,30 +21,23 @@ read_ver() {
         "$cmd" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1
     fi
 }
-cc_ver=$(read_ver claude)
-cx_ver=$(read_ver codex)
-hm_ver=$(read_ver hermes)
-got="claude=${cc_ver:-?},codex=${cx_ver:-?},hermes=${hm_ver:-?}"
 
 if [ ! -f "$COMPAT" ]; then
-    am_emit "$NAME" 0 ok "no compat-versions.txt; observed $got"; exit 0
+    am_emit "$NAME" 0 ok "no compat-versions.txt (declare tools to track there)"; exit 0
 fi
 
-drift=0; det=""
+drift=0; det=""; observed=""
 while IFS='=' read -r tool ver; do
     [ -z "$tool" ] && continue
-    case "$tool" in
-        claude) cur="$cc_ver" ;;
-        codex)  cur="$cx_ver" ;;
-        hermes) cur="$hm_ver" ;;
-        *) continue ;;
-    esac
+    case "$tool" in \#*) continue ;; esac   # allow comment lines
+    cur=$(read_ver "$tool")
+    observed="$observed ${tool}=${cur:-?}"
     if [ -n "$cur" ] && [ "$cur" != "$ver" ]; then
         drift=$((drift+1)); det="$det $tool: $ver→$cur"
     fi
 done < "$COMPAT"
 
-if [ "$drift" -eq 0 ]; then am_emit "$NAME" 1 ok "$got matches compat list"
-else am_emit "$NAME" 2 warn "$drift drifts:$det"
+if [ "$drift" -eq 0 ]; then am_emit "$NAME" 1 ok "matches compat list:$observed"
+else am_emit "$NAME" 2 warn "$drift drift(s):$det"
 fi
 exit 0

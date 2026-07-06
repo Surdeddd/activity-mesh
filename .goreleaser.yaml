@@ -1,0 +1,85 @@
+# goreleaser v2 — release the three cgo-free binaries for all platforms.
+# Everything cross-compiles from a single Linux runner (modernc.org/sqlite).
+version: 2
+
+project_name: activity-mesh
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: activity-log
+    main: ./cmd/activity-log
+    binary: activity-log
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+  - id: activity-watcher
+    main: ./cmd/activity-watcher
+    binary: activity-watcher
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: activity-mesh-daemon
+    main: ./server
+    binary: activity-mesh-daemon
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+# One archive per platform holding all three binaries + docs.
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+      - registries/**/*
+      - installers/**/*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+# Cosign keyless signing of the checksums (verifiable via Rekor).
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
+
+release:
+  draft: false
+  prerelease: auto
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:", "Merge branch"]

@@ -67,17 +67,17 @@ func TestKindLookup(t *testing.T) {
 func TestScopeLifecycle(t *testing.T) {
 	r := mustLoad(t)
 
-	allowed, warn := r.CanEmitToScope("openclaw")
+	allowed, warn := r.CanEmitToScope("demo-app")
 	if !allowed || warn != "" {
-		t.Errorf("openclaw (active): allowed=%v warn=%q", allowed, warn)
+		t.Errorf("demo-app (active): allowed=%v warn=%q", allowed, warn)
 	}
 
-	allowed, warn = r.CanEmitToScope("legacy-bot")
+	allowed, warn = r.CanEmitToScope("legacy-service")
 	if !allowed {
-		t.Errorf("legacy-bot (deprecated): expected allowed=true")
+		t.Errorf("legacy-service (deprecated): expected allowed=true")
 	}
 	if !strings.Contains(warn, "deprecated") {
-		t.Errorf("legacy-bot warn missing 'deprecated': %q", warn)
+		t.Errorf("legacy-service warn missing 'deprecated': %q", warn)
 	}
 
 	allowed, warn = r.CanEmitToScope("project:client-x")
@@ -96,30 +96,30 @@ func TestScopeLifecycle(t *testing.T) {
 }
 
 // TestAgentLookup ensures agent lookups + lifecycle work, including the
-// archived-with-expected_silence case (Reina).
+// archived-with-expected_silence case.
 func TestAgentLookup(t *testing.T) {
 	r := mustLoad(t)
 
-	hermes, ok := r.GetAgent("hermes")
+	assistant, ok := r.GetAgent("assistant")
 	if !ok {
-		t.Fatalf("hermes not found")
+		t.Fatalf("assistant not found")
 	}
-	if hermes.Status != StatusActive {
-		t.Errorf("hermes status=%q, want active", hermes.Status)
+	if assistant.Status != StatusActive {
+		t.Errorf("assistant status=%q, want active", assistant.Status)
 	}
-	if !r.ExpectsHeartbeat("hermes") {
-		t.Errorf("hermes should expect heartbeat")
+	if !r.ExpectsHeartbeat("assistant") {
+		t.Errorf("assistant should expect heartbeat")
 	}
 
-	reina, ok := r.GetAgent("reina")
+	retired, ok := r.GetAgent("retired-bot")
 	if !ok {
-		t.Fatalf("reina not found")
+		t.Fatalf("retired-bot not found")
 	}
-	if reina.Status != StatusArchived {
-		t.Errorf("reina status=%q, want archived", reina.Status)
+	if retired.Status != StatusArchived {
+		t.Errorf("retired-bot status=%q, want archived", retired.Status)
 	}
-	if r.ExpectsHeartbeat("reina") {
-		t.Errorf("reina should NOT expect heartbeat (archived + expected_silence)")
+	if r.ExpectsHeartbeat("retired-bot") {
+		t.Errorf("retired-bot should NOT expect heartbeat (archived + expected_silence)")
 	}
 }
 
@@ -139,7 +139,7 @@ func TestActiveScopesAndAgents(t *testing.T) {
 		if a.Status != StatusActive {
 			t.Errorf("ActiveAgents returned non-active: %s (%s)", a.ID, a.Status)
 		}
-		if a.ID == "reina" {
+		if a.ID == "retired-bot" {
 			t.Errorf("archived agent leaked into ActiveAgents")
 		}
 	}
@@ -188,26 +188,25 @@ scopes:
 	}
 }
 
-// TestRouterScopes_RealFiles pins the canonical registry: every scope name
-// that collides with a router agent-intent (hooks/user-prompt-router.sh
-// AGENT_FILTER case-arms) must be excluded from the router cache, while the
-// known whitelist scopes stay in.
+// TestRouterScopes_RealFiles pins the shipped registry: every scope name that
+// collides with an agent alias (agents.yaml) must be excluded from the router
+// cache, while ordinary scopes stay in.
 func TestRouterScopes_RealFiles(t *testing.T) {
 	r := mustLoad(t)
 	inCache := map[string]bool{}
 	for _, s := range r.RouterScopes() {
 		inCache[s.Name] = true
 	}
-	for _, overlap := range []string{"hermes", "viktor", "claude-mac", "anton"} {
+	for _, overlap := range []string{"assistant", "worker"} {
 		if _, ok := r.GetScope(overlap); !ok {
 			t.Errorf("expected scope %q in registry", overlap)
 			continue
 		}
 		if inCache[overlap] {
-			t.Errorf("scope %q collides with a router agent-intent name and must be router: false", overlap)
+			t.Errorf("scope %q collides with an agent alias and must be router: false", overlap)
 		}
 	}
-	for _, want := range []string{"openclaw", "billing-proxy", "rentier", "deploy"} {
+	for _, want := range []string{"demo-app", "infra", "web", "api"} {
 		if !inCache[want] {
 			t.Errorf("expected scope %q in the router cache", want)
 		}

@@ -6,12 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={{BIN_PATH}} --port 7459 --sync-dir {{SYNC_DIR}} --state-dir {{STATE_DIR}}
+ExecStart={{DAEMON_BIN}} --port 7459 --sync-dir {{SYNC_DIR}} --state-dir {{STORE_DIR}}
 Restart=on-failure
 RestartSec=30s
-StandardOutput=append:{{LOG_DIR}}/daemon.log
-StandardError=append:{{LOG_DIR}}/daemon.err
-Environment=ACTIVITY_MESH_HOME={{STATE_DIR}}
+StandardOutput=append:{{STATE_DIR}}/daemon.log
+StandardError=append:{{STATE_DIR}}/daemon.err
+Environment=ACTIVITY_MESH_HOME={{STORE_DIR}}
 Environment=ACTIVITY_MESH_SYNC={{SYNC_DIR}}
 WorkingDirectory={{HOME}}
 NoNewPrivileges=true

@@ -1,107 +1,70 @@
-# activity-mesh — scope registry
+# activity-mesh — scope registry (EXAMPLE)
 #
-# Scopes group events by domain. Long-lived scopes (infrastructure, named
-# agents, recurring projects) are listed here. Time-bounded scopes use the
-# `project:<name>` namespace and SHOULD set `expires`.
+# This file ships as a generic example. The live, personalised copy lives in
+# the sync dir (~/Sync/activity/scopes.yaml) — the CLI, `refresh-caches`, and
+# health/checks/schema-drift.sh all read that copy first and fall back to this
+# one only as a seed. Edit the sync copy for your own scopes; keep this file
+# generic so the public repo carries no private infrastructure.
 #
-# Status enum: active | deprecated | archived
+# Scopes group events by domain. Status enum: active | deprecated | archived
 #   active     — accept new emits, surface in queries
-#   deprecated — accept new emits but warn, surface in queries with marker
+#   deprecated — accept new emits but warn, surface with a marker
 #   archived   — reject new emits (CLI warns), still readable
 #
-# Convention: keep names lowercase + kebab-case. Namespaced scopes use `:`
-# as separator (e.g. `project:client-x`).
+# Convention: lowercase kebab-case; namespaced scopes use `:` (project:client-x).
 #
-# Optional `router: false` (default true) excludes a scope from the L3
-# router scopes-cache (`activity-log refresh-scopes`). Required for scope
-# names that collide with the router's agent-intent names
-# (hooks/user-prompt-router.sh AGENT_FILTER: hermes / viktor / claude-mac /
-# anton) — otherwise scope intent and agent intent double-filter to empty.
+# Optional `router: false` (default true) excludes a scope from the L3 router
+# scopes-cache. Required when a scope name collides with an agent alias in
+# agents.yaml — otherwise scope-intent and agent-intent double-filter to empty.
 schema_version: 1
 
 scopes:
-  # ----- core infra -----
-  - name: openclaw
-    description: "OpenClaw multi-agent system on mac-mini"
+  # ----- example project / product scopes (appear in the router cache) -----
+  - name: demo-app
+    description: "Example primary application scope"
     status: active
-    created: 2026-04-15
-  - name: hermes
-    description: "Hermes Agent — identity-bearing assistant on mac-mini"
+    created: 2026-01-01
+  - name: infra
+    description: "Example infrastructure / ops scope"
     status: active
-    created: 2026-04-15
-    router: false # agent-overlap: routed via agent intent
-  - name: billing-proxy
-    description: "Anthropic billing proxy (Claude Max OAuth → API)"
+    created: 2026-01-01
+  - name: web
+    description: "Example web frontend scope"
     status: active
-    created: 2026-04-15
-  - name: claude-mac
-    description: "Claude Code on the MacBook (interactive)"
+    created: 2026-01-01
+  - name: api
+    description: "Example backend API scope"
     status: active
-    created: 2026-04-15
-    router: false # agent-overlap: routed via agent intent
-  - name: claude-mini
-    description: "Claude Code on the mac-mini (24/7 OpenClaw bots)"
-    status: active
-    created: 2026-04-15
+    created: 2026-01-01
 
-  # ----- named agents -----
-  - name: viktor
-    description: "Viktor — Codex-harness agent (gpt-5.5 via codex)"
+  # ----- agent-overlap scopes -----
+  # These names also exist as agent aliases in agents.yaml, so they must be
+  # router: false (routed via agent intent instead — see the header note).
+  - name: assistant
+    description: "Example scope colliding with the 'assistant' agent alias"
     status: active
-    created: 2026-05-04
-    router: false # agent-overlap: routed via agent intent
-  - name: anton
-    description: "Anton — OpenClaw agent (claude-opus-4-7)"
+    created: 2026-01-01
+    router: false
+  - name: worker
+    description: "Example scope colliding with the 'worker' agent alias"
     status: active
-    created: 2026-04-15
-    router: false # agent-overlap: routed via agent intent
+    created: 2026-01-01
+    router: false
 
-  # ----- products / projects -----
-  - name: paperclip
-    description: "Paperclip local AI project manager (localhost:3100)"
-    status: active
-    created: 2026-04-15
-  - name: open-design
-    description: "Open Design daemon (localhost:7456)"
-    status: active
-    created: 2026-05-02
-  - name: gramgpt
-    description: "GramGPT (gptgrammar) project"
-    status: active
-    created: 2026-04-15
-  - name: dogma
-    description: "Dogma.ru design project"
-    status: active
-    created: 2026-04-15
-  - name: rentier
-    description: "Rentier SaaS booking — Nx monorepo (NestJS+gRPC+React)"
-    status: active
-    created: 2026-06-10
-  - name: deploy
-    description: "Deployments / releases across projects"
-    status: active
-    created: 2026-06-10
-
-  # ----- meta scope (system-level events) -----
+  # ----- meta scope (system-level self-events) -----
   - name: activity-mesh
     description: "Self-events from activity-mesh itself (heartbeat, compile, canary)"
     status: active
-    created: 2026-05-04
+    created: 2026-01-01
 
-  # ----- examples of lifecycle transitions -----
-  # template for a time-bounded engagement scope:
-  - name: project:client-x
-    description: "Example: time-bounded client engagement"
-    status: archived
-    created: 2026-05-04
-    expires: 2026-05-18
-    replaces: null
-    replaced_by: null
-
-  # template for a deprecated/superseded scope:
-  - name: legacy-bot
-    description: "Example: superseded by `viktor`"
+  # ----- lifecycle-transition examples -----
+  - name: legacy-service
+    description: "Example deprecated scope, superseded by demo-app"
     status: deprecated
-    created: 2026-04-15
-    replaces: null
-    replaced_by: viktor
+    created: 2026-01-01
+    replaced_by: demo-app
+  - name: project:client-x
+    description: "Example time-bounded engagement scope, now archived"
+    status: archived
+    created: 2026-01-01
+    expires: 2026-02-01

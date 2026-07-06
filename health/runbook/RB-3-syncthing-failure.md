@@ -14,7 +14,7 @@ df -h $HOME                                # disk full?
 ```
 
 ## Recovery
-1. `launchctl kickstart -k gui/$(id -u)/com.maxim.syncthing` (or distro equivalent).
+1. Restart Syncthing: `launchctl kickstart -k gui/$(id -u)/<your-syncthing-label>` on macOS, `systemctl --user restart syncthing` on Linux, or the tray app.
 2. If db locked: stop Syncthing, `mv ~/Library/Application\ Support/Syncthing/index-v0.14.0.db{,.bak-$(date +%s)}`, restart — Syncthing rebuilds.
 3. For each `.sync-conflict-*` file, decide manually: usually keep the newer mtime, delete the older. JSONL is append-only so concatenate is also valid.
 4. Verify all peers show "Up to Date" in Syncthing UI.

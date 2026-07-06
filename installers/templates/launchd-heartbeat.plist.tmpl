@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <!-- INDEPENDENT process. Must NOT depend on com.activity-mesh.daemon being alive.
-         If the daemon dies, this is the watchdog that wakes Maxim up. -->
+         If the daemon dies, this is the watchdog that raises the alarm. -->
     <key>Label</key>
     <string>com.activity-mesh.heartbeat</string>
     <key>ProgramArguments</key>
@@ -16,22 +16,21 @@
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{{LOG_DIR}}/heartbeat-cron.log</string>
+    <string>{{STATE_DIR}}/heartbeat-cron.log</string>
     <key>StandardErrorPath</key>
-    <string>{{LOG_DIR}}/heartbeat-cron.err</string>
+    <string>{{STATE_DIR}}/heartbeat-cron.err</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- {{STATE_DIR}} must render to the per-host runtime state dir
-             (~/.local/state/activity-mesh) — the same place env-less emitters
-             read clock-offset-ms from (pkg/event.StateDir). NOT the log dir,
-             and NOT the ~/.local/share store dir bootstrap.sh's $STATE_DIR
-             variable points at. -->
+        <!-- {{STATE_DIR}} = ~/.local/state/activity-mesh — the SAME place
+             env-less emitters read clock-offset-ms from (ACTIVITY_MESH_STATE).
+             The heartbeat refreshes that cache hourly. -->
         <key>ACTIVITY_MESH_STATE</key>
         <string>{{STATE_DIR}}</string>
         <key>ACTIVITY_MESH_HEALTH_URL</key>
         <string>http://127.0.0.1:7459/health</string>
+        <!-- Alert delivery: ACTIVITY_MESH_NOTIFY_CMD (stdin) or Telegram creds. -->
         <key>TELEGRAM_ENV</key>
-        <string>{{HOME}}/.claude/channels/telegram/.env</string>
+        <string>{{TELEGRAM_ENV}}</string>
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>

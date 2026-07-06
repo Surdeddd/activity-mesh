@@ -9,9 +9,9 @@ Type=simple
 ExecStart={{WATCHER_BIN}} --config {{CONFIG_DIR}}/watcher.yaml
 Restart=on-failure
 RestartSec=30s
-StandardOutput=append:{{LOG_DIR}}/watcher.log
-StandardError=append:{{LOG_DIR}}/watcher.err
-Environment=ACTIVITY_MESH_HOME={{STATE_DIR}}
+StandardOutput=append:{{STATE_DIR}}/watcher.log
+StandardError=append:{{STATE_DIR}}/watcher.err
+Environment=ACTIVITY_MESH_HOME={{STORE_DIR}}
 Environment=ACTIVITY_MESH_SYNC={{SYNC_DIR}}
 WorkingDirectory={{HOME}}
 Nice=5

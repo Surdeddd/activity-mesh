@@ -11,9 +11,7 @@
         <string>--keep</string>
         <string>90d</string>
     </array>
-    <!-- Monthly: 1st of month, 04:40 local. NOT auto-installed by
-         bootstrap.sh — render the placeholders and load manually:
-         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.activity-mesh.compact.plist -->
+    <!-- Monthly: 1st of month, 04:40 local. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Day</key>
@@ -26,13 +24,13 @@
     <key>RunAtLoad</key>
     <false/>
     <key>StandardOutPath</key>
-    <string>{{LOG_DIR}}/compact.log</string>
+    <string>{{STATE_DIR}}/compact.log</string>
     <key>StandardErrorPath</key>
-    <string>{{LOG_DIR}}/compact.err</string>
+    <string>{{STATE_DIR}}/compact.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>ACTIVITY_MESH_HOME</key>
-        <string>{{STATE_DIR}}</string>
+        <string>{{STORE_DIR}}</string>
         <key>ACTIVITY_MESH_SYNC</key>
         <string>{{SYNC_DIR}}</string>
         <key>PATH</key>

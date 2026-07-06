@@ -80,19 +80,25 @@ timeout, pure Go) and atomically writes the rounded ms offset to
 automatically; on hosts without the heartbeat schedule it with one cron
 line: `0 * * * * /usr/local/bin/activity-log clock-sync`.
 
-## Router scopes-cache
+## Router caches
 
-The L3 router (`hooks/user-prompt-router.sh`) matches prompts against
-`~/.config/activity-mesh/scopes-cache` (one scope name per line).
-`activity-log refresh-scopes` regenerates it from the scopes registry —
-active scopes only, minus those marked `router: false` (scope names that
-collide with the router's agent-intent names, e.g. `hermes`, would
-double-filter `--scope`+`--agent` to empty). It reads the live
-`<sync>/scopes.yaml` when published (falling back to the repo's
-`registries/scopes.yaml`, or `--registry PATH`), writes atomically, and on
-any read/parse failure leaves the existing cache untouched. `--dry-run`
-previews. The dead-man heartbeat refreshes the cache hourly, so registry
-edits propagate to both hosts without hand-editing.
+The L3 router (`hooks/user-prompt-router.sh`) matches prompts against two
+generated caches in `~/.config/activity-mesh/`:
+
+- `scopes-cache` — one scope name per line; a prompt mentioning a project
+  scope injects that scope's recent slice.
+- `agents-cache` — `id⇥aliases⇥weak-aliases`; a prompt naming an agent (in
+  any language, via its aliases) injects that agent's recent slice.
+
+`activity-log refresh-caches` regenerates both from the registries — active
+entries only, scopes minus those marked `router: false` (a scope name that
+collides with an agent alias would otherwise double-filter `--scope`+`--agent`
+to empty). It reads the live `<sync>/{scopes,agents}.yaml` when published
+(falling back to the repo's `registries/`), writes atomically, and on any
+read/parse failure leaves the existing caches untouched. `--dry-run` previews.
+The dead-man heartbeat refreshes the caches hourly, so registry edits
+propagate to every host without hand-editing. (`refresh-scopes` remains as an
+alias for backward compatibility.)
 
 ## Shard compaction
 
@@ -119,28 +125,34 @@ placeholders and `launchctl bootstrap` it yourself; `bootstrap.sh` does not inst
 ## Building
 
 ```bash
-make build         # cross-compile CLI + watcher (no cgo)
-make build-daemon  # native build daemon (cgo + sqlite_fts5)
+make build         # cross-compile CLI + watcher + daemon for all targets (no cgo)
+make build-daemon  # daemon for the current host only
 make verify        # vet + test + shellcheck
 ```
 
-The daemon needs cgo for the SQLite FTS5 driver. Cross-compile from macOS to other Macs works; for Linux/Windows build natively on the target.
+All three binaries are **cgo-free** — SQLite (with FTS5) is provided by
+[`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite), a pure-Go port —
+so every binary cross-compiles for macOS/Linux/Windows from any host with a
+single `go build`. Releases are cut with [GoReleaser](https://goreleaser.com)
+(`.goreleaser.yaml`); the installer downloads the signed archive and verifies
+its SHA-256 before installing.
 
 ## Layout
 
 ```
-cmd/activity-log/      # Cobra CLI (init, emit, query, status, compact, clock-sync, refresh-scopes)
-cmd/activity-watcher/  # fsnotify daemon
+cmd/activity-log/      # Cobra CLI (init, emit, query, status, compact, clock-sync, refresh-caches)
+cmd/activity-watcher/  # fsnotify capture daemon
 server/                # HTTP query daemon (:7459)
-pkg/event/             # ULID + redaction + sanitize
-pkg/redact/            # 14 regex patterns + Shannon entropy ≥4.5
-pkg/index/             # SQLite FTS5
+pkg/event/             # ULID + monotonic_seq + redaction + sanitize
+pkg/shard/             # the single locked shard-append primitive
+pkg/redact/            # regex pack + Shannon entropy ≥4.5
+pkg/index/             # SQLite FTS5 (cgo-free, modernc.org/sqlite)
 pkg/registry/          # YAML loader/validator
 mcp/                   # Node stdio MCP server
 hooks/                 # SessionStart digest + UserPromptSubmit auto-context
 health/                # 19 checks + dead-man heartbeat + master runner
 installers/            # bootstrap.sh / .ps1 + launchd/systemd templates
-registries/            # kinds.yaml / scopes.yaml / agents.yaml / redaction.yaml
+registries/            # kinds / scopes / agents / redaction (generic examples)
 ```
 
 ## Layered memory model

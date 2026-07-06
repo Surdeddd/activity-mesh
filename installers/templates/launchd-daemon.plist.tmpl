@@ -1,18 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Dir contract (same across every activity-mesh unit):
+       {{STORE_DIR}}  ~/.local/share/activity-mesh  index.db, cursors, seq, audit, config  (ACTIVITY_MESH_HOME)
+       {{STATE_DIR}}  ~/.local/state/activity-mesh   logs, tokens, clock-offset, health/heartbeat state (ACTIVITY_MESH_STATE)
+     Never introduce a third dir. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>com.activity-mesh.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{{BIN_PATH}}</string>
+        <string>{{DAEMON_BIN}}</string>
         <string>--port</string>
         <string>7459</string>
         <string>--sync-dir</string>
         <string>{{SYNC_DIR}}</string>
         <string>--state-dir</string>
-        <string>{{STATE_DIR}}</string>
+        <string>{{STORE_DIR}}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -21,13 +25,13 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>{{LOG_DIR}}/daemon.log</string>
+    <string>{{STATE_DIR}}/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>{{LOG_DIR}}/daemon.err</string>
+    <string>{{STATE_DIR}}/daemon.err</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>ACTIVITY_MESH_HOME</key>
-        <string>{{STATE_DIR}}</string>
+        <string>{{STORE_DIR}}</string>
         <key>ACTIVITY_MESH_SYNC</key>
         <string>{{SYNC_DIR}}</string>
         <key>PATH</key>
