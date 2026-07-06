@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,14 +25,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 // configPath stores the path passed via --config; default determined at runtime.
-var (
-	configPath string
-	syncDir    string
-	storeDir   string
-)
+var configPath string
 
 const (
 	defaultSyncDir  = "Sync/activity"
@@ -44,6 +43,7 @@ func main() {
 	root := &cobra.Command{
 		Use:           "activity-log",
 		Short:         "Universal CLI for the activity-mesh shared activity log.",
+		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
@@ -217,7 +217,15 @@ func emitCmd() *cobra.Command {
 			if agent != "" {
 				opts = append(opts, event.WithAgent(agent))
 			}
-			ev, err := event.New(cfg.StoreDir, kind, scope, summary, opts...)
+			// Hold the host lock across seq → marshal → append: compaction
+			// takes the same lock around its read-rewrite-rename, so an
+			// append can never land inside a rewrite and be destroyed.
+			lock, err := event.AcquireHostLock(cfg.StoreDir, event.HostName())
+			if err != nil {
+				return err
+			}
+			defer lock.Release() //nolint:errcheck
+			ev, err := event.NewLocked(lock, kind, scope, summary, opts...)
 			if err != nil {
 				return err
 			}
@@ -225,7 +233,7 @@ func emitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := atomicAppend(cfg.SyncDir, ev.Host, line); err != nil {
+			if err := shard.AppendLocked(cfg.SyncDir, ev.Host, line); err != nil {
 				return err
 			}
 			if err := writeAudit(cfg.StoreDir, ev.ID, hits); err != nil {
@@ -244,53 +252,6 @@ func emitCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&tags, "tags", nil, "comma-separated tags")
 	cmd.Flags().StringVar(&agent, "agent", "", "override default agent label")
 	return cmd
-}
-
-// atomicAppend writes line+\n into <syncDir>/.staging/, then renames into the
-// per-host JSONL shard with O_APPEND. The rename inside the staging step is
-// what gives us atomicity for the (rare) case where Syncthing reads mid-write.
-func atomicAppend(syncDir, host string, line []byte) error {
-	staging := filepath.Join(syncDir, ".staging")
-	if err := os.MkdirAll(staging, 0o755); err != nil {
-		return err
-	}
-	target := filepath.Join(syncDir, "events-"+host+".jsonl")
-	// 1. write a temp file in staging holding just this line+\n
-	tmp, err := os.CreateTemp(staging, "ev-*.jsonl")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) //nolint:errcheck — best effort cleanup
-	if _, err := tmp.Write(line); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write([]byte("\n")); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	// 2. open target O_APPEND, copy temp contents, fsync.
-	out, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	buf, err := os.ReadFile(tmpPath)
-	if err != nil {
-		return err
-	}
-	if _, err := out.Write(buf); err != nil {
-		return err
-	}
-	return out.Sync()
 }
 
 // writeAudit appends a redaction audit row (one JSON line) to the local
@@ -329,13 +290,14 @@ func writeAudit(storeDir, evID string, hits []event.RedactHit) error {
 
 func queryCmd() *cobra.Command {
 	var (
-		since  string
-		scope  string
-		agent  string
-		kind   string
-		host   string
-		limit  int
-		format string
+		since        string
+		scope        string
+		agent        string
+		kind         string
+		excludeKinds []string
+		host         string
+		limit        int
+		format       string
 	)
 	cmd := &cobra.Command{
 		Use:   "query",
@@ -357,10 +319,14 @@ func queryCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			excluded := map[string]bool{}
+			for _, k := range excludeKinds {
+				excluded[k] = true
+			}
 			var filtered []event.Event
 			for _, e := range events {
 				if !cutoff.IsZero() {
-					ts, perr := time.Parse("2006-01-02T15:04:05.000000Z", e.TS)
+					ts, perr := event.ParseTS(e.TS)
 					if perr != nil || ts.Before(cutoff) {
 						continue
 					}
@@ -372,6 +338,9 @@ func queryCmd() *cobra.Command {
 					continue
 				}
 				if kind != "" && e.Kind != kind {
+					continue
+				}
+				if excluded[e.Kind] {
 					continue
 				}
 				if host != "" && e.Host != host {
@@ -395,6 +364,7 @@ func queryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&scope, "scope", "", "filter by scope")
 	cmd.Flags().StringVar(&agent, "agent", "", "filter by agent")
 	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind")
+	cmd.Flags().StringSliceVar(&excludeKinds, "exclude-kind", nil, "drop events of these kinds (repeatable / comma-separated)")
 	cmd.Flags().StringVar(&host, "host", "", "filter by host")
 	cmd.Flags().IntVar(&limit, "limit", 20, "limit (0 = no limit)")
 	cmd.Flags().StringVar(&format, "format", "text", "text|json")
@@ -498,7 +468,7 @@ func statusCmd() *cobra.Command {
 					fmt.Printf("%s: empty\n", host)
 					continue
 				}
-				ts, _ := time.Parse("2006-01-02T15:04:05.000000Z", last.TS)
+				ts, _ := event.ParseTS(last.TS)
 				age := now.Sub(ts)
 				marker := ""
 				if age > 24*time.Hour {
@@ -608,6 +578,3 @@ func isTerminal(f *os.File) bool {
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
-
-// ensure unused import doesn't fail compilation
-var _ = io.EOF

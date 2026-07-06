@@ -5,13 +5,8 @@ package event
 import (
 	"crypto/rand"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"math/big"
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,14 +74,30 @@ func WithSessionID(id string) Option { return func(e *Event) { e.SessionID = id 
 func WithParentID(id string) Option { return func(e *Event) { e.ParentID = id } }
 
 // New constructs a fresh event. ULID, timestamp, and monotonic_seq are filled
-// automatically from the SeqStore at storeDir.
+// automatically from the seq counter at storeDir. The per-host lock is held
+// only for the seq allocation; callers that go on to append to the shard
+// should instead hold the lock themselves and use NewLocked, so the append
+// is serialised against compaction.
 func New(storeDir, kind, scope, summary string, opts ...Option) (*Event, error) {
+	host := HostName()
+	lock, err := AcquireHostLock(storeDir, host)
+	if err != nil {
+		return nil, fmt.Errorf("seq: %w", err)
+	}
+	defer lock.Release() //nolint:errcheck
+	return NewLocked(lock, kind, scope, summary, opts...)
+}
+
+// NewLocked constructs a fresh event using an already-held host lock for the
+// monotonic_seq allocation. The caller keeps holding the lock across the
+// shard append that follows.
+func NewLocked(lock *HostLock, kind, scope, summary string, opts ...Option) (*Event, error) {
 	host := HostName()
 	id, err := newULID()
 	if err != nil {
 		return nil, fmt.Errorf("ulid: %w", err)
 	}
-	seq, err := nextSeq(storeDir, host)
+	seq, err := lock.NextSeq()
 	if err != nil {
 		return nil, fmt.Errorf("seq: %w", err)
 	}
@@ -195,58 +206,6 @@ func newULID() (string, error) {
 	return id.String(), nil
 }
 
-// nextSeq increments the per-host monotonic counter at storeDir/seq-<host>
-// using POSIX advisory file locking (flock). The counter is durable across
-// process restarts.
-func nextSeq(storeDir, host string) (uint64, error) {
-	if storeDir == "" {
-		return 0, errors.New("storeDir required")
-	}
-	if err := os.MkdirAll(storeDir, 0o755); err != nil {
-		return 0, err
-	}
-	path := filepath.Join(storeDir, "seq-"+host)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	if err := flockExclusive(f); err != nil {
-		return 0, err
-	}
-	defer flockRelease(f) //nolint:errcheck
-	// Read from the locked handle, not a fresh os.ReadFile(path): on Windows
-	// LockFileEx is a mandatory byte-range lock, so a second handle reading the
-	// locked region fails ("another process has locked a portion of the file").
-	// The handle holding the lock can always read it.
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		return 0, err
-	}
-	var current uint64
-	if len(buf) > 0 {
-		// trim whitespace/newline tolerantly
-		s := strings.TrimSpace(string(buf))
-		if n, perr := strconv.ParseUint(s, 10, 64); perr == nil {
-			current = n
-		}
-	}
-	current++
-	if _, err := f.Seek(0, 0); err != nil {
-		return 0, err
-	}
-	if err := f.Truncate(0); err != nil {
-		return 0, err
-	}
-	if _, err := f.WriteString(strconv.FormatUint(current, 10) + "\n"); err != nil {
-		return 0, err
-	}
-	if err := f.Sync(); err != nil {
-		return 0, err
-	}
-	return current, nil
-}
-
 // defaultAgent infers the writer label from $ACTIVITY_AGENT env or hostname.
 func defaultAgent() string {
 	if a := os.Getenv("ACTIVITY_AGENT"); a != "" {
@@ -255,7 +214,27 @@ func defaultAgent() string {
 	return "cli"
 }
 
-// randomFallback used only if rand fails — last-ditch entropy from time.
-func randomFallback() *big.Int { //nolint:unused
-	return big.NewInt(time.Now().UnixNano())
+// TSLayouts are the accepted event timestamp layouts, canonical first. Every
+// reader (query, index, compact) parses through ParseTS so a valid event is
+// never silently dropped by one consumer and accepted by another.
+var TSLayouts = []string{
+	"2006-01-02T15:04:05.000000Z",
+	time.RFC3339Nano,
+	time.RFC3339,
+}
+
+// ParseTS parses an event timestamp through the canonical layouts.
+func ParseTS(ts string) (time.Time, error) {
+	for _, layout := range TSLayouts {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("parse ts %q", ts)
+}
+
+// ValidULID reports whether s is a well-formed 26-char Crockford ULID.
+func ValidULID(s string) bool {
+	_, err := ulid.ParseStrict(s)
+	return err == nil
 }

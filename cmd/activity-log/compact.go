@@ -60,6 +60,9 @@ func compactCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("--keep: %w", err)
 			}
+			if d <= 0 {
+				return fmt.Errorf("--keep must be a positive duration, got %q", keep)
+			}
 			syncDirVal := cfg.SyncDir
 			if syncArg != "" {
 				syncDirVal = syncArg
@@ -117,11 +120,11 @@ type compactResult struct {
 func compactShard(o compactOptions) (*compactResult, error) {
 	res := &compactResult{shard: filepath.Base(o.shardPath), dryRun: o.dryRun}
 	if !o.dryRun && o.storeDir != "" {
-		release, err := event.AcquireHostLock(o.storeDir, o.host)
+		lock, err := event.AcquireHostLock(o.storeDir, o.host)
 		if err != nil {
 			return nil, fmt.Errorf("host lock: %w", err)
 		}
-		defer func() { _ = release() }()
+		defer func() { _ = lock.Release() }()
 	}
 	data, err := os.ReadFile(o.shardPath)
 	if err != nil {
@@ -155,6 +158,12 @@ func compactShard(o compactOptions) (*compactResult, error) {
 		if err := appendGzipMember(ma.file, p.archive[ma.month]); err != nil {
 			return nil, fmt.Errorf("archive %s: %w", ma.file, err)
 		}
+	}
+	// Dir fsync so a newly created monthly archive survives a power cut that
+	// happens after the shard rewrite below (best effort — not portable).
+	if d, err := os.Open(o.archiveDir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	if err := rewriteShard(o.shardPath, p.keep); err != nil {
 		return nil, fmt.Errorf("rewrite shard: %w", err)
@@ -222,8 +231,8 @@ func partitionShard(data []byte, cutoff time.Time) *partition {
 	return p
 }
 
-// lineTimestamp extracts and parses the "ts" field. Accepts the canonical
-// emit layout plus the same RFC3339 fallbacks pkg/index uses.
+// lineTimestamp extracts and parses the "ts" field through the canonical
+// event.ParseTS layouts (shared with query and pkg/index).
 func lineTimestamp(line []byte) (time.Time, bool) {
 	var raw struct {
 		TS string `json:"ts"`
@@ -231,12 +240,11 @@ func lineTimestamp(line []byte) (time.Time, bool) {
 	if err := json.Unmarshal(line, &raw); err != nil || raw.TS == "" {
 		return time.Time{}, false
 	}
-	for _, layout := range []string{"2006-01-02T15:04:05.000000Z", time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, raw.TS); err == nil {
-			return t, true
-		}
+	t, err := event.ParseTS(raw.TS)
+	if err != nil {
+		return time.Time{}, false
 	}
-	return time.Time{}, false
+	return t, true
 }
 
 // appendGzipMember appends lines (newline re-added) as one new gzip member

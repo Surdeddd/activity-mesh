@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,7 +29,12 @@ import (
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
 	"github.com/Surdeddd/activity-mesh/pkg/index"
+	"github.com/Surdeddd/activity-mesh/pkg/redact"
+	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
+
+// version is stamped at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 const (
 	defaultPort     = 7459
@@ -52,6 +58,7 @@ type daemon struct {
 
 func main() {
 	port := flag.Int("port", defaultPort, "HTTP listen port")
+	bind := flag.String("bind", "", "listen address (default 127.0.0.1; set 0.0.0.0 to expose beyond localhost)")
 	syncArg := flag.String("sync-dir", "", "override sync dir (default ~/Sync/activity)")
 	stateArg := flag.String("state-dir", "", "override state dir (default ~/.local/share/activity-mesh)")
 	flag.Parse()
@@ -72,6 +79,16 @@ func main() {
 	}
 	syncDir := pick(*syncArg, "ACTIVITY_MESH_SYNC", defaultSyncDir)
 	stateDir := pick(*stateArg, "ACTIVITY_MESH_HOME", defaultStateDir)
+	// The daemon serves the full activity history and accepts event pushes
+	// with no authentication — localhost by default; exposing wider is an
+	// explicit operator decision (--bind / ACTIVITY_MESH_BIND).
+	bindAddr := *bind
+	if bindAddr == "" {
+		bindAddr = os.Getenv("ACTIVITY_MESH_BIND")
+	}
+	if bindAddr == "" {
+		bindAddr = "127.0.0.1"
+	}
 	for _, p := range []string{syncDir, stateDir} {
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			log.Fatalf("mkdir %s: %v", p, err)
@@ -84,7 +101,10 @@ func main() {
 	defer idx.Close()
 	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir, port: *port}
 	d.m.startedAt = time.Now().UTC()
-	if n, err := d.idx.IngestDir(syncDir); err == nil && n > 0 {
+	if n, err := d.idx.IngestDir(syncDir); err != nil {
+		d.m.errors.Add(1)
+		log.Printf("initial ingest failed: %v", err)
+	} else if n > 0 {
 		d.m.ingested.Add(uint64(n))
 		log.Printf("initial ingest: %d events", n)
 	}
@@ -102,14 +122,14 @@ func main() {
 	mux.HandleFunc("/push", d.handlePush)
 	mux.HandleFunc("/metrics", d.handleMetrics)
 	srv := &http.Server{
-		Addr: ":" + strconv.Itoa(*port), Handler: mux,
+		Addr: net.JoinHostPort(bindAddr, strconv.Itoa(*port)), Handler: mux,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Printf("activity-mesh-daemon listening on %s (sync=%s state=%s)", srv.Addr, syncDir, stateDir)
+		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, srv.Addr, syncDir, stateDir)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("server error: %v", err)
 		}
@@ -210,6 +230,7 @@ func (d *daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                true,
+		"version":           version,
 		"last_indexed_ulid": stats.LastIndexedULID,
 		"total_events":      stats.TotalEvents,
 		"hosts":             stats.Hosts,
@@ -221,8 +242,8 @@ func (d *daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (d *daemon) handleRecent(w http.ResponseWriter, r *http.Request) {
 	d.m.queries.Add(1)
 	q := r.URL.Query()
-	hours := parseIntDefault(q.Get("hours"), 24)
-	limit := parseIntDefault(q.Get("limit"), 20)
+	hours := parseIntDefault(q.Get("hours"), 24, 24*366)
+	limit := parseIntDefault(q.Get("limit"), 20, 1000)
 	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 	events, err := d.idx.QueryContext(r.Context(), index.QueryFilter{
 		Since: since, Scope: q.Get("scope"), Agent: q.Get("agent"),
@@ -245,7 +266,7 @@ func (d *daemon) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "missing q parameter")
 		return
 	}
-	limit := parseIntDefault(q.Get("limit"), 20)
+	limit := parseIntDefault(q.Get("limit"), 20, 1000)
 	since := time.Time{}
 	if s := q.Get("since"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
@@ -277,7 +298,12 @@ func (d *daemon) handleDigest(w http.ResponseWriter, r *http.Request) {
 	agg, err := d.idx.Aggregate(groupBy, window)
 	if err != nil {
 		d.m.errors.Add(1)
-		writeErr(w, http.StatusBadRequest, err.Error())
+		// Unknown group_by/window are caller errors; anything else is ours.
+		code := http.StatusInternalServerError
+		if strings.HasPrefix(err.Error(), "unknown ") {
+			code = http.StatusBadRequest
+		}
+		writeErr(w, code, err.Error())
 		return
 	}
 	if strings.HasPrefix(r.Header.Get("Accept"), "application/json") || q.Get("format") == "json" {
@@ -304,19 +330,14 @@ func (d *daemon) handleDigest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type pushPayload struct {
-	V        int      `json:"v"`
-	ID       string   `json:"id"`
-	TS       string   `json:"ts"`
-	Host     string   `json:"host"`
-	Agent    string   `json:"agent"`
-	Kind     string   `json:"kind"`
-	Scope    string   `json:"scope"`
-	Summary  string   `json:"summary"`
-	Priority string   `json:"priority,omitempty"`
-	Tags     []string `json:"tags,omitempty"`
-}
-
+// handlePush accepts one event as JSON and appends it to the shard named by
+// its host field. The payload is decoded into a generic map so extended
+// schema fields survive; mandatory fields are validated, the host label is
+// checked against the shard filename alphabet (path-traversal guard), the id
+// must be a well-formed ULID (a junk id would permanently win MAX(ulid)),
+// and the whole tree is redacted exactly like the CLI emit path — pushes
+// must not be a side door around redaction. The append happens under the
+// same per-host lock emit and compaction use.
 func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "POST required")
@@ -330,38 +351,68 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var p pushPayload
+	var p map[string]any
 	if err := json.Unmarshal(body, &p); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if p.V == 0 {
-		p.V = event.SchemaVersion
+	if v, ok := p["v"].(float64); !ok || v == 0 {
+		p["v"] = event.SchemaVersion
 	}
-	if p.ID == "" || p.TS == "" || p.Host == "" || p.Kind == "" || p.Scope == "" || p.Summary == "" {
+	str := func(k string) string { s, _ := p[k].(string); return s }
+	id, ts, host := str("id"), str("ts"), str("host")
+	if id == "" || ts == "" || host == "" || str("kind") == "" || str("scope") == "" || str("summary") == "" {
 		writeErr(w, http.StatusBadRequest, "missing mandatory fields (id, ts, host, kind, scope, summary)")
 		return
 	}
-	line, err := json.Marshal(p)
+	if !shard.ValidHost(host) {
+		writeErr(w, http.StatusBadRequest, "invalid host label")
+		return
+	}
+	if !event.ValidULID(id) {
+		writeErr(w, http.StatusBadRequest, "id must be a 26-char ULID")
+		return
+	}
+	if _, err := event.ParseTS(ts); err != nil {
+		writeErr(w, http.StatusBadRequest, "ts must be RFC3339 or canonical event layout")
+		return
+	}
+	cleaned, _ := redact.ApplyJSON(p)
+	line, err := json.Marshal(cleaned)
 	if err != nil {
 		d.m.errors.Add(1)
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := atomicAppend(d.syncDir, p.Host, line); err != nil {
+	lock, err := event.AcquireHostLock(d.stateDir, host)
+	if err != nil {
 		d.m.errors.Add(1)
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	appendErr := shard.AppendLocked(d.syncDir, host, line)
+	_ = lock.Release()
+	if appendErr != nil {
+		d.m.errors.Add(1)
+		writeErr(w, http.StatusInternalServerError, appendErr.Error())
+		return
+	}
 	d.m.writes.Add(1)
-	if n, err := d.idx.IngestJSONL(filepath.Join(d.syncDir, "events-"+p.Host+".jsonl")); err == nil {
+	if n, err := d.idx.IngestJSONL(filepath.Join(d.syncDir, "events-"+host+".jsonl")); err != nil {
+		d.m.errors.Add(1)
+		log.Printf("post-push ingest: %v", err)
+	} else {
 		d.m.ingested.Add(uint64(n))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": p.ID, "priority": p.Priority})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "priority": str("priority")})
 }
 
 func (d *daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	stats, _ := d.idx.Stats()
+	stats, err := d.idx.Stats()
+	if err != nil {
+		d.m.errors.Add(1)
+		log.Printf("metrics stats: %v", err)
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	c := func(name string, val uint64) { fmt.Fprintf(w, "# TYPE %s counter\n%s %d\n", name, name, val) }
 	c("activity_mesh_writes_total", d.m.writes.Load())
@@ -375,25 +426,15 @@ func (d *daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# TYPE activity_mesh_indexed_events gauge\nactivity_mesh_indexed_events %d\n", stats.TotalEvents)
 }
 
-func parseIntDefault(s string, def int) int {
+// parseIntDefault parses s, falling back to def and clamping into
+// [1, maxAllowed] — limit=0 must not mean "the whole table into memory".
+func parseIntDefault(s string, def, maxAllowed int) int {
 	n, err := strconv.Atoi(s)
-	if s == "" || err != nil || n < 0 {
-		return def
+	if s == "" || err != nil || n <= 0 {
+		n = def
+	}
+	if n > maxAllowed {
+		n = maxAllowed
 	}
 	return n
-}
-
-// atomicAppend writes line+\n to events-<host>.jsonl with O_APPEND+fsync.
-// One JSONL event < PIPE_BUF (4KB) is atomic on POSIX with O_APPEND.
-func atomicAppend(syncDir, host string, line []byte) error {
-	target := filepath.Join(syncDir, "events-"+host+".jsonl")
-	out, err := os.OpenFile(target, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := out.Write(append(line, '\n')); err != nil {
-		return err
-	}
-	return out.Sync()
 }

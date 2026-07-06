@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
 // helper: configure a temp store+sync dir and emit one event end-to-end.
@@ -36,8 +37,8 @@ func emitOne(t *testing.T, storeDir, syncDir string, summary string) *event.Even
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := atomicAppend(syncDir, ev.Host, line); err != nil {
-		t.Fatalf("atomicAppend: %v", err)
+	if err := shard.AppendLocked(syncDir, ev.Host, line); err != nil {
+		t.Fatalf("shard.AppendLocked: %v", err)
 	}
 	return ev
 }
