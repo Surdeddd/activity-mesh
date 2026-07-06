@@ -103,18 +103,16 @@ else
     exit 0
 fi
 
-# 4. notify if any tier ≥ 2 (warn+)
+# 4. notify if any tier ≥ 2 (warn+). am_notify tries the configured
+# notifier, then legacy notify-maxim, then direct Telegram — a missing
+# notifier binary must never again mean weeks of silent red.
 if [ "$max_tier" -ge 2 ] && [ "$DRY_RUN" -eq 0 ]; then
-    notifier=""
-    if command -v notify-maxim >/dev/null 2>&1; then
-        notifier=notify-maxim
-    elif [ -x "$HOME/.local/bin/notify-maxim" ]; then
-        notifier="$HOME/.local/bin/notify-maxim"
-    fi
-    if [ -n "$notifier" ]; then
-        msg=$(printf 'activity-mesh health: tier=%d ok=%d warn=%d fail=%d critical=%d (host=%s)' \
-            "$max_tier" "$ok" "$warn" "$fail" "$critical" "$HOST")
-        printf '%s' "$msg" | "$notifier" 2>/dev/null || true
+    failing=$(printf '%s' "$results_json" | /usr/bin/jq -r \
+        '[.[] | select(.status != "ok") | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
+    msg=$(printf 'activity-mesh health: tier=%d ok=%d warn=%d fail=%d critical=%d (host=%s)\n%s' \
+        "$max_tier" "$ok" "$warn" "$fail" "$critical" "$HOST" "$failing")
+    if ! am_notify "$msg"; then
+        printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
     fi
 fi
 

@@ -1,6 +1,8 @@
 #!/bin/bash
 # token-budget — telemetry on average ambient tokens per session this week.
-# Reads /tmp/activity-tokens-* (per-session counters), aggregates last 100.
+# Reads $ACTIVITY_MESH_STATE/tokens-* (the per-session counters the router
+# writes — it moved out of /tmp; reading /tmp here reported "no telemetry"
+# forever), aggregates last 100.
 # Target ≤500 ambient. >500 fail, 350-500 warn, <350 ok.
 
 # shellcheck source=../lib.sh
@@ -9,7 +11,7 @@ am_start
 NAME=token-budget
 
 shopt -s nullglob 2>/dev/null
-files=(/tmp/activity-tokens-*)
+files=("$ACTIVITY_MESH_STATE"/tokens-*)
 shopt -u nullglob 2>/dev/null
 
 if [ "${#files[@]}" -eq 0 ]; then

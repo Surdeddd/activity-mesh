@@ -72,3 +72,46 @@ am_human_bytes() {
     else printf '%dB' "$b"
     fi
 }
+
+# am_notify_telegram <message> — direct Telegram Bot API send. Credentials:
+# $TELEGRAM_BOT_TOKEN + $TELEGRAM_CHAT_ID env, falling back to the env file
+# at $TELEGRAM_ENV (lines TELEGRAM_BOT_TOKEN=… / TELEGRAM_CHAT_ID=…).
+# No hardcoded chat ids. Returns non-zero when undeliverable.
+am_notify_telegram() {
+    local msg="$1" token="${TELEGRAM_BOT_TOKEN:-}" chat="${TELEGRAM_CHAT_ID:-}" envf resp
+    envf="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
+    if [ -z "$token" ] && [ -f "$envf" ]; then
+        token=$(grep -E '^TELEGRAM_BOT_TOKEN=' "$envf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    fi
+    if [ -z "$chat" ] && [ -f "$envf" ]; then
+        chat=$(grep -E '^TELEGRAM_CHAT_ID=' "$envf" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    fi
+    { [ -n "$token" ] && [ -n "$chat" ] && command -v curl >/dev/null 2>&1; } || return 1
+    resp=$(curl -s -m 10 -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+        --data-urlencode "chat_id=${chat}" \
+        --data-urlencode "text=${msg}" 2>/dev/null) || return 1
+    printf '%s' "$resp" | grep -q '"ok":true'
+}
+
+# am_notify <message> — deliver an operator alert through the first channel
+# that works:
+#   1. $ACTIVITY_MESH_NOTIFY_CMD (message on stdin — any custom notifier)
+#   2. notify-maxim (legacy personal helper, PATH or ~/.local/bin)
+#   3. direct Telegram (am_notify_telegram)
+# Returns non-zero if EVERY channel failed — callers must surface that.
+am_notify() {
+    local msg="$1"
+    if [ -n "${ACTIVITY_MESH_NOTIFY_CMD:-}" ]; then
+        # word-split intentionally: the cmd may carry its own args
+        # shellcheck disable=SC2086
+        printf '%s' "$msg" | ${ACTIVITY_MESH_NOTIFY_CMD} 2>/dev/null && return 0
+    fi
+    local legacy=""
+    if command -v notify-maxim >/dev/null 2>&1; then legacy="notify-maxim"
+    elif [ -x "$HOME/.local/bin/notify-maxim" ]; then legacy="$HOME/.local/bin/notify-maxim"
+    fi
+    if [ -n "$legacy" ]; then
+        printf '%s' "$msg" | "$legacy" 2>/dev/null && return 0
+    fi
+    am_notify_telegram "$msg"
+}

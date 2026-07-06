@@ -12,9 +12,19 @@ log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG" 2>/dev/null || true
 
 INPUT=$(cat 2>/dev/null); [ -z "$INPUT" ] && exit 0
 
+# jq: PATH first, then the usual absolute homes (macOS 15+ ships /usr/bin/jq;
+# Homebrew and most Linux distros differ). No jq → silent no-op, never block.
+JQ="${ACTIVITY_MESH_JQ:-$(command -v jq 2>/dev/null || true)}"
+if [ -z "$JQ" ]; then
+    for c in /usr/bin/jq /opt/homebrew/bin/jq /usr/local/bin/jq; do
+        [ -x "$c" ] && { JQ="$c"; break; }
+    done
+fi
+[ -z "$JQ" ] && { log "skip: no jq available"; exit 0; }
+
 # Single jq fork extracts both fields with sentinel separator
 SEP=$'\001'
-JQ_OUT=$(printf '%s' "$INPUT" | /usr/bin/jq -j --arg sep "$SEP" '(.prompt // "") + $sep + (.session_id // "unknown")' 2>/dev/null || true)
+JQ_OUT=$(printf '%s' "$INPUT" | "$JQ" -j --arg sep "$SEP" '(.prompt // "") + $sep + (.session_id // "unknown")' 2>/dev/null || true)
 PROMPT="${JQ_OUT%%"${SEP}"*}"
 SESSION_ID="${JQ_OUT##*"${SEP}"}"
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown"
@@ -41,7 +51,6 @@ ANTI_RE='что такое|как сделать|как (написать|соз
 TEMPORAL_RE='что (было|делал[аи]?|произошло|сделал[аи]?)|сегодня|вчера|за день|за неделю|recent|today|yesterday|this week|last (hour|day|week)'
 STATUS_RE='статус|чё там|что (в работе|пендинг|пендингует)|status|pending|active task|what.?s going on|what.?s up'
 INCIDENT_RE='incident|авария|падал|сломал|упал|crashed|failed|broken|outage'
-AGENT_RE='хермес|виктор|клод-?mac|клод|hermes|viktor|claude-?mac|anton|antоn'
 
 INTENT=""; SCOPE_FILTER=""; AGENT_FILTER=""
 if   [[ "$LOWER" =~ $INCIDENT_RE ]]; then INTENT="incident"
@@ -58,19 +67,36 @@ if [ -f "$SCOPES_CACHE" ]; then
     done < "$SCOPES_CACHE"
 fi
 
-# Agent-named with alias normalisation. A bare generic "клод/claude" almost
-# always means Claude-the-tool, not the claude-mac agent — it may qualify an
-# already-detected intent but never creates one on its own.
-if [[ "$LOWER" =~ $AGENT_RE ]]; then
-    GENERIC_CLAUDE=0
-    case "$LOWER" in
-        *хермес*|*hermes*)             AGENT_FILTER="hermes" ;;
-        *виктор*|*viktor*)             AGENT_FILTER="viktor" ;;
-        *клод-mac*|*claude-mac*)       AGENT_FILTER="claude-mac" ;;
-        *клод*|*claude*)               AGENT_FILTER="claude-mac"; GENERIC_CLAUDE=1 ;;
-        *anton*|*antоn*)               AGENT_FILTER="anton" ;;
-    esac
-    [ -z "$INTENT" ] && [ "$GENERIC_CLAUDE" -eq 0 ] && INTENT="agent"
+# Agent-named (registry-driven). Cache: $CONFIG_DIR/agents-cache, one agent
+# per line: id<TAB>alias1,alias2<TAB>weak1,weak2 (all lowercase, written by
+# `activity-log refresh-caches`). A strong alias match may create an agent
+# intent; a weak alias (e.g. bare "клод/claude" — almost always the tool,
+# not the agent) only qualifies an already-detected intent.
+AGENTS_CACHE="$CONFIG_DIR/agents-cache"
+if [ -f "$AGENTS_CACHE" ]; then
+    WEAK_AGENT=""
+    while IFS=$'\t' read -r aid strong weak; do
+        [ -z "$aid" ] && continue
+        if [ -z "$AGENT_FILTER" ] && [ -n "$strong" ]; then
+            IFS=',' read -r -a ALIASES <<< "$strong"
+            for al in "${ALIASES[@]}"; do
+                [ -z "$al" ] && continue
+                case "$LOWER" in *"$al"*) AGENT_FILTER="$aid"; break ;; esac
+            done
+        fi
+        if [ -z "$WEAK_AGENT" ] && [ -n "$weak" ]; then
+            IFS=',' read -r -a WALIASES <<< "$weak"
+            for al in "${WALIASES[@]}"; do
+                [ -z "$al" ] && continue
+                case "$LOWER" in *"$al"*) WEAK_AGENT="$aid"; break ;; esac
+            done
+        fi
+    done < "$AGENTS_CACHE"
+    if [ -n "$AGENT_FILTER" ]; then
+        [ -z "$INTENT" ] && INTENT="agent"
+    elif [ -n "$WEAK_AGENT" ]; then
+        AGENT_FILTER="$WEAK_AGENT"   # qualify only — never creates an intent
+    fi
 fi
 [ -z "$INTENT" ] && exit 0
 
@@ -105,7 +131,7 @@ MAX_CHARS=2000
 NEW_TOKENS=$(( TOKENS_USED + ${#RESULT} / 4 ))
 echo "$NEW_TOKENS" > "$TOKENS_FILE" 2>/dev/null
 
-CTX=$(printf 'activity-mesh (%s match):\n%s' "$INTENT" "$RESULT" | /usr/bin/jq -Rs '.' 2>/dev/null || echo '""')
+CTX=$(printf 'activity-mesh (%s match):\n%s' "$INTENT" "$RESULT" | "$JQ" -Rs '.' 2>/dev/null || echo '""')
 printf '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":%s}}\n' "$CTX"
 log "emitted intent=$INTENT session=$SESSION_ID chars=${#RESULT} budget=$NEW_TOKENS"
 exit 0

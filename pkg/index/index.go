@@ -10,19 +10,23 @@
 package index
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // sqlite driver (build tag sqlite_fts5)
+	_ "modernc.org/sqlite" // cgo-free sqlite driver, FTS5 compiled in
 )
 
 // Event mirrors the on-disk JSONL row but only the fields the index
@@ -71,8 +75,8 @@ func NewIndex(dbPath string) (*Index, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on&_synchronous=NORMAL", dbPath)
-	db, err := sql.Open("sqlite3", dsn)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -164,30 +168,47 @@ func (i *Index) Stats() (Stats, error) {
 	return s, rows.Err()
 }
 
-// cursorMap is the on-disk representation of cursors.json.
-type cursorMap map[string]int64 // path → byte offset
+// cursorEntry tracks how far a shard has been ingested plus the identity of
+// its first line. Identity matters: compaction (or a Syncthing replace)
+// rewrites the shard, and if the new file is still larger than the stored
+// offset a naive size check would keep a stale mid-line cursor and silently
+// skip the unread tail. Any rewrite that removes events changes the head
+// line, so a head-hash mismatch forces a full rescan (ULID dedupe makes
+// rescans free of duplicates).
+type cursorEntry struct {
+	Offset int64  `json:"offset"`
+	Head   string `json:"head,omitempty"` // sha256 hex of the first line
+}
 
-func (i *Index) loadCursors() (cursorMap, error) {
+// cursorFile is the on-disk representation of cursors.json (v2). Legacy v1
+// files (plain path→offset map) are discarded — one full rescan, no dupes.
+type cursorFile struct {
+	V     int                    `json:"v"`
+	Files map[string]cursorEntry `json:"files"`
+}
+
+func (i *Index) loadCursors() (cursorFile, error) {
+	empty := cursorFile{V: 2, Files: map[string]cursorEntry{}}
 	buf, err := os.ReadFile(i.cursors)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return cursorMap{}, nil
+			return empty, nil
 		}
-		return nil, err
+		return empty, err
 	}
-	var m cursorMap
-	if err := json.Unmarshal(buf, &m); err != nil || m == nil {
-		return cursorMap{}, nil
+	var c cursorFile
+	if err := json.Unmarshal(buf, &c); err != nil || c.V != 2 || c.Files == nil {
+		return empty, nil
 	}
-	return m, nil
+	return c, nil
 }
 
-func (i *Index) saveCursors(m cursorMap) error {
+func (i *Index) saveCursors(c cursorFile) error {
 	if err := os.MkdirAll(filepath.Dir(i.cursors), 0o755); err != nil {
 		return err
 	}
 	tmp := i.cursors + ".tmp"
-	buf, err := json.MarshalIndent(m, "", "  ")
+	buf, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -197,11 +218,31 @@ func (i *Index) saveCursors(m cursorMap) error {
 	return os.Rename(tmp, i.cursors)
 }
 
+// headLineHash returns the sha256 hex of the file's first line (bounded to
+// 64KiB), or "" for an empty file.
+func headLineHash(f *os.File) (string, error) {
+	head := make([]byte, 64<<10)
+	n, err := f.ReadAt(head, 0)
+	if n == 0 {
+		if err == io.EOF {
+			return "", nil
+		}
+		return "", err
+	}
+	head = head[:n]
+	if nl := bytes.IndexByte(head, '\n'); nl >= 0 {
+		head = head[:nl]
+	}
+	sum := sha256.Sum256(head)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // IngestJSONL reads new lines from path starting at the stored byte offset,
 // inserts each into events + FTS5, and atomically updates cursors.json.
 // Lines that fail to parse are skipped (one bad line ≠ aborted ingest).
+// Reads are incremental: Seek to the cursor, never the whole file.
 //
-// Returns count of events appended.
+// Returns count of events actually inserted (dedup hits don't count).
 func (i *Index) IngestJSONL(path string) (int, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -213,13 +254,29 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	startAt := cursors[abs]
-	buf, err := os.ReadFile(abs)
+	f, err := os.Open(abs)
 	if err != nil {
 		return 0, err
 	}
-	if int64(len(buf)) < startAt {
-		startAt = 0 // truncation/rotation
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	head, err := headLineHash(f)
+	if err != nil {
+		return 0, err
+	}
+	entry := cursors.Files[abs]
+	startAt := entry.Offset
+	if fi.Size() < startAt || (entry.Head != "" && entry.Head != head) {
+		startAt = 0 // shrunk or rewritten (compaction / sync replace)
+	}
+	if startAt >= fi.Size() && entry.Head == head {
+		return 0, nil // nothing new
+	}
+	if _, err := f.Seek(startAt, io.SeekStart); err != nil {
+		return 0, err
 	}
 	tx, err := i.db.Begin()
 	if err != nil {
@@ -233,18 +290,20 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`)
 		return 0, err
 	}
 	defer stmt.Close()
+	r := bufio.NewReaderSize(f, 256<<10)
 	count, offset := 0, startAt
-	for offset < int64(len(buf)) {
-		nl := bytes.IndexByte(buf[offset:], '\n')
-		var lineEnd int64
-		if nl < 0 { // last line w/o newline — leave for next ingest
+	for {
+		line, rerr := r.ReadBytes('\n')
+		if rerr == io.EOF {
+			// last line w/o newline — leave for next ingest
 			break
 		}
-		lineEnd = offset + int64(nl) + 1
-		line := buf[offset : offset+int64(nl)]
+		if rerr != nil {
+			return count, rerr
+		}
 		lineOffset := offset
-		offset = lineEnd
-		trimmed := strings.TrimSpace(string(line))
+		offset += int64(len(line))
+		trimmed := strings.TrimSpace(string(bytes.TrimRight(line, "\n")))
 		if trimmed == "" {
 			continue
 		}
@@ -263,34 +322,58 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`)
 		scope, _ := raw["scope"].(string)
 		kind, _ := raw["kind"].(string)
 		priority, _ := raw["priority"].(string)
-		if _, err := stmt.Exec(ulid, ts, tsUnix, host, agent, scope, kind, priority, abs, lineOffset, trimmed); err != nil {
+		res, err := stmt.Exec(ulid, ts, tsUnix, host, agent, scope, kind, priority, abs, lineOffset, trimmed)
+		if err != nil {
 			return count, fmt.Errorf("insert ulid=%s: %w", ulid, err)
 		}
-		count++
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			count++ // INSERT OR IGNORE: only real inserts count
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return count, err
 	}
-	cursors[abs] = offset
+	cursors.Files[abs] = cursorEntry{Offset: offset, Head: head}
 	if err := i.saveCursors(cursors); err != nil {
 		return count, fmt.Errorf("save cursors: %w", err)
 	}
 	return count, nil
 }
 
-// IngestDir ingests every events-*.jsonl in syncDir.
+// IngestDir ingests every events-*.jsonl in syncDir and garbage-collects
+// cursor entries for shards that no longer exist.
 func (i *Index) IngestDir(syncDir string) (int, error) {
 	matches, err := filepath.Glob(filepath.Join(syncDir, "events-*.jsonl"))
 	if err != nil {
 		return 0, err
 	}
 	total := 0
+	known := map[string]bool{}
 	for _, m := range matches {
+		if abs, err := filepath.Abs(m); err == nil {
+			known[abs] = true
+		}
 		n, err := i.IngestJSONL(m)
 		if err != nil {
 			return total, fmt.Errorf("ingest %s: %w", m, err)
 		}
 		total += n
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	cursors, err := i.loadCursors()
+	if err != nil {
+		return total, nil //nolint:nilerr — GC is best-effort
+	}
+	dirty := false
+	for path := range cursors.Files {
+		if !known[path] {
+			delete(cursors.Files, path)
+			dirty = true
+		}
+	}
+	if dirty {
+		_ = i.saveCursors(cursors)
 	}
 	return total, nil
 }
@@ -379,18 +462,24 @@ WHERE events_fts MATCH ?`)
 }
 
 // Aggregate groups events by `by` (scope|agent|kind|host|priority) over the
-// time window (today|24h|7d). Returns count map keyed by group.
+// time window (today|yesterday|24h|7d|RFC3339). Returns count map keyed by group.
 func (i *Index) Aggregate(by, window string) (map[string]int, error) {
 	col, ok := aggregateCol(by)
 	if !ok {
 		return nil, fmt.Errorf("unknown group_by %q", by)
 	}
-	since, err := windowSince(window)
+	since, until, err := windowRange(window)
 	if err != nil {
 		return nil, err
 	}
-	q := fmt.Sprintf(`SELECT COALESCE(%s,'(none)'), COUNT(*) FROM events WHERE ts_unix >= ? GROUP BY %s ORDER BY 2 DESC`, col, col)
-	rows, err := i.db.Query(q, since.Unix())
+	q := fmt.Sprintf(`SELECT COALESCE(%s,'(none)'), COUNT(*) FROM events WHERE ts_unix >= ?`, col)
+	args := []any{since.Unix()}
+	if !until.IsZero() {
+		q += ` AND ts_unix < ?`
+		args = append(args, until.Unix())
+	}
+	q += fmt.Sprintf(` GROUP BY %s ORDER BY 2 DESC`, col)
+	rows, err := i.db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -417,24 +506,26 @@ func aggregateCol(by string) (string, bool) {
 	return "", false
 }
 
-// windowSince translates "today|24h|7d|<RFC3339>" into a since timestamp.
-func windowSince(window string) (time.Time, error) {
+// windowRange translates "today|yesterday|24h|7d|<RFC3339>" into a
+// [since, until) pair; until is zero when the window is open-ended.
+// "yesterday" is a bounded calendar day — it must not include today.
+func windowRange(window string) (time.Time, time.Time, error) {
 	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	switch window {
 	case "", "24h":
-		return now.Add(-24 * time.Hour), nil
+		return now.Add(-24 * time.Hour), time.Time{}, nil
 	case "today":
-		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC), nil
+		return midnight, time.Time{}, nil
 	case "yesterday":
-		y := time.Date(now.Year(), now.Month(), now.Day()-1, 0, 0, 0, 0, time.UTC)
-		return y, nil
+		return midnight.AddDate(0, 0, -1), midnight, nil
 	case "7d":
-		return now.Add(-7 * 24 * time.Hour), nil
+		return now.Add(-7 * 24 * time.Hour), time.Time{}, nil
 	}
 	if t, err := time.Parse(time.RFC3339, window); err == nil {
-		return t.UTC(), nil
+		return t.UTC(), time.Time{}, nil
 	}
-	return time.Time{}, fmt.Errorf("unknown window %q", window)
+	return time.Time{}, time.Time{}, fmt.Errorf("unknown window %q", window)
 }
 
 // parseTimeUnix accepts the canonical "2006-01-02T15:04:05.000000Z" plus
@@ -452,18 +543,24 @@ func parseTimeUnix(ts string) (int64, error) {
 	return 0, fmt.Errorf("parse ts %q", ts)
 }
 
-// sanitizeFTS strips characters that break FTS5 MATCH expressions while
-// preserving the user's words. Quotes the term so phrase-y queries also work.
+// sanitizeFTS turns free text into a safe FTS5 MATCH expression: each
+// whitespace token becomes its own quoted phrase joined by implicit AND.
+// Quoting the whole query as one phrase (the old behaviour) required the
+// words to be adjacent, silently killing recall on multi-word searches.
 func sanitizeFTS(q string) string {
-	var sb strings.Builder
-	q = strings.TrimSpace(q)
-	for _, r := range q {
-		if r == '"' || r == '\\' {
+	var parts []string
+	for _, tok := range strings.Fields(q) {
+		tok = strings.ReplaceAll(tok, `"`, "")
+		tok = strings.ReplaceAll(tok, `\`, "")
+		if tok == "" {
 			continue
 		}
-		sb.WriteRune(r)
+		parts = append(parts, `"`+tok+`"`)
 	}
-	return `"` + sb.String() + `"`
+	if len(parts) == 0 {
+		return `""`
+	}
+	return strings.Join(parts, " ")
 }
 
 func scanEvents(rows *sql.Rows) ([]Event, error) {

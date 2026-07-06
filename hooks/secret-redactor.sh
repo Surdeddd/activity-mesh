@@ -8,6 +8,10 @@
 set -uo pipefail
 
 BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
+# Fallback: launchd/non-interactive shells often lack ~/.local/bin on PATH
+# (parity with the read hooks — without this the redactor silently ran in
+# pass-through mode under launchd, i.e. no redaction at all).
+[ -z "$BIN" ] && [ -x "$HOME/.local/bin/activity-log" ] && BIN="$HOME/.local/bin/activity-log"
 
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
     # Graceful degrade: pass through. Caller is responsible for awareness;

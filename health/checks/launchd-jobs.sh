@@ -11,7 +11,15 @@ if [ "$(uname -s)" != "Darwin" ]; then
     am_emit "$NAME" 0 ok "non-mac, skipped"; exit 0
 fi
 
-EXPECTED=(com.activity-mesh.daemon com.activity-mesh.watcher com.activity-mesh.health com.activity-mesh.heartbeat)
+# All six units bootstrap installs/documents. Override per host with
+# ACTIVITY_MESH_EXPECTED_JOBS (space-separated) — e.g. a host that
+# deliberately runs no weekly digest.
+if [ -n "${ACTIVITY_MESH_EXPECTED_JOBS:-}" ]; then
+    read -r -a EXPECTED <<< "$ACTIVITY_MESH_EXPECTED_JOBS"
+else
+    EXPECTED=(com.activity-mesh.daemon com.activity-mesh.watcher com.activity-mesh.health
+              com.activity-mesh.heartbeat com.activity-mesh.compact com.activity-mesh.weekly-digest)
+fi
 loaded=$(launchctl list 2>/dev/null | awk '{print $3}')
 missing=()
 for label in "${EXPECTED[@]}"; do
@@ -20,7 +28,7 @@ for label in "${EXPECTED[@]}"; do
     fi
 done
 
-if [ "${#missing[@]}" -eq 0 ]; then am_emit "$NAME" 1 ok "all 4 jobs loaded"
+if [ "${#missing[@]}" -eq 0 ]; then am_emit "$NAME" 1 ok "all ${#EXPECTED[@]} jobs loaded"
 elif [ "${#missing[@]}" -le 1 ]; then am_emit "$NAME" 2 warn "missing: ${missing[*]}"
 else am_emit "$NAME" 3 fail "missing: ${missing[*]}"; fi
 exit 0

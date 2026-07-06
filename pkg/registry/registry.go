@@ -112,6 +112,13 @@ type Agent struct {
 	SilenceThresholdHours int    `yaml:"silence_threshold_hours,omitempty"`
 	ArchivedAt            string `yaml:"archived_at,omitempty"`
 	Reason                string `yaml:"reason,omitempty"`
+	// Aliases the L3 router matches in prompt text (any language). A match
+	// sets the agent filter AND may create an agent intent on its own.
+	Aliases []string `yaml:"aliases,omitempty"`
+	// WeakAliases qualify an already-detected intent but never create one —
+	// e.g. a bare "claude" almost always means Claude-the-tool, not the
+	// claude-mac agent.
+	WeakAliases []string `yaml:"weak_aliases,omitempty"`
 }
 
 // ----- REDACTION -----
@@ -210,13 +217,23 @@ func LoadFromBytes(kinds, scopes, agents, redaction []byte) (*Registry, error) {
 // LoadScopesFile reads and validates a standalone scopes.yaml — the
 // schema_version gate and lifecycle-status enum still apply, but the other
 // three registry files are not required. For callers that only need the
-// scope registry (e.g. `activity-log refresh-scopes`).
+// scope registry (e.g. `activity-log refresh-caches`).
 func LoadScopesFile(path string) (*Registry, error) {
 	buf, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	return LoadFromBytes(nil, buf, nil, nil)
+}
+
+// LoadAgentsFile reads and validates a standalone agents.yaml, for callers
+// that only need the agent registry (e.g. the router agents-cache).
+func LoadAgentsFile(path string) (*Registry, error) {
+	buf, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadFromBytes(nil, nil, buf, nil)
 }
 
 func loadYAML(path string, target any) error {

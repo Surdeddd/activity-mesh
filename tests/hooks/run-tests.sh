@@ -28,8 +28,8 @@ if [ ! -x "$JQ" ]; then
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/activity-mesh-hook-tests.XXXXXX")" || exit 2
-# Router writes per-session token budgets to /tmp (outside HOME) — clean ours.
-trap 'rm -rf "$WORK"; rm -f /tmp/activity-tokens-hooktest-*' EXIT
+# Router state (token budgets) lives under $HOME/.local/state — fresh per case.
+trap 'rm -rf "$WORK"' EXIT
 
 # Controlled PATHs. Hooks resolve jq/tr/head/cut via absolute /usr/bin paths,
 # but need cat/date/mkdir from PATH. MINPATH deliberately has NO jq, proving
@@ -78,6 +78,15 @@ begin_case() {
     HOMEDIR="$WORK/home-$CASE_N"
     mkdir -p "$HOMEDIR"
     ARGV_FILE="$HOMEDIR/stub-argv"
+}
+
+# seed_agents_cache — registry-derived router cache the agent-intent cases
+# need (id<TAB>aliases<TAB>weak-aliases, as `activity-log refresh-caches`
+# writes it).
+seed_agents_cache() {
+    mkdir -p "$HOMEDIR/.config/activity-mesh"
+    printf 'hermes\thermes,хермес,гермес\t\nviktor\tviktor,виктор\t\nanton\tanton,антон\t\nclaude-mac\tclaude-mac,клод-mac,клод-мак\tclaude,клод\n' \
+        > "$HOMEDIR/.config/activity-mesh/agents-cache"
 }
 
 err() { ERRORS="${ERRORS}      - $1"$'\n'; }
@@ -196,14 +205,24 @@ assert_argv "query --format text --scope billing-proxy --since 30d --limit 15"
 assert_emits "UserPromptSubmit" "(scope match)" "evt-scope"
 end_case
 
-begin_case "router: agent intent -> --agent hermes --limit 10"
+begin_case "router: agent intent (agents-cache) -> --agent hermes --limit 10"
+seed_agents_cache
 run "$ROUTER" "$(pj 'глянь hermes kanban' agent)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-agent"
 assert_rc0
 assert_argv "query --format text --agent hermes --limit 10"
 assert_emits "UserPromptSubmit" "(agent match)" "evt-agent"
 end_case
 
+begin_case "router: Cyrillic agent alias 'антон' -> --agent anton"
+seed_agents_cache
+run "$ROUTER" "$(pj 'глянь что антон наделал в проде' cyragent)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-anton"
+assert_rc0
+assert_argv "query --format text --agent anton --limit 10"
+assert_emits "UserPromptSubmit" "(agent match)" "evt-anton"
+end_case
+
 begin_case "router: temporal+agent combo -> --since 24h --agent hermes"
+seed_agents_cache
 run "$ROUTER" "$(pj 'что делал hermes сегодня' combo)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-combo"
 assert_rc0
 assert_argv "query --format text --since 24h --limit 8 --agent hermes"
@@ -211,14 +230,29 @@ assert_emits "UserPromptSubmit" "(temporal match)" "evt-combo"
 end_case
 
 begin_case "router: UPPERCASE Cyrillic prompt -> intents still match (LC_ALL fix)"
+seed_agents_cache
 run "$ROUTER" "$(pj 'ЧТО ДЕЛАЛ HERMES СЕГОДНЯ' upcyr)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-upcyr"
 assert_rc0
 assert_argv "query --format text --since 24h --limit 8 --agent hermes"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-upcyr"
 end_case
 
-begin_case "router: bare generic 'claude' mention -> NOT an agent intent"
+begin_case "router: bare generic 'claude' (weak alias) -> NOT an agent intent"
+seed_agents_cache
 run "$ROUTER" "$(pj 'claude code hooks documentation' bareclaude)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-bare"
+assert_rc0; assert_silent; assert_stub_not_called
+end_case
+
+begin_case "router: weak alias qualifies an existing intent -> --agent claude-mac"
+seed_agents_cache
+run "$ROUTER" "$(pj 'что клод делал сегодня' weakqual)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-weak"
+assert_rc0
+assert_argv "query --format text --since 24h --limit 8 --agent claude-mac"
+assert_emits "UserPromptSubmit" "(temporal match)" "evt-weak"
+end_case
+
+begin_case "router: agents-cache absent -> agent mention alone stays silent"
+run "$ROUTER" "$(pj 'глянь hermes kanban' nocache)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt"
 assert_rc0; assert_silent; assert_stub_not_called
 end_case
 
@@ -239,7 +273,7 @@ echo "== session-start-digest.sh =="
 begin_case "digest: empty stdin + stub -> SessionStart JSON, both queries exact"
 run "$DIGEST" "" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-digest"
 assert_rc0
-assert_argv "query --since 24h --limit 8 --format text
+assert_argv "query --since 24h --exclude-kind canary,heartbeat --limit 8 --format text
 query --kind error --since 30d --limit 5 --format text"
 assert_emits "SessionStart" "recent activity since last session:" "evt-digest" "---"
 end_case

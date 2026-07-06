@@ -1,6 +1,5 @@
 // /push hardening regressions: path traversal, junk ULIDs, redaction bypass.
 
-//go:build sqlite_fts5
 
 package main
 

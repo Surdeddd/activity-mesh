@@ -1,7 +1,6 @@
 // These tests exercise FTS5 SQL and need the sqlite_fts5 driver tag
 // (CGO_ENABLED=1). Run via `make test`; plain `go test ./...` skips them.
 
-//go:build sqlite_fts5
 
 package index
 

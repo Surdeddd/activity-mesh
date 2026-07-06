@@ -154,9 +154,9 @@ func TestResolveScopesRegistry_PrefersSyncLiveCopy(t *testing.T) {
 	configPath = cfgPath
 	t.Cleanup(func() { configPath = prev })
 
-	got, err := resolveScopesRegistry("")
+	got, err := resolveRegistryFile("", "scopes.yaml")
 	if err != nil {
-		t.Fatalf("resolveScopesRegistry: %v", err)
+		t.Fatalf("resolveRegistryFile: %v", err)
 	}
 	if got != live {
 		t.Errorf("resolved %q, want live sync copy %q", got, live)

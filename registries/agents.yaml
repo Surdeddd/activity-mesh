@@ -16,6 +16,9 @@ schema_version: 1
 
 agents:
   # ----- claude code instances -----
+  # `aliases` create an agent intent in the L3 router; `weak_aliases` only
+  # qualify an already-detected intent (a bare "claude/клод" almost always
+  # means Claude-the-tool, not this agent).
   - id: claude-mac
     description: "Claude Code on the MacBook (interactive)"
     runtime: claude-code
@@ -23,6 +26,8 @@ agents:
     status: active
     expected_silence: false
     silence_threshold_hours: 6
+    aliases: [claude-mac, клод-mac, клод-мак]
+    weak_aliases: [claude, клод]
 
   - id: claude-mini
     description: "Claude Code on the mac-mini (OpenClaw bots, 24/7)"
@@ -40,6 +45,7 @@ agents:
     status: active
     expected_silence: false
     silence_threshold_hours: 4
+    aliases: [hermes, хермес, гермес]
 
   - id: viktor
     description: "Viktor — Codex-harness (gpt-5.5)"
@@ -48,6 +54,7 @@ agents:
     status: active
     expected_silence: false
     silence_threshold_hours: 6
+    aliases: [viktor, виктор]
 
   # ----- openclaw bots -----
   - id: anton
@@ -57,6 +64,7 @@ agents:
     status: active
     expected_silence: false
     silence_threshold_hours: 6
+    aliases: [anton, антон]
 
   - id: openclaw-billy
     description: "Billy — OpenClaw bot"

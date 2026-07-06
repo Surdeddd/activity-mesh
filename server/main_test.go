@@ -1,7 +1,6 @@
-// These tests hit the FTS5-backed index and need the sqlite_fts5 driver tag
-// (CGO_ENABLED=1). Run via `make test`; plain `go test ./...` skips them.
+// These tests hit the FTS5-backed index (modernc.org/sqlite ships FTS5 —
+// no cgo, no build tag needed).
 
-//go:build sqlite_fts5
 
 package main
 
