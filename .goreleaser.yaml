@@ -39,10 +39,13 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
 
-# One archive per platform holding all three binaries + docs.
+# One archive per platform holding the binaries built for it + docs. Windows
+# ships only the CLI (activity-log); watcher/daemon are macOS/Linux — so the
+# per-platform binary count differs by design.
 archives:
   - id: default
     formats: [tar.gz]
+    allow_different_binary_count: true
     format_overrides:
       - goos: windows
         formats: [zip]
@@ -50,7 +53,7 @@ archives:
       - README.md
       - LICENSE
       - CHANGELOG.md
-      - registries/**/*
+      - registries/*.yaml
       - installers/**/*
 
 checksum:

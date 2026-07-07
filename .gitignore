@@ -40,3 +40,6 @@ logs/
 # Sample/test JSONL data
 test-events/
 sample-events/
+
+# Working docs / plans (not shipped)
+docs/
