@@ -31,6 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: install jq + generate en_US.UTF-8 locale
+        # The L3 router lowercases Cyrillic via `LC_ALL=en_US.UTF-8 tr` — that
+        # locale ships on the macOS hosts this runs on but must be generated on
+        # a minimal ubuntu runner, else Cyrillic intents silently mis-route.
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq locales
+          sudo locale-gen en_US.UTF-8
       - name: run hook suite
         run: make test-hooks
 
