@@ -182,6 +182,16 @@ func matchOp(spec string, ev fsnotify.Event) bool {
 	return false
 }
 
+// validOp reports whether spec is a recognised op keyword. An unrecognised op
+// silently matches nothing at runtime, so the config loader rejects it early.
+func validOp(spec string) bool {
+	switch strings.ToLower(strings.TrimSpace(spec)) {
+	case "", "create_or_modify", "create", "modify", "delete", "any":
+		return true
+	}
+	return false
+}
+
 // matchPattern checks the source pattern against the event path.
 // Supports filepath.Match shell globs (with one extension: "**/" prefix
 // indicating recursive matching, which we honor via filepath.Base fallback).
@@ -349,6 +359,25 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	}
 	log.Printf("source=%q watching=%q recursive=%v op=%q pattern=%q", src.Name, addRoot, src.Recursive, src.Op, src.Pattern)
 
+	// runEmit forks `activity-log emit` (up to 10s). Running it inline in the
+	// select loop would stall event consumption and let fsnotify's internal
+	// buffer overflow under a burst, silently dropping events. Hand emits to a
+	// bounded worker so the loop keeps draining; if the worker falls far
+	// behind, drop with a loud log rather than block (debounce already thins
+	// most bursts).
+	emitCh := make(chan fsnotify.Event, 256)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for ev := range emitCh {
+			if err := runEmit(ctx, bin, src, ev); err != nil {
+				log.Printf("emit error src=%q path=%q: %v", src.Name, ev.Name, err)
+			}
+		}
+	}()
+	defer func() { close(emitCh); wg.Wait() }()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -372,8 +401,10 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 			if !deb.hit(key, time.Now()) {
 				continue
 			}
-			if err := runEmit(ctx, bin, src, ev); err != nil {
-				log.Printf("emit error src=%q path=%q: %v", src.Name, ev.Name, err)
+			select {
+			case emitCh <- ev:
+			default:
+				log.Printf("emit queue full src=%q path=%q: dropping (worker behind)", src.Name, ev.Name)
 			}
 		case err, ok := <-w.Errors:
 			if !ok {

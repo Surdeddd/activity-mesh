@@ -14,6 +14,13 @@ const (
 	sntpPacketSize = 48
 	// Seconds between the NTP epoch (1900-01-01) and the Unix epoch (1970-01-01).
 	ntpUnixDelta = 2208988800
+	// maxSaneOffset bounds a plausible clock skew. A running host is never a
+	// day off true time; a larger value means a bad/garbage reply — refuse to
+	// cache it (poisoning every event's clock_offset_ms) rather than trust it.
+	maxSaneOffset = 24 * time.Hour
+	// maxSaneRTT bounds the round-trip. The offset estimate assumes symmetric
+	// delay, so a huge (or negative) round-trip makes it unreliable.
+	maxSaneRTT = 10 * time.Second
 )
 
 // toNTP converts a time.Time to NTP wire format (seconds, fraction).
@@ -69,7 +76,17 @@ func parseSNTPOffset(req, resp []byte, t1, t4 time.Time) (time.Duration, error) 
 	if t3.IsZero() || binary.BigEndian.Uint32(resp[40:]) == 0 {
 		return 0, fmt.Errorf("server transmit timestamp unset")
 	}
-	return (t1.Sub(t2) + t4.Sub(t3)) / 2, nil
+	// Round-trip delay = client elapsed − server processing. A negative or
+	// implausibly large value means the measurement is unreliable.
+	rtt := t4.Sub(t1) - t3.Sub(t2)
+	if rtt < 0 || rtt > maxSaneRTT {
+		return 0, fmt.Errorf("implausible round-trip %v — measurement unreliable", rtt)
+	}
+	offset := (t1.Sub(t2) + t4.Sub(t3)) / 2
+	if offset < -maxSaneOffset || offset > maxSaneOffset {
+		return 0, fmt.Errorf("implausible offset %v — refusing to cache", offset)
+	}
+	return offset, nil
 }
 
 // measureClockOffset performs one SNTP round-trip against server (host:port)

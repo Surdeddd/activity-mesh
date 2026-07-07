@@ -249,10 +249,24 @@ func parseSourceBlock(lines []rawLine) (Source, error) {
 		case "pattern":
 			src.Pattern = unquote(v)
 		case "op":
-			src.Op = unquote(v)
+			op := unquote(v)
+			if !validOp(op) {
+				return src, fmt.Errorf("line %d: unknown op %q (want create|modify|delete|create_or_modify|any)", ln.n, op)
+			}
+			src.Op = op
 		case "recursive":
-			src.Recursive = unquote(v) == "true"
+			rv := unquote(v)
+			switch rv {
+			case "true":
+				src.Recursive = true
+			case "false":
+				src.Recursive = false
+			default:
+				return src, fmt.Errorf("line %d: recursive must be true or false, got %q", ln.n, rv)
+			}
 		case "diff_field":
+			// Reserved: parsed for forward-compat but not yet acted on (a
+			// planned "emit only when this JSON field changed" filter).
 			src.DiffField = unquote(v)
 		case "summary_template":
 			src.SummaryTemplate = unquote(v)

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-07-07
+
+Robustness polish from the remaining audit findings.
+
+### Fixed
+- **Watcher event loop no longer stalls under burst.** `runEmit` (which forks
+  `activity-log emit`, up to 10s) moved off the fsnotify select loop onto a
+  bounded per-source worker, so a slow/missing binary can't back up the loop
+  and let the kernel event buffer overflow (silently dropping events). A
+  full queue logs a drop instead of blocking.
+- **clock-sync rejects implausible SNTP replies.** A valid-looking reply
+  implying a >24h skew or a negative/huge round-trip is refused rather than
+  cached — it would have poisoned every event's `clock_offset_ms`.
+- **Watcher config fails loud on typos.** An unknown `op:` value (e.g.
+  `created`) and a non-boolean `recursive:` (e.g. `yes`) previously loaded
+  silently and then matched nothing / defaulted to false; both are now load
+  errors. `diff_field` is documented as reserved (parsed, not yet acted on).
+
 ## [0.3.0] — 2026-07-07
 
 Security + correctness hardening, cgo-free builds, and a genericised,
