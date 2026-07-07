@@ -31,9 +31,10 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/activity-mesh-hook-tests.XXXXXX")" || exit 2
 # Router state (token budgets) lives under $HOME/.local/state — fresh per case.
 trap 'rm -rf "$WORK"' EXIT
 
-# Controlled PATHs. Hooks resolve jq/tr/head/cut via absolute /usr/bin paths,
-# but need cat/date/mkdir from PATH. MINPATH deliberately has NO jq, proving
-# the hooks survive launchd-style environments where jq is not on PATH.
+# Controlled PATHs. Hooks resolve jq via PATH then absolute homes, and need
+# cat/date/mkdir + python3 (Cyrillic lowercasing) from PATH. MINPATH
+# deliberately has NO jq, proving the hooks survive launchd-style environments
+# where jq is not on PATH (they fall back to /usr/bin/jq).
 MINPATH="$WORK/minpath"
 FULLPATH="$WORK/fullpath"
 mkdir -p "$MINPATH" "$FULLPATH"
@@ -47,6 +48,11 @@ for tool in cat date mkdir; do
     ln -s "$bin" "$FULLPATH/$tool"
 done
 ln -s "$JQ" "$FULLPATH/jq"
+# python3 is how the router folds Cyrillic case portably (GNU tr can't). Give
+# the FULL environment access to it; MINPATH omits it so the fallback path
+# (ASCII-only tr) is also exercised.
+PY3="$(command -v python3 || true)"
+[ -n "$PY3" ] && ln -s "$PY3" "$FULLPATH/python3"
 
 # Stub activity-log: records argv (one line per invocation) to $STUB_ARGV,
 # prints $STUB_OUTPUT (if non-empty) as the fake query result.

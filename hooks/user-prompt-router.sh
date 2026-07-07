@@ -40,8 +40,16 @@ TOKENS_USED=0
 case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
 [ "$TOKENS_USED" -gt 2000 ] && { log "session=$SESSION_ID over budget, silent"; exit 0; }
 
-# Hooks run with C locale; force UTF-8 or tr leaves Cyrillic uppercase intact
-LOWER=$(printf '%s' "$PROMPT" | LC_ALL=en_US.UTF-8 /usr/bin/tr '[:upper:]' '[:lower:]')
+# Lowercase for case-insensitive matching. GNU `tr` (Linux) operates on bytes
+# and cannot fold multibyte Cyrillic at all; BSD `tr` (macOS) can with a UTF-8
+# locale. For portability, prefer python3 (correct Unicode fold everywhere),
+# falling back to `LC_ALL=en_US.UTF-8 tr` where python3 is absent (macOS folds
+# Cyrillic; a python3-less Linux host degrades to ASCII-only folding).
+if command -v python3 >/dev/null 2>&1; then
+    LOWER=$(printf '%s' "$PROMPT" | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().lower())' 2>/dev/null)
+else
+    LOWER=$(printf '%s' "$PROMPT" | LC_ALL=en_US.UTF-8 /usr/bin/tr '[:upper:]' '[:lower:]')
+fi
 
 # Anti-triggers (definition / how-to / creation — NOT recall)
 ANTI_RE='что такое|как сделать|как (написать|создать)|напиши|создай|сделай мне|what is|how (do|to|can)|write me|generate|create a'
