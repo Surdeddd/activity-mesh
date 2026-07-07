@@ -57,6 +57,8 @@ func main() {
 	root.AddCommand(clockSyncCmd())
 	root.AddCommand(refreshScopesCmd())
 	root.AddCommand(installGitHookCmd())
+	root.AddCommand(redactCmd())
+	root.AddCommand(redactShardCmd())
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -513,34 +515,64 @@ func lastEvent(path string) (*event.Event, int, error) {
 // clockSyncTimeout bounds the whole SNTP round-trip (dial + send + recv).
 const clockSyncTimeout = 3 * time.Second
 
+// defaultNTPServers are tried in order until one answers — different networks
+// (corporate DNS, VPNs, split-horizon resolvers) block different providers, so
+// a single hardcoded server made clock-sync fail wholesale on some hosts.
+var defaultNTPServers = []string{
+	"time.google.com:123",
+	"time.cloudflare.com:123",
+	"time.apple.com:123",
+	"pool.ntp.org:123",
+}
+
 func clockSyncCmd() *cobra.Command {
 	var server string
 	cmd := &cobra.Command{
 		Use:   "clock-sync",
 		Short: "Measure local clock offset via SNTP and cache it for emitters.",
-		Long: "Performs one SNTP query (UDP, 3s timeout) and atomically writes the\n" +
-			"rounded offset (local−true, ms) to <state>/clock-offset-ms, where\n" +
-			"emitters pick it up as the optional clock_offset_ms event field.\n" +
-			"On network failure the previous cached value is left untouched.",
+		Long: "Performs an SNTP query (UDP, 3s timeout per server) and atomically\n" +
+			"writes the rounded offset (local−true, ms) to <state>/clock-offset-ms,\n" +
+			"where emitters pick it up as the optional clock_offset_ms field.\n" +
+			"Without --server it tries several providers in order (resilient to\n" +
+			"networks that block a given one). On total failure the previous\n" +
+			"cached value is left untouched.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := event.ClockOffsetPath()
 			if path == "" {
 				return errors.New("cannot resolve state dir (no $ACTIVITY_MESH_STATE and no home dir)")
 			}
-			offset, err := measureClockOffset(server, clockSyncTimeout)
+			servers := defaultNTPServers
+			if server != "" {
+				servers = []string{server}
+			}
+			offset, used, err := measureClockOffsetMulti(servers, clockSyncTimeout)
 			if err != nil {
-				return fmt.Errorf("clock-sync via %s failed: %w (cached offset left untouched)", server, err)
+				return fmt.Errorf("clock-sync failed on all servers (%v): %w (cached offset left untouched)", servers, err)
 			}
 			ms := offset.Round(time.Millisecond).Milliseconds()
 			if err := atomicWriteFile(path, []byte(strconv.FormatInt(ms, 10)+"\n")); err != nil {
 				return fmt.Errorf("write %s: %w", path, err)
 			}
-			fmt.Printf("clock offset %+dms (local−true, via %s) → %s\n", ms, server, path)
+			fmt.Printf("clock offset %+dms (local−true, via %s) → %s\n", ms, used, path)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&server, "server", "time.apple.com:123", "NTP server host:port")
+	cmd.Flags().StringVar(&server, "server", "", "NTP server host:port (default: try several providers)")
 	return cmd
+}
+
+// measureClockOffsetMulti tries each server in order, returning the first
+// successful offset and the server that answered.
+func measureClockOffsetMulti(servers []string, timeout time.Duration) (time.Duration, string, error) {
+	var lastErr error
+	for _, s := range servers {
+		off, err := measureClockOffset(s, timeout)
+		if err == nil {
+			return off, s, nil
+		}
+		lastErr = err
+	}
+	return 0, "", lastErr
 }
 
 // atomicWriteFile writes data to path via a temp file + rename in the same

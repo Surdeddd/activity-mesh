@@ -31,6 +31,14 @@ if [ -f "$SCOPES_FILE" ]; then
     known_scopes=$(grep -E '^[[:space:]]*-[[:space:]]+name:' "$SCOPES_FILE" | sed -E 's/.*name:[[:space:]]*//; s/[[:space:]]*$//')
 fi
 is_known() { printf '%s\n' "$2" | grep -qxF "$1"; }
+# A namespaced scope "ns:sub" is known if the full name is registered OR its
+# namespace base "ns" is (registering "wiki" covers every "wiki:<dir>" the
+# watcher emits, without listing each one).
+is_known_scope() {
+    is_known "$1" "$known_scopes" && return 0
+    case "$1" in *:*) is_known "${1%%:*}" "$known_scopes" && return 0 ;; esac
+    return 1
+}
 
 now=$(date +%s); cutoff=$(( now - 86400 ))
 unk=0; sample=""
@@ -48,7 +56,7 @@ for f in "$SYNC"/events-*.jsonl; do
         if [ -f "$KINDS_FILE" ] && [ -n "$kind" ] && ! is_known "$kind" "$known_kinds"; then
             unk=$((unk+1)); [ -z "$sample" ] && sample="kind=$kind"
         fi
-        if [ -f "$SCOPES_FILE" ] && [ -n "$scope" ] && ! is_known "$scope" "$known_scopes"; then
+        if [ -f "$SCOPES_FILE" ] && [ -n "$scope" ] && ! is_known_scope "$scope"; then
             unk=$((unk+1)); [ -z "$sample" ] && sample="scope=$scope"
         fi
     done < <(tail -n 200 "$f" 2>/dev/null)

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] — 2026-07-07
+
+Operability fixes surfaced by driving both hosts to green after the redeploy.
+
+### Added
+- `activity-log redact` (`--stdin`) — the standalone redaction filter
+  `hooks/secret-redactor.sh` shells out to. It was never a real subcommand, so
+  under launchd the redactor hook ran `activity-log redact --stdin`, got
+  "unknown command", and emitted nothing — silently dropping the text it was
+  meant to scrub-and-pass-through.
+- `activity-log redact-shard` — re-applies the current redaction rules to this
+  host's existing shard (atomic, under the host lock), scrubbing values that
+  predate a rule change. Used to clean the per-host home path that the old
+  hardcoded username never matched on the second host.
+
+### Fixed
+- **clock-sync tries several NTP providers** (google → cloudflare → apple →
+  pool) instead of one hardcoded server, which failed wholesale on networks
+  that block/mis-resolve it (VPN/split-DNS) — clock-sync had been failing
+  hourly, leaving `clock_offset_ms` stale.
+- **schema-drift is namespace-aware** and no longer flags the watcher's
+  dynamic scopes: a `ns:sub` scope counts as known when the base namespace
+  `ns` is registered, so registering `wiki` / `project` / `infra` covers every
+  `wiki:<domain>` / `project:<repo>` / `infra:<component>` the watcher emits.
+
 ## [0.3.1] — 2026-07-07
 
 Robustness polish from the remaining audit findings.
