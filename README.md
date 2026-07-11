@@ -21,7 +21,7 @@ A shared activity log that is:
 5. **Cross-OS** — single Go binary cross-compiled for macOS/Linux/Windows; YAML-described supervisors (launchd/systemd/Task Scheduler) and watchers (fswatch/inotify/USN).
 6. **Coexists** — adds a *history* layer (when/who) on top of existing memory layers (state truth, knowledge, semantic recall) — clear boundary rules, no replacement.
 7. **Self-monitoring** — 19 health checks, dead-man heartbeat (independent process), weekly digest, recovery runbook.
-8. **Privacy-first** — 3-tier redaction (regex + entropy + NER) at write time, before file hits disk.
+8. **Privacy-first** — two-tier redaction (compiled-in regex pack + Shannon-entropy heuristic) at write time, before a line hits disk, plus retroactive `redact-shard` for rule upgrades. (Offline NER is a v2 roadmap item.)
 
 ## How it works
 
@@ -45,7 +45,7 @@ A shared activity log that is:
 - **ULID + monotonic_seq** for deterministic ordering.
 - **SQLite + FTS5** indexer for sub-100ms search.
 - **HTTP daemon** at `:7459` for query and emit; **MCP server** for IDE/agent integrations.
-- **Open registries** (`kinds.yaml`, `scopes.yaml`, `agents.yaml`, `redaction.yaml`) — schema is data, not code.
+- **Open registries** (`kinds.yaml`, `scopes.yaml`, `agents.yaml`) — kinds/scopes/agents are data, enforced at emit time (archived scopes reject new events). `redaction.yaml` *documents* the redaction pack; the runtime rules are compiled into the binary so a synced file can never silently disable redaction.
 
 ## Quick start
 
@@ -71,14 +71,17 @@ curl 'http://localhost:7459/digest?window=today&group_by=scope'
 bash health/master.sh | jq .summary
 ```
 
-`clock-sync` performs one SNTP round-trip (UDP to `time.apple.com`, 3s
-timeout, pure Go) and atomically writes the rounded ms offset to
-`$ACTIVITY_MESH_STATE/clock-offset-ms` (default
+`clock-sync` performs an SNTP round-trip (UDP, 3s timeout per server, pure
+Go; tries several NTP providers in order) and atomically writes the rounded
+ms offset to `$ACTIVITY_MESH_STATE/clock-offset-ms` (default
 `~/.local/state/activity-mesh/`). Hosts running the dead-man heartbeat
-(`health/dead-man-heartbeat.sh`, hourly via
-`installers/templates/launchd-heartbeat.plist.tmpl`) refresh it
-automatically; on hosts without the heartbeat schedule it with one cron
-line: `0 * * * * /usr/local/bin/activity-log clock-sync`.
+refresh it hourly; elsewhere schedule
+`0 * * * * /usr/local/bin/activity-log clock-sync`.
+
+The daemon binds `127.0.0.1:7459` by default. `/push` accepts events only
+for the daemon's own host (single-writer invariant), validates schema
+version / ULID / timestamp / labels / priority, truncates summaries to 500
+chars, and runs the same write-time redaction as the CLI.
 
 ## Router caches
 
@@ -115,12 +118,23 @@ Only this host's shard is touched (single-writer invariant). Events older than
 re-runs append additional gzip members, which plain `zcat` reads transparently.
 The live shard is rewritten atomically (temp file + rename + fsync) under the
 same per-host lock `emit` uses, and malformed lines are preserved verbatim —
-never silently dropped. Running daemons re-ingest the rewritten shard safely:
-the index dedupes by ULID and rescans from offset 0 when the file shrinks.
+never silently dropped.
 
-A monthly launchd template ships in `installers/templates/launchd-compact.plist.tmpl`
-(1st of month, 04:40, label `com.activity-mesh.compact`) — render the `{{...}}`
-placeholders and `launchctl bootstrap` it yourself; `bootstrap.sh` does not install it.
+**Index semantics**: the SQLite index covers exactly the **live** shards. Any
+shard rewrite (compaction, `redact-shard`, a sync replace) is detected via a
+prefix hash and triggers a reconciling rescan — changed events are updated in
+place, and events that left the shard leave the index (and its FTS entries)
+too. Archived events are not searchable through `query`, the daemon, or MCP;
+read archives with `zcat`. An existing index always converges to what a fresh
+rebuild would produce.
+
+`bootstrap.sh` installs the monthly compact launchd job
+(`com.activity-mesh.compact`, 1st of month 04:40) along with the other units.
+
+**Retroactive redaction**: `activity-log redact-shard` re-applies the current
+redaction rules to this host's shard in place (atomic, host-locked) — use it
+after a rule upgrade to scrub values that predate it. The next ingest purges
+the old payloads from the SQLite index and the FTS table as well.
 
 ## Building
 
@@ -168,13 +182,27 @@ activity-mesh is a single layer in a stack — it's the **history** layer. Recom
 
 History does not replace state truth. Don't cite activity events as canonical state — query the state layer first.
 
+## Platform support
+
+| capability | macOS | Linux | Windows |
+|---|---|---|---|
+| CLI (emit/query/compact/redact-shard/clock-sync) | ✅ | ✅ | ✅ (`activity-log.exe`) |
+| fsnotify capture watcher | ✅ | ✅ | ❌ |
+| HTTP query daemon (`:7459`) | ✅ | ✅ | ❌ |
+| Claude Code hooks (L2/L3) | ✅ | ✅ | ❌ |
+| health checks / heartbeat / weekly digest | ✅ | ✅ (cron/timers) | ❌ |
+| supervisor units via bootstrap | 6 launchd units | 2 systemd units + documented cron | none (CLI-only) |
+
+Windows is deliberately **CLI-only**: the release zip ships `activity-log.exe`
+and the registries; there is no watcher, daemon, or scheduled task support.
+
 ## Roadmap
 
-- v1: cross-machine sync, auto-context injection, MCP integration, health monitoring (current)
-- v2: tier-3 NER redaction (offline weekly batch), digest snapshots, compactor for >90-day events
-- v3: Linux + Windows installer parity, multi-runtime SDK adapters
+- v1 (shipped): cross-machine sync, auto-context injection, MCP integration, health monitoring, compaction, retroactive redaction, verified installers
+- v2: tier-3 NER redaction (offline batch), action propagation groundwork
+- v3: multi-tenant/federated — explicitly out of scope for now
 
-See `ROADMAP.md` for detailed milestones.
+See `ROADMAP.md` for the release gate.
 
 ## Inspiration
 

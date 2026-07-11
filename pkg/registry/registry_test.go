@@ -7,13 +7,9 @@ import (
 	"testing"
 )
 
-// repoRegistries returns the absolute path to the repo's registries/ dir for
-// integration-style tests that read the canonical YAML files.
 func repoRegistries(t *testing.T) string {
 	t.Helper()
 	_, here, _, _ := runtime.Caller(0)
-	// here = .../pkg/registry/registry_test.go
-	// climb to repo root, then into registries/
 	root := filepath.Join(filepath.Dir(here), "..", "..")
 	abs, err := filepath.Abs(filepath.Join(root, "registries"))
 	if err != nil {
@@ -22,9 +18,6 @@ func repoRegistries(t *testing.T) string {
 	return abs
 }
 
-// TestLoad_RealFiles ensures the canonical registries in the repo parse
-// cleanly under the current loader. If this breaks, either the YAML drifted
-// or the schema bumped — both should be caught by CI.
 func TestLoad_RealFiles(t *testing.T) {
 	r, err := Load(repoRegistries(t))
 	if err != nil {
@@ -47,7 +40,6 @@ func TestLoad_RealFiles(t *testing.T) {
 	}
 }
 
-// TestKindLookup verifies core + extension lookups round-trip.
 func TestKindLookup(t *testing.T) {
 	r := mustLoad(t)
 	for _, k := range []string{"install", "config", "decision", "task", "note", "status", "error", "handoff", "heartbeat", "canary", "project", "compile"} {
@@ -63,7 +55,6 @@ func TestKindLookup(t *testing.T) {
 	}
 }
 
-// TestScopeLifecycle exercises the active/deprecated/archived gate.
 func TestScopeLifecycle(t *testing.T) {
 	r := mustLoad(t)
 
@@ -88,15 +79,12 @@ func TestScopeLifecycle(t *testing.T) {
 		t.Errorf("archived warn missing 'archived': %q", warn)
 	}
 
-	// Unknown scope: forward-compatible pass.
 	allowed, warn = r.CanEmitToScope("unknown-scope-xyz")
 	if !allowed {
 		t.Errorf("unknown scope should pass (forward-compat); got allowed=%v warn=%q", allowed, warn)
 	}
 }
 
-// TestAgentLookup ensures agent lookups + lifecycle work, including the
-// archived-with-expected_silence case.
 func TestAgentLookup(t *testing.T) {
 	r := mustLoad(t)
 
@@ -123,8 +111,6 @@ func TestAgentLookup(t *testing.T) {
 	}
 }
 
-// TestActiveScopesAndAgents ensures the active-only filters skip archived
-// entries and return sorted output.
 func TestActiveScopesAndAgents(t *testing.T) {
 	r := mustLoad(t)
 	for _, s := range r.ActiveScopes() {
@@ -145,9 +131,6 @@ func TestActiveScopesAndAgents(t *testing.T) {
 	}
 }
 
-// TestScopeRouterFlag — `router: false` opts a scope out of RouterScopes;
-// absent and explicit-true both mean included. Non-active scopes never
-// appear regardless of the flag.
 func TestScopeRouterFlag(t *testing.T) {
 	yaml := []byte(`schema_version: 1
 scopes:
@@ -188,9 +171,6 @@ scopes:
 	}
 }
 
-// TestRouterScopes_RealFiles pins the shipped registry: every scope name that
-// collides with an agent alias (agents.yaml) must be excluded from the router
-// cache, while ordinary scopes stay in.
 func TestRouterScopes_RealFiles(t *testing.T) {
 	r := mustLoad(t)
 	inCache := map[string]bool{}
@@ -213,8 +193,6 @@ func TestRouterScopes_RealFiles(t *testing.T) {
 	}
 }
 
-// TestSchemaVersionMismatch ensures we refuse YAML written for a future
-// schema rather than silently misinterpret.
 func TestSchemaVersionMismatch(t *testing.T) {
 	bad := []byte("schema_version: 99\nscopes: []\n")
 	_, err := LoadFromBytes(nil, bad, nil, nil)
@@ -226,7 +204,6 @@ func TestSchemaVersionMismatch(t *testing.T) {
 	}
 }
 
-// TestInvalidStatus catches typos in lifecycle status (e.g. "actve").
 func TestInvalidStatus(t *testing.T) {
 	bad := []byte(`schema_version: 1
 scopes:
@@ -239,7 +216,6 @@ scopes:
 	}
 }
 
-// TestInvalidSeverity catches typos in kind severity (e.g. "P9").
 func TestInvalidSeverity(t *testing.T) {
 	bad := []byte(`schema_version: 1
 core:
@@ -253,8 +229,6 @@ core:
 	}
 }
 
-// TestLifecycleTransition exercises transitions in-memory: a scope flips
-// active → deprecated → archived; CanEmitToScope reflects that.
 func TestLifecycleTransition(t *testing.T) {
 	yaml := []byte(`schema_version: 1
 scopes:
@@ -300,21 +274,19 @@ scopes:
 	}
 }
 
-// TestRedactionPatterns ensures the redaction file declares the expected
-// pattern names — the keys are referenced by audit tooling.
 func TestRedactionPatterns(t *testing.T) {
 	r := mustLoad(t)
 	want := map[string]bool{
-		"anthropic_key": false,
-		"openai_key":    false,
-		"github_token":  false,
-		"aws_access_key": false,
-		"jwt":           false,
+		"anthropic_key":   false,
+		"openai_key":      false,
+		"github_token":    false,
+		"aws_access_key":  false,
+		"jwt":             false,
 		"private_key_pem": false,
-		"db_url":        false,
-		"email":         false,
-		"user_path":     false,
-		"lan_ip":        false,
+		"db_url":          false,
+		"email":           false,
+		"user_path":       false,
+		"lan_ip":          false,
 	}
 	for _, p := range r.Redaction.Patterns {
 		if _, ok := want[p.Name]; ok {
@@ -328,8 +300,6 @@ func TestRedactionPatterns(t *testing.T) {
 	}
 }
 
-// mustLoad is a tiny helper wrapping Load + t.Fatal for the canonical repo
-// registries.
 func mustLoad(t *testing.T) *Registry {
 	t.Helper()
 	r, err := Load(repoRegistries(t))

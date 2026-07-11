@@ -1,5 +1,3 @@
-// Package event defines the activity-mesh event schema and helpers for
-// generating ULIDs + monotonic_seq + UTF-8 sanitized JSONL output.
 package event
 
 import (
@@ -17,67 +15,51 @@ import (
 	"github.com/Surdeddd/activity-mesh/pkg/redact"
 )
 
-// SchemaVersion of the event format.
 const SchemaVersion = 1
 
-// RedactHit is re-exported from pkg/redact for callers that want a single import.
 type RedactHit = redact.Hit
 
-// Event is the on-disk representation. JSON tags use omitempty for optional
-// fields to keep ambient token cost down.
 type Event struct {
-	V              int      `json:"v"`
-	ID             string   `json:"id"`
-	TS             string   `json:"ts"`
-	Host           string   `json:"host"`
-	Agent          string   `json:"agent"`
-	Kind           string   `json:"kind"`
-	Scope          string   `json:"scope"`
-	Summary        string   `json:"summary"`
-	MonotonicSeq   uint64   `json:"monotonic_seq,omitempty"`
-	TSMonoNS       int64    `json:"ts_mono_ns,omitempty"`
-	BootID         string   `json:"boot_id,omitempty"`
-	SessionID      string   `json:"session_id,omitempty"`
-	ParentID       string   `json:"parent_id,omitempty"`
-	CausedBy       string   `json:"caused_by,omitempty"`
-	Actor          string   `json:"actor,omitempty"`
-	Originator     string   `json:"originator,omitempty"`
-	Ref            string   `json:"ref,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	DurationMS     int64    `json:"duration_ms,omitempty"`
-	ExitCode       *int     `json:"exit_code,omitempty"`
-	Files          []string `json:"files,omitempty"`
-	Truncated      bool     `json:"truncated,omitempty"`
-	ClockOffsetMS  int64    `json:"clock_offset_ms,omitempty"`
-	Priority       string   `json:"priority,omitempty"`
+	V             int      `json:"v"`
+	ID            string   `json:"id"`
+	TS            string   `json:"ts"`
+	Host          string   `json:"host"`
+	Agent         string   `json:"agent"`
+	Kind          string   `json:"kind"`
+	Scope         string   `json:"scope"`
+	Summary       string   `json:"summary"`
+	MonotonicSeq  uint64   `json:"monotonic_seq,omitempty"`
+	TSMonoNS      int64    `json:"ts_mono_ns,omitempty"`
+	BootID        string   `json:"boot_id,omitempty"`
+	SessionID     string   `json:"session_id,omitempty"`
+	ParentID      string   `json:"parent_id,omitempty"`
+	CausedBy      string   `json:"caused_by,omitempty"`
+	Actor         string   `json:"actor,omitempty"`
+	Originator    string   `json:"originator,omitempty"`
+	Ref           string   `json:"ref,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	DurationMS    int64    `json:"duration_ms,omitempty"`
+	ExitCode      *int     `json:"exit_code,omitempty"`
+	Files         []string `json:"files,omitempty"`
+	Truncated     bool     `json:"truncated,omitempty"`
+	ClockOffsetMS int64    `json:"clock_offset_ms,omitempty"`
+	Priority      string   `json:"priority,omitempty"`
 }
 
-// Option mutates an event during construction.
 type Option func(*Event)
 
-// WithRef sets the optional ref pointer (wiki://, git://, file://).
 func WithRef(ref string) Option { return func(e *Event) { e.Ref = ref } }
 
-// WithTags attaches a tag list.
 func WithTags(tags []string) Option { return func(e *Event) { e.Tags = tags } }
 
-// WithPriority sets P0..P3.
 func WithPriority(p string) Option { return func(e *Event) { e.Priority = p } }
 
-// WithAgent overrides the auto-detected agent label.
 func WithAgent(a string) Option { return func(e *Event) { e.Agent = a } }
 
-// WithSessionID attaches a session identifier.
 func WithSessionID(id string) Option { return func(e *Event) { e.SessionID = id } }
 
-// WithParentID links to a parent event (causal chain).
 func WithParentID(id string) Option { return func(e *Event) { e.ParentID = id } }
 
-// New constructs a fresh event. ULID, timestamp, and monotonic_seq are filled
-// automatically from the seq counter at storeDir. The per-host lock is held
-// only for the seq allocation; callers that go on to append to the shard
-// should instead hold the lock themselves and use NewLocked, so the append
-// is serialised against compaction.
 func New(storeDir, kind, scope, summary string, opts ...Option) (*Event, error) {
 	host := HostName()
 	lock, err := AcquireHostLock(storeDir, host)
@@ -88,9 +70,6 @@ func New(storeDir, kind, scope, summary string, opts ...Option) (*Event, error) 
 	return NewLocked(lock, kind, scope, summary, opts...)
 }
 
-// NewLocked constructs a fresh event using an already-held host lock for the
-// monotonic_seq allocation. The caller keeps holding the lock across the
-// shard append that follows.
 func NewLocked(lock *HostLock, kind, scope, summary string, opts ...Option) (*Event, error) {
 	host := HostName()
 	id, err := newULID()
@@ -112,8 +91,6 @@ func NewLocked(lock *HostLock, kind, scope, summary string, opts ...Option) (*Ev
 		Summary:      summary,
 		MonotonicSeq: seq,
 	}
-	// Cached NTP offset (written by `activity-log clock-sync`). Cheap single
-	// read; missing/garbage file → field omitted, never an error.
 	if ms, ok := readClockOffsetMS(ClockOffsetPath()); ok {
 		e.ClockOffsetMS = ms
 	}
@@ -123,17 +100,9 @@ func NewLocked(lock *HostLock, kind, scope, summary string, opts ...Option) (*Ev
 	return e, nil
 }
 
-// Marshal applies redaction to all string fields, validates UTF-8 (replacing
-// invalid bytes with U+FFFD and setting truncated=true), and produces a single
-// JSONL line WITHOUT a trailing newline. Returned hits feed the audit log.
 func (e *Event) Marshal() (line []byte, hits []RedactHit, err error) {
-	// 1. UTF-8 sanitize on the source event before any JSON round-trip.
-	//    json.Marshal silently replaces invalid bytes with U+FFFD, so we
-	//    must detect+flag here.
 	sanitizeStruct(e)
 
-	// 2. Encode to a generic map so we can apply redaction recursively, then
-	//    re-marshal. A bit slower but keeps redaction scope-complete.
 	raw, err := json.Marshal(e)
 	if err != nil {
 		return nil, nil, err
@@ -150,8 +119,6 @@ func (e *Event) Marshal() (line []byte, hits []RedactHit, err error) {
 	return out, hits, nil
 }
 
-// sanitizeStruct rewrites every user-supplied string field in e to be valid
-// UTF-8, replacing invalid bytes with U+FFFD and flagging Truncated=true.
 func sanitizeStruct(e *Event) {
 	clean := func(s *string) {
 		if !utf8.ValidString(*s) {
@@ -179,8 +146,6 @@ func sanitizeStruct(e *Event) {
 	}
 }
 
-// ----- ULID + seq -----
-
 var (
 	ulidEntropy *ulidEntropySource
 	ulidOnce    sync.Once
@@ -206,7 +171,6 @@ func newULID() (string, error) {
 	return id.String(), nil
 }
 
-// defaultAgent infers the writer label from $ACTIVITY_AGENT env or hostname.
 func defaultAgent() string {
 	if a := os.Getenv("ACTIVITY_AGENT"); a != "" {
 		return a
@@ -214,16 +178,12 @@ func defaultAgent() string {
 	return "cli"
 }
 
-// TSLayouts are the accepted event timestamp layouts, canonical first. Every
-// reader (query, index, compact) parses through ParseTS so a valid event is
-// never silently dropped by one consumer and accepted by another.
 var TSLayouts = []string{
 	"2006-01-02T15:04:05.000000Z",
 	time.RFC3339Nano,
 	time.RFC3339,
 }
 
-// ParseTS parses an event timestamp through the canonical layouts.
 func ParseTS(ts string) (time.Time, error) {
 	for _, layout := range TSLayouts {
 		if t, err := time.Parse(layout, ts); err == nil {
@@ -233,8 +193,25 @@ func ParseTS(ts string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("parse ts %q", ts)
 }
 
-// ValidULID reports whether s is a well-formed 26-char Crockford ULID.
 func ValidULID(s string) bool {
 	_, err := ulid.ParseStrict(s)
 	return err == nil
+}
+
+const MaxSummaryRunes = 500
+
+func NormalizeSummary(s string) (string, bool) {
+	r := []rune(s)
+	if len(r) <= MaxSummaryRunes {
+		return s, false
+	}
+	return string(r[:MaxSummaryRunes-1]) + "…", true
+}
+
+func ValidPriority(p string) bool {
+	switch p {
+	case "", "P0", "P1", "P2", "P3":
+		return true
+	}
+	return false
 }

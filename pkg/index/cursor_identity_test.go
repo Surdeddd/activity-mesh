@@ -1,16 +1,10 @@
-// Cursor-identity regressions: a shard rewritten to a size that is still
-// LARGER than the stored cursor (compaction removing less than the unread
-// backlog, or a sync replace) must trigger a full rescan — the old
-// size-only check kept a stale mid-file cursor and silently skipped the
-// unread tail forever.
-
-
 package index
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -28,17 +22,35 @@ func evLine(i int, summary string) string {
 	return fmt.Sprintf(`{"v":1,"id":"01ARZ3NDEKTSV4RRFFQ69G%04d","ts":%q,"host":"h1","agent":"t","kind":"note","scope":"s","summary":%q}`, i, ts, summary)
 }
 
-func TestCursorResetOnHeadChange(t *testing.T) {
+func newTempIndex(t *testing.T) (*Index, string) {
+	t.Helper()
 	dir := t.TempDir()
 	idx, err := NewIndex(filepath.Join(dir, "index.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer idx.Close()
+	t.Cleanup(func() { _ = idx.Close() })
+	return idx, dir
+}
+
+func summaries(t *testing.T, idx *Index) map[string]string {
+	t.Helper()
+	got, err := idx.Query(QueryFilter{Limit: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, e := range got {
+		s, _ := e.Payload["summary"].(string)
+		out[e.ULID] = s
+	}
+	return out
+}
+
+func TestCursorResetOnRewrite(t *testing.T) {
+	idx, dir := newTempIndex(t)
 	shard := filepath.Join(dir, "events-h1.jsonl")
 
-	// 1. ingest only the first 2 of 6 events (simulate a lagging cursor by
-	//    writing 2, ingesting, then appending 4 more WITHOUT ingesting).
 	writeShardFile(t, shard, []string{evLine(0, "a"), evLine(1, "b")})
 	if n, err := idx.IngestJSONL(shard); err != nil || n != 2 {
 		t.Fatalf("first ingest: n=%d err=%v", n, err)
@@ -52,69 +64,206 @@ func TestCursorResetOnHeadChange(t *testing.T) {
 	}
 	f.Close()
 
-	// 2. "compact": drop the first line, keep the rest — the file is still
-	//    larger than the stored cursor (which points after line 2).
 	var kept []string
 	for i := 1; i < 6; i++ {
-		kept = append(kept, evLine(i, map[bool]string{true: "b", false: fmt.Sprintf("tail-%d", i)}[i == 1]))
+		s := "b"
+		if i != 1 {
+			s = fmt.Sprintf("tail-%d", i)
+		}
+		kept = append(kept, evLine(i, s))
 	}
 	writeShardFile(t, shard, kept)
 
-	// 3. re-ingest: head hash changed → full rescan → tail events land.
 	if _, err := idx.IngestJSONL(shard); err != nil {
 		t.Fatal(err)
 	}
-	got, err := idx.Query(QueryFilter{Limit: 100})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bySummary := map[string]bool{}
-	for _, e := range got {
-		if s, ok := e.Payload["summary"].(string); ok {
-			bySummary[s] = true
-		}
-	}
+	got := summaries(t, idx)
 	for i := 2; i < 6; i++ {
-		if !bySummary[fmt.Sprintf("tail-%d", i)] {
-			t.Fatalf("tail event %d skipped after rewrite (stale cursor); got %v", i, bySummary)
+		if got[fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G%04d", i)] != fmt.Sprintf("tail-%d", i) {
+			t.Fatalf("tail event %d skipped after rewrite (stale cursor); got %v", i, got)
 		}
+	}
+	if _, ok := got["01ARZ3NDEKTSV4RRFFQ69G0000"]; ok {
+		t.Fatal("event dropped from shard must be reconciled out of the index")
 	}
 }
 
-// TestIngestCountsOnlyRealInserts — INSERT OR IGNORE dedup hits must not
-// inflate the ingested counter after a cursor reset.
-func TestIngestCountsOnlyRealInserts(t *testing.T) {
-	dir := t.TempDir()
-	idx, err := NewIndex(filepath.Join(dir, "index.db"))
+func TestRewriteSameHeadNotSmaller(t *testing.T) {
+	idx, dir := newTempIndex(t)
+	shard := filepath.Join(dir, "events-h1.jsonl")
+	secret := "hunter2-super-secret"
+
+	writeShardFile(t, shard, []string{evLine(0, "clean head"), evLine(1, "leak "+secret), evLine(2, "tail")})
+	if _, err := idx.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+
+	padded := "REDACTED-" + strings.Repeat("x", len(secret)-4)
+	writeShardFile(t, shard, []string{evLine(0, "clean head"), evLine(1, "leak "+padded), evLine(2, "tail")})
+	fi1, _ := os.Stat(shard)
+	if fi1.Size() == 0 {
+		t.Fatal("setup broken")
+	}
+	if _, err := idx.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+
+	got := summaries(t, idx)
+	if strings.Contains(got["01ARZ3NDEKTSV4RRFFQ69G0001"], secret) {
+		t.Fatalf("stale payload survived a same-head not-smaller rewrite: %v", got)
+	}
+	hits, err := idx.Search(secret, time.Time{}, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer idx.Close()
+	if len(hits) != 0 {
+		t.Fatalf("FTS still finds the pre-rewrite secret: %+v", hits)
+	}
+}
+
+func TestRedactedPayloadPurgedFromPayloadAndFTS(t *testing.T) {
+	idx, dir := newTempIndex(t)
+	shard := filepath.Join(dir, "events-h1.jsonl")
+	secret := "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	writeShardFile(t, shard, []string{evLine(0, "token is "+secret)})
+	if _, err := idx.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+	if hits, _ := idx.Search("ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", time.Time{}, 10); len(hits) != 1 {
+		t.Fatalf("precondition: secret must be searchable before redaction, got %d hits", len(hits))
+	}
+
+	writeShardFile(t, shard, []string{evLine(0, "token is [REDACTED:github_token:40]")})
+	if _, err := idx.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+
+	if hits, _ := idx.Search("ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", time.Time{}, 10); len(hits) != 0 {
+		t.Fatalf("secret still searchable after redact rewrite: %+v", hits)
+	}
+	got := summaries(t, idx)
+	if strings.Contains(got["01ARZ3NDEKTSV4RRFFQ69G0000"], secret) {
+		t.Fatalf("secret survived in payload: %v", got)
+	}
+	if hits, _ := idx.Search("REDACTED", time.Time{}, 10); len(hits) != 1 {
+		t.Fatal("updated payload must be searchable by its new content")
+	}
+}
+
+func TestIngestCountsOnlyRealChanges(t *testing.T) {
+	idx, dir := newTempIndex(t)
 	shard := filepath.Join(dir, "events-h1.jsonl")
 	writeShardFile(t, shard, []string{evLine(0, "a"), evLine(1, "b"), evLine(2, "c")})
 	if n, _ := idx.IngestJSONL(shard); n != 3 {
 		t.Fatalf("want 3 inserts, got %d", n)
 	}
-	// force rescan by rewriting the head with identical content order but a
-	// changed first byte (different first line → head hash mismatch)
-	writeShardFile(t, shard, []string{evLine(1, "b"), evLine(0, "a"), evLine(2, "c")})
-	n, err := idx.IngestJSONL(shard)
-	if err != nil {
+	if n, _ := idx.IngestJSONL(shard); n != 0 {
+		t.Fatalf("unchanged file re-ingest must report 0, got %d", n)
+	}
+	f, _ := os.OpenFile(shard, os.O_APPEND|os.O_WRONLY, 0o644)
+	fmt.Fprintln(f, evLine(3, "d"))
+	f.Close()
+	if n, _ := idx.IngestJSONL(shard); n != 1 {
+		t.Fatalf("append of one event must report 1, got %d", n)
+	}
+	if err := os.Remove(filepath.Join(dir, "cursors.json")); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 {
-		t.Fatalf("rescan of known events must report 0 new inserts, got %d", n)
+	if n, _ := idx.IngestJSONL(shard); n != 0 {
+		t.Fatalf("full rescan of identical content must report 0 changes, got %d", n)
 	}
 }
 
-// TestSearchMultiWord — multi-word queries must not require adjacency.
-func TestSearchMultiWord(t *testing.T) {
-	dir := t.TempDir()
-	idx, err := NewIndex(filepath.Join(dir, "index.db"))
+func TestConvergenceExistingVsFreshIndex(t *testing.T) {
+	idxOld, dir := newTempIndex(t)
+	shard := filepath.Join(dir, "events-h1.jsonl")
+
+	writeShardFile(t, shard, []string{evLine(0, "old-0"), evLine(1, "old-1"), evLine(2, "keep-2"), evLine(3, "secret-xyzzy-3")})
+	if _, err := idxOld.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+
+	writeShardFile(t, shard, []string{evLine(2, "keep-2"), evLine(3, "scrubbed-3"), evLine(4, "new-4")})
+	if _, err := idxOld.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+
+	freshDir := t.TempDir()
+	idxFresh, err := NewIndex(filepath.Join(freshDir, "index.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer idx.Close()
+	defer idxFresh.Close()
+	if _, err := idxFresh.IngestJSONL(shard); err != nil {
+		t.Fatal(err)
+	}
+
+	oldEvents := summaries(t, idxOld)
+	freshEvents := summaries(t, idxFresh)
+	if len(oldEvents) != len(freshEvents) {
+		t.Fatalf("event count diverged: old=%d fresh=%d", len(oldEvents), len(freshEvents))
+	}
+	var keys []string
+	for k := range oldEvents {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if oldEvents[k] != freshEvents[k] {
+			t.Fatalf("payload diverged for %s: old=%q fresh=%q", k, oldEvents[k], freshEvents[k])
+		}
+	}
+	oldOffsets, _ := idxOld.Query(QueryFilter{Limit: 100})
+	freshOffsets, _ := idxFresh.Query(QueryFilter{Limit: 100})
+	off := func(evs []Event) map[string]int64 {
+		m := map[string]int64{}
+		for _, e := range evs {
+			m[e.ULID] = e.Offset
+		}
+		return m
+	}
+	om, fm := off(oldOffsets), off(freshOffsets)
+	for k, v := range fm {
+		if om[k] != v {
+			t.Fatalf("raw_byte_offset stale for %s: old=%d fresh=%d", k, om[k], v)
+		}
+	}
+}
+
+func TestIngestDirRemovesVanishedShardRows(t *testing.T) {
+	idx, dir := newTempIndex(t)
+	sync := filepath.Join(dir, "sync")
+	if err := os.MkdirAll(sync, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(sync, "events-a.jsonl")
+	b := filepath.Join(sync, "events-b.jsonl")
+	writeShardFile(t, a, []string{evLine(0, "from-a")})
+	writeShardFile(t, b, []string{evLine(1, "from-b")})
+	if _, err := idx.IngestDir(sync); err != nil {
+		t.Fatal(err)
+	}
+	if got := summaries(t, idx); len(got) != 2 {
+		t.Fatalf("want 2 events, got %v", got)
+	}
+	if err := os.Remove(b); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := idx.IngestDir(sync); err != nil {
+		t.Fatal(err)
+	}
+	got := summaries(t, idx)
+	if len(got) != 1 {
+		t.Fatalf("rows of a vanished shard must be removed, got %v", got)
+	}
+	if hits, _ := idx.Search("from-b", time.Time{}, 10); len(hits) != 0 {
+		t.Fatalf("FTS entry of vanished shard survived: %+v", hits)
+	}
+}
+
+func TestSearchMultiWord(t *testing.T) {
+	idx, dir := newTempIndex(t)
 	shard := filepath.Join(dir, "events-h1.jsonl")
 	writeShardFile(t, shard, []string{evLine(0, "deployed the billing proxy to production")})
 	if _, err := idx.IngestJSONL(shard); err != nil {

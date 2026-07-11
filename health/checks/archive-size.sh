@@ -1,6 +1,4 @@
 #!/bin/bash
-# archive-size — verify weekly compactor produces compressed archive >30d old data.
-# Looks for $ACTIVITY_MESH_SYNC/archive/*.jsonl.zst (or .gz) and compares sizes.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -15,7 +13,6 @@ fi
 count=$(find "$ARCHIVE" -type f \( -name '*.zst' -o -name '*.gz' -o -name '*.xz' \) 2>/dev/null | wc -l | tr -d ' ')
 plain=$(find "$ARCHIVE" -type f -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
 
-# stale uncompressed jsonl in archive >30d?
 stale=$(find "$ARCHIVE" -type f -name '*.jsonl' -mtime +30 2>/dev/null | wc -l | tr -d ' ')
 
 if [ "$stale" -gt 0 ]; then

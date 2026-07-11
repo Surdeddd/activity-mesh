@@ -1,15 +1,18 @@
 <#
 .SYNOPSIS
-    activity-mesh bootstrap (Windows). Idempotent: re-running upgrades binaries, preserves config + state.
+    activity-mesh bootstrap (Windows — CLI ONLY).
+    Windows support is limited to the activity-log CLI: releases ship only
+    activity-log.exe for windows/amd64. The watcher and the query daemon are
+    macOS/Linux; there are no Task Scheduler units.
 .PARAMETER DryRun
-    Print plan without performing destructive operations.
+    Print the plan without performing any operation.
 .PARAMETER Version
-    Release tag to install. Default: latest.
+    Release tag to install (vX.Y.Z). Default: latest.
 .PARAMETER Prefix
-    Install dir for the binaries. Default: $env:USERPROFILE\bin.
+    Install dir for activity-log.exe. Default: $env:USERPROFILE\bin.
 .EXAMPLE
     pwsh installers\bootstrap.ps1 -DryRun
-    pwsh installers\bootstrap.ps1 -Version v1.0.0
+    pwsh installers\bootstrap.ps1 -Version v0.4.0
 #>
 [CmdletBinding()]
 param(
@@ -21,152 +24,112 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# fallback resolution: real Windows uses $env:USERPROFILE / LOCALAPPDATA / APPDATA;
-# on macOS/Linux pwsh those are null, so fall back to $HOME so dry-run works for verification.
 $UserHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
-$LocalApp = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $UserHome '.local/share' }
-$RoamApp  = if ($env:APPDATA)      { $env:APPDATA }      else { Join-Path $UserHome '.config' }
 if (-not $Prefix) { $Prefix = Join-Path $UserHome 'bin' }
 
-$Repo        = 'Surdeddd/activity-mesh'
-$ScriptDir   = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Host64      = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
-$Arch        = if ([Environment]::Is64BitOperatingSystem) { 'amd64' } else { '386' }
-$LogBin      = Join-Path $Prefix 'activity-log.exe'
-$WatcherBin  = Join-Path $Prefix 'activity-watcher.exe'
-$StateDir    = Join-Path $LocalApp 'activity-mesh'
-$LogDir      = Join-Path $StateDir 'logs'
-$SyncDir     = Join-Path $UserHome 'Sync\activity'
-$ConfigDir   = Join-Path $RoamApp 'activity-mesh'
+$Repo     = if ($env:ACTIVITY_MESH_REPO) { $env:ACTIVITY_MESH_REPO } else { 'Surdeddd/activity-mesh' }
+$BaseUrl  = $env:ACTIVITY_MESH_BASE_URL
+$HostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [System.Net.Dns]::GetHostName() }
+$LogBin   = Join-Path $Prefix 'activity-log.exe'
+$SyncDir  = Join-Path $UserHome 'Sync\activity'
 
-function W-Ok    ($m) { Write-Host "[OK]   $m" -ForegroundColor Green }
-function W-Err   ($m) { Write-Host "[FAIL] $m" -ForegroundColor Red }
-function W-Warn  ($m) { Write-Host "[WARN] $m" -ForegroundColor Yellow }
-function W-Info  ($m) { Write-Host "[i]    $m" -ForegroundColor Cyan }
-function W-Dry   ($m) { Write-Host "[DRY]  $m" -ForegroundColor Yellow }
-
-function Invoke-Step {
-    param([string]$Description, [scriptblock]$Action)
-    if ($DryRun) { W-Dry $Description; return }
-    try { & $Action; W-Ok $Description } catch { W-Err "$Description : $($_.Exception.Message)" }
+function W-Ok   ($m) { Write-Host "[OK]   $m" -ForegroundColor Green }
+function W-Info ($m) { Write-Host "[i]    $m" -ForegroundColor Cyan }
+function W-Dry  ($m) { Write-Host "[DRY]  $m" -ForegroundColor Yellow }
+function Fail   ($m) {
+    Write-Host "[FAIL] $m" -ForegroundColor Red
+    Write-Host "[FAIL] bootstrap FAILED — installation is incomplete" -ForegroundColor Red
+    exit 1
 }
 
-W-Info "host=$Host64 os=windows arch=$Arch version=$Version dry_run=$DryRun"
+W-Info "host=$HostName os=windows arch=amd64 version=$Version dry_run=$DryRun (CLI-only platform)"
 
-# ---- 1. download + install binaries ----------------------------------------
-function Get-Asset {
-    param([string]$Name, [string]$Dest)
-    $asset = "$Name-windows-$Arch.exe"
-    if ($DryRun) { W-Dry "would download $asset -> $Dest"; return $true }
-    $tmp = New-TemporaryFile
-    if (Get-Command gh -ErrorAction SilentlyContinue) {
-        $ghArgs = @('release','download')
-        if ($Version -ne 'latest') { $ghArgs += $Version }
-        $ghArgs += @('--repo',$Repo,'--pattern',$asset,'--output',$tmp.FullName)
+if ($DryRun) {
+    W-Dry "would resolve release tag ($Version) for $Repo"
+    W-Dry "would download activity-mesh_<ver>_windows_amd64.zip + checksums.txt"
+    W-Dry "would verify sha256 of the archive against checksums.txt"
+    W-Dry "would install activity-log.exe -> $LogBin"
+    W-Dry "would add $Prefix to the user PATH"
+    W-Dry "would run: activity-log init --sync-dir $SyncDir --yes"
+    W-Dry "would seed registries from the archive into $SyncDir"
+    W-Info "Windows is CLI-only: no watcher, no daemon, no scheduled tasks"
+    W-Info "this was a dry-run — re-run without -DryRun to apply"
+    exit 0
+}
+
+$tag = $Version
+if (-not $BaseUrl) {
+    if ($tag -eq 'latest') {
         try {
-            & gh @ghArgs 2>$null
-            if ((Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue) -eq 0) {
-                Move-Item -Path $tmp.FullName -Destination $Dest -Force
-                W-Ok "binary installed -> $Dest"; return $true
-            }
-        } catch { }
-        W-Warn "gh download failed for $asset, falling back to Invoke-WebRequest"
+            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -TimeoutSec 30
+            $tag = $rel.tag_name
+        } catch { Fail "cannot resolve latest release tag: $($_.Exception.Message)" }
     }
-    $tagseg = if ($Version -eq 'latest') { 'latest' } else { $Version }
-    $url = "https://github.com/$Repo/releases/$tagseg/download/$asset"
-    W-Info "fetching $url"
+    $BaseUrl = "https://github.com/$Repo/releases/download/$tag"
+} elseif ($tag -eq 'latest') {
+    Fail "ACTIVITY_MESH_BASE_URL requires an explicit -Version"
+}
+$ver = $tag.TrimStart('v')
+$archive = "activity-mesh_${ver}_windows_amd64.zip"
+
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("amesh-" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+try {
+    W-Info "fetching $BaseUrl/$archive"
     try {
-        Invoke-WebRequest -Uri $url -OutFile $tmp.FullName -UseBasicParsing -TimeoutSec 60
-        Move-Item -Path $tmp.FullName -Destination $Dest -Force
-        W-Ok "binary installed -> $Dest"; return $true
-    } catch {
-        W-Warn "release not found at $url. Build locally: go build -o $Dest ./cmd/$Name"
-        Remove-Item $tmp.FullName -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-}
+        Invoke-WebRequest -Uri "$BaseUrl/$archive" -OutFile (Join-Path $tmp $archive) -UseBasicParsing -TimeoutSec 120
+        Invoke-WebRequest -Uri "$BaseUrl/checksums.txt" -OutFile (Join-Path $tmp 'checksums.txt') -UseBasicParsing -TimeoutSec 60
+    } catch { Fail "download failed: $($_.Exception.Message)" }
 
-if (-not (Test-Path $Prefix)) {
-    Invoke-Step "mkdir $Prefix" { New-Item -ItemType Directory -Path $Prefix -Force | Out-Null }
-}
-[void](Get-Asset -Name 'activity-log'     -Dest $LogBin)
-[void](Get-Asset -Name 'activity-watcher' -Dest $WatcherBin)
+    $wantLine = Select-String -Path (Join-Path $tmp 'checksums.txt') -Pattern ([regex]::Escape($archive)) | Select-Object -First 1
+    if (-not $wantLine) { Fail "no checksum entry for $archive" }
+    $want = ($wantLine.Line -split '\s+')[0].ToLower()
+    $got = (Get-FileHash -Algorithm SHA256 -Path (Join-Path $tmp $archive)).Hash.ToLower()
+    if ($want -ne $got) { Fail "checksum MISMATCH for $archive (want $want got $got)" }
+    W-Ok "sha256 verified ($archive)"
+    W-Info "signature NOT verified (cosign verification is not implemented on Windows); sha256 checksum was verified"
 
-# ---- 2. scaffold directories ----------------------------------------------
-foreach ($d in @($StateDir,$LogDir,$SyncDir,$ConfigDir)) {
-    if (Test-Path $d) { W-Ok "exists $d" }
-    else { Invoke-Step "mkdir $d" { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
-}
+    $x = Join-Path $tmp 'x'
+    Expand-Archive -Path (Join-Path $tmp $archive) -DestinationPath $x -Force
+    $exe = Join-Path $x 'activity-log.exe'
+    if (-not (Test-Path $exe)) { Fail "activity-log.exe missing from release archive" }
 
-# default watcher.yaml
-$srcCfg = Join-Path $ScriptDir '..\configs\watcher.yaml'
-$dstCfg = Join-Path $ConfigDir 'watcher.yaml'
-if ((Test-Path $srcCfg) -and -not (Test-Path $dstCfg)) {
-    Invoke-Step "install default watcher.yaml" { Copy-Item -Path $srcCfg -Destination $dstCfg }
-}
+    if (-not (Test-Path $Prefix)) { New-Item -ItemType Directory -Path $Prefix -Force | Out-Null }
+    Copy-Item -Path $exe -Destination $LogBin -Force
+    W-Ok "binary installed -> $LogBin"
 
-# ensure prefix on PATH for current user
-if (-not $DryRun) {
-    $userPath = [Environment]::GetEnvironmentVariable('Path','User')
-    if ($userPath -and ($userPath -notlike "*$Prefix*")) {
-        [Environment]::SetEnvironmentVariable('Path', "$userPath;$Prefix", 'User')
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $userPath) { $userPath = '' }
+    if ($userPath -notlike "*$Prefix*") {
+        [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ';' + $Prefix).TrimStart(';'), 'User')
         W-Ok "added $Prefix to user PATH"
     }
-}
 
-if ((Test-Path $LogBin) -and -not $DryRun) {
-    Invoke-Step 'activity-log init' { & $LogBin init --state $StateDir --sync $SyncDir }
-} else {
-    W-Info 'skip activity-log init (binary missing or dry-run)'
-}
+    & $LogBin init --sync-dir $SyncDir --yes
+    if ($LASTEXITCODE -ne 0) { Fail "activity-log init failed (exit $LASTEXITCODE)" }
+    W-Ok "activity-log init done"
 
-# ---- 3. render + register Task Scheduler tasks ----------------------------
-function Expand-Template {
-    param([string]$TmplPath, [string]$DestPath)
-    if (-not (Test-Path $TmplPath)) { W-Warn "template not found: $TmplPath"; return $false }
-    $c = Get-Content -Raw -Path $TmplPath
-    $userTag = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
-    $map = @{
-        '{{BIN_PATH}}'    = $LogBin
-        '{{WATCHER_BIN}}' = $WatcherBin
-        '{{STATE_DIR}}'   = $StateDir
-        '{{SYNC_DIR}}'    = $SyncDir
-        '{{CONFIG_DIR}}'  = $ConfigDir
-        '{{LOG_DIR}}'     = $LogDir
-        '{{HOME}}'        = $UserHome
-        '{{USER}}'        = $userTag
+    $regSrc = Join-Path $x 'registries'
+    if (Test-Path $regSrc) {
+        foreach ($reg in 'kinds', 'scopes', 'agents', 'redaction') {
+            $dst = Join-Path $SyncDir "$reg.yaml"
+            if (-not (Test-Path $dst)) {
+                Copy-Item -Path (Join-Path $regSrc "$reg.yaml") -Destination $dst
+                W-Ok "seeded registry -> $dst"
+            }
+        }
+    } else {
+        Fail "registries/ missing from release archive"
     }
-    foreach ($k in $map.Keys) { $c = $c.Replace($k, $map[$k]) }
-    if ($DryRun) { W-Dry "would write $DestPath ($($c.Length) bytes)"; return $true }
-    Set-Content -Path $DestPath -Value $c -Encoding Unicode
-    return $true
+
+    & $LogBin --version
+    if ($LASTEXITCODE -ne 0) { Fail "installed activity-log does not run" }
+    & $LogBin emit --kind status --scope activity-mesh --summary "installed on $HostName (windows cli-only)" | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "smoke emit failed" }
+    W-Ok "verification done"
+} finally {
+    Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
 }
 
-foreach ($unit in @('watcher','daemon')) {
-    $tmpl = Join-Path $ScriptDir "templates\taskscheduler-$unit.xml.tmpl"
-    $dest = Join-Path $StateDir "task-$unit.xml"
-    if (Expand-Template $tmpl $dest) { W-Ok "rendered $dest" }
-    $taskName = "activity-mesh\$unit"
-    if ($DryRun) { W-Dry "schtasks /Create /TN $taskName /XML $dest /F"; continue }
-    try {
-        & schtasks.exe /Create /TN $taskName /XML $dest /F | Out-Null
-        $exit = (Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue)
-        if ($exit -eq 0) { W-Ok "task $taskName registered" } else { W-Warn "schtasks /Create failed for $taskName" }
-        & schtasks.exe /Run /TN $taskName 2>$null | Out-Null
-    } catch { W-Warn "could not register $taskName : $($_.Exception.Message)" }
-}
-
-# ---- 4. verify -------------------------------------------------------------
-if ((Test-Path $LogBin) -and -not $DryRun) {
-    W-Info "running: $LogBin status"
-    try { & $LogBin status } catch { W-Warn "status returned non-zero: $($_.Exception.Message)" }
-    try {
-        & $LogBin emit --kind status --scope bootstrap --summary "installed on $Host64"
-    } catch { W-Warn "smoke emit failed: $($_.Exception.Message)" }
-    W-Ok 'verification done'
-} else {
-    W-Info 'skip verify (binary missing or dry-run)'
-}
-
-W-Ok "bootstrap complete on $Host64 (windows/$Arch)"
-if ($DryRun) { W-Info 'this was a dry-run — re-run without -DryRun to apply' }
+W-Info "Windows is CLI-only: emit/query/compact work; watcher, daemon, hooks, and health units are macOS/Linux"
+W-Ok "bootstrap complete on $HostName (windows/amd64, version $ver)"

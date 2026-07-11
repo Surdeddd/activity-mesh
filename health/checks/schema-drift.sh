@@ -1,10 +1,4 @@
 #!/bin/bash
-# schema-drift — distinct kinds/scopes in the last 24h vs the registry
-# whitelists in the sync dir. Tier 2 warn if any drift; tier 3 fail if >5.
-#
-# The registries store entries as `- name: <value>` (core) and, for kinds,
-# `<org>/<name>:` extension keys — NOT `- <value>`. Matching the wrong shape
-# flagged every event (including registered kinds like `canary`) as unknown.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -19,7 +13,6 @@ if [ ! -f "$KINDS_FILE" ] && [ ! -f "$SCOPES_FILE" ]; then
     am_emit "$NAME" 0 ok "registry files absent (publish kinds.yaml/scopes.yaml to the sync dir)"; exit 0
 fi
 
-# Build newline-delimited known-sets once.
 known_kinds=""
 if [ -f "$KINDS_FILE" ]; then
     core=$(grep -E '^[[:space:]]*-[[:space:]]+name:' "$KINDS_FILE" | sed -E 's/.*name:[[:space:]]*//; s/[[:space:]]*$//')
@@ -31,9 +24,6 @@ if [ -f "$SCOPES_FILE" ]; then
     known_scopes=$(grep -E '^[[:space:]]*-[[:space:]]+name:' "$SCOPES_FILE" | sed -E 's/.*name:[[:space:]]*//; s/[[:space:]]*$//')
 fi
 is_known() { printf '%s\n' "$2" | grep -qxF "$1"; }
-# A namespaced scope "ns:sub" is known if the full name is registered OR its
-# namespace base "ns" is (registering "wiki" covers every "wiki:<dir>" the
-# watcher emits, without listing each one).
 is_known_scope() {
     is_known "$1" "$known_scopes" && return 0
     case "$1" in *:*) is_known "${1%%:*}" "$known_scopes" && return 0 ;; esac

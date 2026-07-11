@@ -43,3 +43,9 @@ sample-events/
 
 # Working docs / plans (not shipped)
 docs/
+
+# agent working notes (Cline-style memory bank) — never committed
+memory-bank/
+
+# session notes (remember plugin) — local only
+.remember/

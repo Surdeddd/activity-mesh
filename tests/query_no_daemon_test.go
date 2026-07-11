@@ -1,6 +1,3 @@
-// Package tests holds black-box scenario tests that exercise the built
-// binaries end-to-end. Untagged on purpose: they must run under plain
-// `go test ./...` as well as `make test` (sqlite_fts5).
 package tests
 
 import (
@@ -15,7 +12,6 @@ import (
 	"time"
 )
 
-// buildActivityLog compiles the CLI into a temp dir and returns its path.
 func buildActivityLog(t *testing.T) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "activity-log")
@@ -58,11 +54,6 @@ func eventLine(t *testing.T, ts time.Time, host, scope, summary string, seq uint
 	return string(buf)
 }
 
-// TestQueryWorksWithNoDaemon proves the ARCHITECTURE.md claim that the
-// query path is daemon-independent: `activity-log query` reads the JSONL
-// shards in the sync dir directly. No daemon is started here, and the sync
-// dir is a fresh temp dir no daemon could ever have indexed — so any correct
-// result can only have come from direct local reads.
 func TestQueryWorksWithNoDaemon(t *testing.T) {
 	bin := buildActivityLog(t)
 
@@ -80,8 +71,6 @@ func TestQueryWorksWithNoDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Synthetic events across two host shards: three fresh, one stale (out of
-	// the 24h window), one in a different scope.
 	now := time.Now().UTC()
 	writeShard(t, syncDir, "alpha", []string{
 		eventLine(t, now.Add(-2*time.Hour), "alpha", "project:mesh", "fresh alpha event", 1),
@@ -102,8 +91,6 @@ func TestQueryWorksWithNoDaemon(t *testing.T) {
 		return string(out)
 	}
 
-	// 1. Default 24h window merges both shards, drops the stale event, and
-	//    sorts ascending by ts.
 	out := run("query", "--since", "24h", "--format", "json")
 	var got []map[string]any
 	dec := json.NewDecoder(strings.NewReader(out))
@@ -127,7 +114,6 @@ func TestQueryWorksWithNoDaemon(t *testing.T) {
 		t.Error("stale event leaked past the --since 24h window")
 	}
 
-	// 2. Scope filter narrows correctly across shards.
 	out = run("query", "--since", "24h", "--scope", "project:mesh", "--format", "text")
 	if !strings.Contains(out, "fresh alpha event") || !strings.Contains(out, "fresh beta event") {
 		t.Errorf("scope filter lost fresh events:\n%s", out)
@@ -136,7 +122,6 @@ func TestQueryWorksWithNoDaemon(t *testing.T) {
 		t.Errorf("scope filter leaked foreign scope:\n%s", out)
 	}
 
-	// 3. status also reads shards directly.
 	out = run("status")
 	if !strings.Contains(out, "alpha:") || !strings.Contains(out, "beta:") {
 		t.Errorf("status missing per-host lines:\n%s", out)

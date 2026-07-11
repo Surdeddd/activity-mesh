@@ -1,9 +1,4 @@
 #!/bin/bash
-# install.sh — wire activity-mesh hooks into ~/.claude/settings.json.
-# Adds SessionStart + UserPromptSubmit entries, idempotent (won't double-add).
-# Usage:
-#   hooks/install.sh             apply changes (with backup)
-#   hooks/install.sh --dry-run   print diff, no write
 
 set -uo pipefail
 
@@ -17,20 +12,16 @@ DRY_RUN=0
 
 err() { echo "install: $*" >&2; }
 
-# Verify prerequisites
 [ -f "$SETTINGS" ] || { err "settings.json not found at $SETTINGS"; exit 1; }
 command -v jq >/dev/null 2>&1 || { err "jq required"; exit 1; }
 [ -x "$SESSION_HOOK" ] || chmod +x "$SESSION_HOOK" 2>/dev/null
 [ -x "$PROMPT_HOOK" ] || chmod +x "$PROMPT_HOOK" 2>/dev/null
 
-# Validate current settings parses as JSON
 if ! jq empty "$SETTINGS" 2>/dev/null; then
     err "settings.json is not valid JSON; aborting"
     exit 1
 fi
 
-# Build patched settings via jq.
-# Add hook entry only if not already present (match on .command path).
 PATCHED=$(jq \
     --arg sess "$SESSION_HOOK" \
     --arg prompt "$PROMPT_HOOK" '
@@ -45,7 +36,6 @@ PATCHED=$(jq \
     end
 ' "$SETTINGS") || { err "jq patch failed"; exit 1; }
 
-# Diff for review
 TMP_OLD=$(mktemp); TMP_NEW=$(mktemp)
 jq -S . "$SETTINGS" > "$TMP_OLD"
 printf '%s\n' "$PATCHED" | jq -S . > "$TMP_NEW"
@@ -63,7 +53,6 @@ if [ "$DRY_RUN" -eq 1 ]; then
     exit 0
 fi
 
-# Apply: backup → atomic write
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="${SETTINGS}.bak-${STAMP}"
 cp "$SETTINGS" "$BACKUP" || { err "backup failed"; rm -f "$TMP_OLD" "$TMP_NEW"; exit 1; }

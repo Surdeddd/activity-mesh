@@ -1,7 +1,3 @@
-// redact — apply the tier-1/2 redaction pipeline to arbitrary text (`--stdin`,
-// the contract hooks/secret-redactor.sh depends on) or re-apply it to this
-// host's existing shard (`redact-shard`) to scrub leaks that predate a rule
-// change (e.g. the per-host home path that a hardcoded username never matched).
 package main
 
 import (
@@ -93,9 +89,6 @@ type redactShardResult struct {
 	malformed int
 }
 
-// redactShard re-runs redaction over each event line. It rewrites the shard
-// only when something changed, using the same atomic temp+rename+fsync +
-// per-host lock the compactor uses.
 func redactShard(shardPath, storeDir, host string, dryRun bool) (*redactShardResult, error) {
 	res := &redactShardResult{shard: filepath.Base(shardPath)}
 	if !dryRun && storeDir != "" {
@@ -155,14 +148,6 @@ func redactShard(shardPath, storeDir, host string, dryRun bool) (*redactShardRes
 	return res, nil
 }
 
-// redactEventLine re-redacts one JSON event line. Returns:
-//   - (redacted, true, true)  when redaction changed the event,
-//   - (originalLine, false, true) for an unchanged event (exact bytes kept —
-//     no cosmetic key reorder), and
-//   - (originalLine, false, false) for a blank/malformed line (preserved).
-//
-// Change detection compares two marshals of the SAME parsed object (before vs
-// after redaction) so map key-order differences never masquerade as a change.
 func redactEventLine(line []byte) (out []byte, changed, isEvent bool) {
 	trimmed := bytes.TrimSpace(line)
 	if len(trimmed) == 0 || trimmed[0] != '{' {

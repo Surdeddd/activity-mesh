@@ -12,7 +12,6 @@ import (
 	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
-// helper: configure a temp store+sync dir and emit one event end-to-end.
 func setupTempEnv(t *testing.T) (storeDir, syncDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -43,7 +42,6 @@ func emitOne(t *testing.T, storeDir, syncDir string, summary string) *event.Even
 	return ev
 }
 
-// readShard returns parsed events from the host shard.
 func readShard(t *testing.T, syncDir, host string) []event.Event {
 	t.Helper()
 	path := filepath.Join(syncDir, "events-"+host+".jsonl")
@@ -68,7 +66,6 @@ func readShard(t *testing.T, syncDir, host string) []event.Event {
 	return out
 }
 
-// TestEmitQueryRoundtrip — happy path.
 func TestEmitQueryRoundtrip(t *testing.T) {
 	storeDir, syncDir := setupTempEnv(t)
 	ev := emitOne(t, storeDir, syncDir, "smoke roundtrip")
@@ -84,7 +81,6 @@ func TestEmitQueryRoundtrip(t *testing.T) {
 	}
 }
 
-// TestRedactionInJSONL — secret in summary must not survive to disk.
 func TestRedactionInJSONL(t *testing.T) {
 	storeDir, syncDir := setupTempEnv(t)
 	leak := "sk-ant-api03-" + strings.Repeat("X", 93) + "AA"
@@ -101,8 +97,6 @@ func TestRedactionInJSONL(t *testing.T) {
 	}
 }
 
-// TestMonotonicSeqUniqueness — two events emitted back-to-back must have
-// strictly increasing monotonic_seq even if the timestamp matches.
 func TestMonotonicSeqUniqueness(t *testing.T) {
 	storeDir, syncDir := setupTempEnv(t)
 	a := emitOne(t, storeDir, syncDir, "first")
@@ -116,7 +110,6 @@ func TestMonotonicSeqUniqueness(t *testing.T) {
 	}
 }
 
-// TestUTF8Sanitize — ensure invalid byte sequences are replaced + truncated=true.
 func TestUTF8Sanitize(t *testing.T) {
 	storeDir, _ := setupTempEnv(t)
 	bad := string([]byte{0xff, 0xfe, 'a', 'b'})

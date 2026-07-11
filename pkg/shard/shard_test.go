@@ -38,7 +38,6 @@ func TestPathRejectsTraversal(t *testing.T) {
 func TestAppendLockedHealsTornTail(t *testing.T) {
 	dir := t.TempDir()
 	shardPath := filepath.Join(dir, "events-h1.jsonl")
-	// simulate a torn tail: partial line without newline
 	if err := os.WriteFile(shardPath, []byte(`{"id":"aaa"}`+"\n"+`{"id":"partial`), 0o644); err != nil {
 		t.Fatal(err)
 	}

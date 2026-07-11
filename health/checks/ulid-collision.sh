@@ -1,5 +1,4 @@
 #!/bin/bash
-# ulid-collision — distinct ULIDs vs total events must match.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

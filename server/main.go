@@ -1,7 +1,3 @@
-// Command activity-mesh-daemon serves the read API over HTTP. Watches per-host
-// JSONL shards under ~/Sync/activity/ via fsnotify, ingests new lines into
-// pkg/index (SQLite+FTS5). Endpoints: /health /recent /search /digest /push
-// /metrics. Daemon-as-cache: every host can run; data is Syncthing-replicated.
 package main
 
 import (
@@ -17,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,7 +30,6 @@ import (
 	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
-// version is stamped at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
 const (
@@ -52,6 +48,7 @@ type metrics struct {
 type daemon struct {
 	idx               *index.Index
 	syncDir, stateDir string
+	host              string
 	port              int
 	m                 metrics
 }
@@ -79,9 +76,6 @@ func main() {
 	}
 	syncDir := pick(*syncArg, "ACTIVITY_MESH_SYNC", defaultSyncDir)
 	stateDir := pick(*stateArg, "ACTIVITY_MESH_HOME", defaultStateDir)
-	// The daemon serves the full activity history and accepts event pushes
-	// with no authentication — localhost by default; exposing wider is an
-	// explicit operator decision (--bind / ACTIVITY_MESH_BIND).
 	bindAddr := *bind
 	if bindAddr == "" {
 		bindAddr = os.Getenv("ACTIVITY_MESH_BIND")
@@ -99,7 +93,7 @@ func main() {
 		log.Fatalf("index: %v", err)
 	}
 	defer idx.Close()
-	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir, port: *port}
+	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir, host: event.HostName(), port: *port}
 	d.m.startedAt = time.Now().UTC()
 	if n, err := d.idx.IngestDir(syncDir); err != nil {
 		d.m.errors.Add(1)
@@ -220,7 +214,9 @@ func writeJSON(w http.ResponseWriter, code int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func writeErr(w http.ResponseWriter, code int, msg string) { writeJSON(w, code, map[string]string{"error": msg}) }
+func writeErr(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
 func (d *daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
 	stats, err := d.idx.Stats()
 	if err != nil {
@@ -298,7 +294,6 @@ func (d *daemon) handleDigest(w http.ResponseWriter, r *http.Request) {
 	agg, err := d.idx.Aggregate(groupBy, window)
 	if err != nil {
 		d.m.errors.Add(1)
-		// Unknown group_by/window are caller errors; anything else is ours.
 		code := http.StatusInternalServerError
 		if strings.HasPrefix(err.Error(), "unknown ") {
 			code = http.StatusBadRequest
@@ -330,14 +325,10 @@ func (d *daemon) handleDigest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handlePush accepts one event as JSON and appends it to the shard named by
-// its host field. The payload is decoded into a generic map so extended
-// schema fields survive; mandatory fields are validated, the host label is
-// checked against the shard filename alphabet (path-traversal guard), the id
-// must be a well-formed ULID (a junk id would permanently win MAX(ulid)),
-// and the whole tree is redacted exactly like the CLI emit path — pushes
-// must not be a side door around redaction. The append happens under the
-// same per-host lock emit and compaction use.
+const maxPushBody = 64 * 1024
+
+var labelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+
 func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "POST required")
@@ -345,10 +336,14 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	}
 	d.m.pushes.Add(1)
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPushBody+1))
 	if err != nil {
 		d.m.errors.Add(1)
 		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(body) > maxPushBody {
+		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("payload exceeds %d bytes", maxPushBody))
 		return
 	}
 	var p map[string]any
@@ -356,17 +351,24 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if v, ok := p["v"].(float64); !ok || v == 0 {
-		p["v"] = event.SchemaVersion
+	if v, ok := p["v"].(float64); ok && int(v) != event.SchemaVersion {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unsupported schema version %v (this daemon writes v%d)", v, event.SchemaVersion))
+		return
 	}
+	p["v"] = event.SchemaVersion
 	str := func(k string) string { s, _ := p[k].(string); return s }
 	id, ts, host := str("id"), str("ts"), str("host")
-	if id == "" || ts == "" || host == "" || str("kind") == "" || str("scope") == "" || str("summary") == "" {
-		writeErr(w, http.StatusBadRequest, "missing mandatory fields (id, ts, host, kind, scope, summary)")
+	kind, scope, agent := str("kind"), str("scope"), str("agent")
+	if id == "" || ts == "" || host == "" || kind == "" || scope == "" || agent == "" || str("summary") == "" {
+		writeErr(w, http.StatusBadRequest, "missing mandatory fields (id, ts, host, agent, kind, scope, summary)")
 		return
 	}
 	if !shard.ValidHost(host) {
 		writeErr(w, http.StatusBadRequest, "invalid host label")
+		return
+	}
+	if host != d.host {
+		writeErr(w, http.StatusForbidden, fmt.Sprintf("host %q is not this daemon's host %q — each shard has exactly one writer; push to the daemon running on that host", host, d.host))
 		return
 	}
 	if !event.ValidULID(id) {
@@ -377,7 +379,20 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "ts must be RFC3339 or canonical event layout")
 		return
 	}
-	cleaned, _ := redact.ApplyJSON(p)
+	if !labelRe.MatchString(kind) || !labelRe.MatchString(scope) || !labelRe.MatchString(agent) {
+		writeErr(w, http.StatusBadRequest, "kind/scope/agent must match ^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+		return
+	}
+	if !event.ValidPriority(str("priority")) {
+		writeErr(w, http.StatusBadRequest, "priority must be P0..P3")
+		return
+	}
+	summary, truncated := event.NormalizeSummary(str("summary"))
+	p["summary"] = summary
+	if truncated {
+		p["truncated"] = true
+	}
+	cleaned, hits := redact.ApplyJSON(p)
 	line, err := json.Marshal(cleaned)
 	if err != nil {
 		d.m.errors.Add(1)
@@ -398,13 +413,20 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d.m.writes.Add(1)
+	if err := event.AppendAudit(d.stateDir, id, hits); err != nil {
+		log.Printf("push audit append: %v", err)
+	}
 	if n, err := d.idx.IngestJSONL(filepath.Join(d.syncDir, "events-"+host+".jsonl")); err != nil {
 		d.m.errors.Add(1)
 		log.Printf("post-push ingest: %v", err)
 	} else {
 		d.m.ingested.Add(uint64(n))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "priority": str("priority")})
+	resp := map[string]any{"ok": true, "id": id, "priority": str("priority")}
+	if truncated {
+		resp["truncated"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (d *daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -426,8 +448,6 @@ func (d *daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# TYPE activity_mesh_indexed_events gauge\nactivity_mesh_indexed_events %d\n", stats.TotalEvents)
 }
 
-// parseIntDefault parses s, falling back to def and clamping into
-// [1, maxAllowed] — limit=0 must not mean "the whole table into memory".
 func parseIntDefault(s string, def, maxAllowed int) int {
 	n, err := strconv.Atoi(s)
 	if s == "" || err != nil || n <= 0 {

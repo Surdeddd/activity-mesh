@@ -1,6 +1,4 @@
 #!/bin/bash
-# canary — verify hourly heartbeat events were written for this host.
-# Expects ≥20 canary events in last 24h (one per hour with leeway).
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

@@ -1,6 +1,4 @@
 #!/bin/bash
-# launchd-jobs — expected activity-mesh launchd labels are loaded.
-# Linux/win: skip with tier 0. Mac: compare to expected list.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -11,9 +9,6 @@ if [ "$(uname -s)" != "Darwin" ]; then
     am_emit "$NAME" 0 ok "non-mac, skipped"; exit 0
 fi
 
-# All six units bootstrap installs/documents. Override per host with
-# ACTIVITY_MESH_EXPECTED_JOBS (space-separated) — e.g. a host that
-# deliberately runs no weekly digest.
 if [ -n "${ACTIVITY_MESH_EXPECTED_JOBS:-}" ]; then
     read -r -a EXPECTED <<< "$ACTIVITY_MESH_EXPECTED_JOBS"
 else

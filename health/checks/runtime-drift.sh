@@ -1,13 +1,4 @@
 #!/bin/bash
-# runtime-drift — versions of the tools you care about vs a known-compatible
-# list. The tool set is data, not code:
-#   $ACTIVITY_MESH_SYNC/compat-versions.txt — one "tool=version" per line,
-#   where `tool` is a command on PATH that answers `--version`.
-# Absent file → just record the observed versions as info (no drift concept).
-#
-# Example compat-versions.txt:
-#   claude=2.1.0
-#   codex=0.9.3
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

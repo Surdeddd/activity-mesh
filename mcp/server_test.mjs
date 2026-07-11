@@ -1,7 +1,6 @@
-// Native node:test runner. Run: node --test mcp/server_test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -10,15 +9,11 @@ import { fileURLToPath } from "node:url";
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SERVER = resolve(HERE, "server.mjs");
 
-// Minimal mock binary that pretends to be `activity-log query --format json`.
-// Emits one JSONL event per call so the server can parse it. `tsIso`
-// overrides both event timestamps (digest windowing bounds by calendar day,
-// so those tests pass a today-dated value).
-function makeMockBin(scenario = "ok", tsIso) {
+function makeMockBin(scenario = "ok", tsIso, tsIso2) {
   const dir = mkdtempSync(join(tmpdir(), "amesh-mock-"));
   const bin = join(dir, "activity-log");
   const t1 = tsIso || "2026-05-04T10:00:00.000000Z";
-  const t2 = tsIso || "2026-05-04T11:00:00.000000Z";
+  const t2 = tsIso2 || tsIso || "2026-05-04T11:00:00.000000Z";
   const events = [
     { v: 1, id: "01HRX1", ts: t1, host: "macbook", agent: "claude-mac", kind: "decision", scope: "project:foo", summary: "switched to Bun.fetch", tags: ["bun"] },
     { v: 1, id: "01HRX2", ts: t2, host: "macbook", agent: "hermes", kind: "task", scope: "project:bar", summary: "deployed billing-proxy" },
@@ -59,7 +54,6 @@ test("initialize handshake", async () => {
   assert.equal(r.jsonrpc, "2.0");
   assert.equal(r.id, 1);
   assert.equal(r.result.serverInfo.name, "activity-mesh");
-  // No client protocolVersion requested → server returns its preferred.
   assert.equal(r.result.protocolVersion, "2025-06-18");
   assert.ok(r.result.capabilities.tools);
 });
@@ -121,8 +115,6 @@ test("tools/call activity_search filters by query", async () => {
 });
 
 test("tools/call activity_digest groups by scope", async () => {
-  // window:today bounds by the current UTC calendar day, so the mock must
-  // emit today-dated events (10:00 today).
   const today = new Date().toISOString().slice(0, 10) + "T10:00:00.000000Z";
   const bin = makeMockBin("ok", today);
   const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
@@ -191,4 +183,58 @@ test("unknown method returns -32601", async () => {
     { jsonrpc: "2.0", id: 2, method: "bogus/method" });
   const r = replies.find(x => x.id === 2);
   assert.equal(r.error.code, -32601);
+});
+
+test("serverInfo.version comes from the VERSION file", async () => {
+  const bin = makeMockBin();
+  const expected = readFileSync(resolve(HERE, "..", "VERSION"), "utf8").trim();
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  assert.equal(replies[0].result.serverInfo.version, expected);
+});
+
+test("activity_search returns newest-first", async () => {
+  const bin = makeMockBin();
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "activity_search", arguments: { query: "e" } } });
+  const payload = JSON.parse(replies.find(x => x.id === 2).result.content[0].text);
+  assert.equal(payload.length, 2);
+  assert.ok(Date.parse(payload[0].ts) >= Date.parse(payload[1].ts), "results must be newest-first");
+});
+
+const CROCKFORD_T = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+function msToUlid(ms) {
+  let t = "";
+  for (let i = 0; i < 10; i++) { t = CROCKFORD_T[ms % 32] + t; ms = Math.floor(ms / 32); }
+  return t + "0000000000000000";
+}
+function isoMicro(ms) {
+  return new Date(ms).toISOString().replace("Z", "000Z");
+}
+
+test("activity_digest since:ULID filters by the ULID timestamp", async () => {
+  const now = Date.now();
+  const bin = makeMockBin("ok", isoMicro(now - 7200000), isoMicro(now - 600000));
+  const cutoff = msToUlid(now - 3600000);
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "activity_digest", arguments: { window: "since:" + cutoff } } });
+  const payload = JSON.parse(replies.find(x => x.id === 2).result.content[0].text);
+  assert.equal(payload.total, 1, "only the event newer than the ULID cutoff must remain");
+});
+
+test("activity_digest since:garbage errors", async () => {
+  const bin = makeMockBin();
+  const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "activity_digest", arguments: { window: "since:short" } } });
+  const r = replies.find(x => x.id === 2);
+  assert.ok(r.error, "garbage since: must be an error");
+});
+
+test("resolveBin maps darwin to darwin-named binaries", async () => {
+  const src = readFileSync(resolve(HERE, "server.mjs"), "utf8");
+  assert.ok(src.includes('darwin: "darwin"'), "darwin must map to darwin, not macos");
+  assert.ok(!src.includes('"macos"'), "no macos naming anywhere");
 });

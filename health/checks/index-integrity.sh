@@ -1,5 +1,4 @@
 #!/bin/bash
-# index-integrity — sqlite3 index.db PRAGMA integrity_check.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

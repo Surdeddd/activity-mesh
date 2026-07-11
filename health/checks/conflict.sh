@@ -1,6 +1,4 @@
 #!/bin/bash
-# conflict — find Syncthing conflict files in ~/Sync/activity/.
-# Tier 4 critical if any conflicts found (means writer-collision or sync misconfig).
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -12,7 +10,6 @@ if [ ! -d "$SYNC" ]; then
     am_emit "$NAME" 2 warn "sync dir missing"; exit 0
 fi
 
-# Syncthing patterns: *.sync-conflict-* and ~syncthing~*.tmp
 count=0; sample=""
 while IFS= read -r f; do
     count=$((count+1))

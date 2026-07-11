@@ -1,30 +1,3 @@
-// Tiny YAML subset parser tailored to watcher.yaml.
-//
-// Supports the schema we actually use:
-//
-//	activity_log_bin: /path/to/bin
-//	debounce_ms: 5000
-//	sources:
-//	  - name: foo
-//	    path: ~/something
-//	    pattern: "*.md"
-//	    op: create
-//	    recursive: true
-//	    diff_field: enabledPlugins
-//	    summary_template: "..."        # alias for emit.summary_template
-//	    emit:
-//	      kind: install
-//	      kind_template: "..."
-//	      scope: claude-mac
-//	      scope_template: "..."
-//	      agent: claude-mac
-//	      priority: P2
-//	      tags: [a, b]
-//	      summary_template: "..."
-//
-// We do NOT pull in gopkg.in/yaml.v3 — the dep budget is fsnotify only.
-// This parser is line-oriented, indentation-driven, and intentionally
-// strict: anything outside the schema above will return an error.
 package main
 
 import (
@@ -35,7 +8,6 @@ import (
 	"strings"
 )
 
-// loadConfig reads + parses watcher.yaml.
 func loadConfig(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -48,7 +20,6 @@ func loadConfig(path string) (*Config, error) {
 	sc.Buffer(make([]byte, 1<<20), 8<<20)
 	for lineNo := 1; sc.Scan(); lineNo++ {
 		raw := sc.Text()
-		// strip trailing comments unless inside a quoted string.
 		if idx := stripComment(raw); idx >= 0 {
 			raw = raw[:idx]
 		}
@@ -92,7 +63,6 @@ func countIndent(s string) int {
 	return n
 }
 
-// stripComment returns the index of an unquoted '#' or -1 if none.
 func stripComment(s string) int {
 	inQuote := byte(0)
 	for i := 0; i < len(s); i++ {
@@ -114,7 +84,6 @@ func stripComment(s string) int {
 	return -1
 }
 
-// splitKV splits "key: value" honouring quotes. Empty value → ("", "", true).
 func splitKV(s string) (string, string, bool) {
 	idx := strings.Index(s, ":")
 	if idx < 0 {
@@ -125,7 +94,6 @@ func splitKV(s string) (string, string, bool) {
 	return k, v, true
 }
 
-// unquote strips surrounding "..." or '...' if present.
 func unquote(s string) string {
 	if len(s) >= 2 && (s[0] == '"' || s[0] == '\'') && s[0] == s[len(s)-1] {
 		return s[1 : len(s)-1]
@@ -133,7 +101,6 @@ func unquote(s string) string {
 	return s
 }
 
-// parseList parses inline list  "[a, b, c]"  or returns nil if not bracketed.
 func parseInlineList(s string) ([]string, bool) {
 	s = strings.TrimSpace(s)
 	if !strings.HasPrefix(s, "[") || !strings.HasSuffix(s, "]") {
@@ -151,7 +118,6 @@ func parseInlineList(s string) ([]string, bool) {
 	return out, true
 }
 
-// parseTop walks top-level scalar keys + the list-of-maps "sources".
 func parseTop(lines []rawLine, cfg *Config) error {
 	i := 0
 	for i < len(lines) {
@@ -191,8 +157,6 @@ func parseTop(lines []rawLine, cfg *Config) error {
 	return nil
 }
 
-// parseSources reads a block list "  - name: ...\n    path: ...\n  - name: ...".
-// Returns the index of the next line beyond the block.
 func parseSources(lines []rawLine, start int, cfg *Config) (int, error) {
 	if start >= len(lines) {
 		return start, nil
@@ -205,15 +169,10 @@ func parseSources(lines []rawLine, start int, cfg *Config) (int, error) {
 	for i < len(lines) && lines[i].indent >= listIndent {
 		ln := lines[i]
 		if ln.indent != listIndent || !strings.HasPrefix(ln.text, "- ") {
-			// end of the sources block — let parseTop loop pick up next key.
 			break
 		}
-		// First line of a list item: "- key: value" → already a kv inside the
-		// item's map. Drop the leading "- " and use that line as part of the
-		// item map.
 		first := strings.TrimSpace(strings.TrimPrefix(ln.text, "- "))
 		itemLines := []rawLine{{n: ln.n, indent: 0, text: first}}
-		// gather subsequent indented lines as part of the item.
 		j := i + 1
 		for j < len(lines) && lines[j].indent > listIndent {
 			itemLines = append(itemLines, rawLine{n: lines[j].n, indent: lines[j].indent - listIndent - 2, text: lines[j].text})
@@ -265,8 +224,6 @@ func parseSourceBlock(lines []rawLine) (Source, error) {
 				return src, fmt.Errorf("line %d: recursive must be true or false, got %q", ln.n, rv)
 			}
 		case "diff_field":
-			// Reserved: parsed for forward-compat but not yet acted on (a
-			// planned "emit only when this JSON field changed" filter).
 			src.DiffField = unquote(v)
 		case "summary_template":
 			src.SummaryTemplate = unquote(v)
@@ -274,7 +231,6 @@ func parseSourceBlock(lines []rawLine) (Source, error) {
 			if v != "" {
 				return src, fmt.Errorf("line %d: emit must be a block (no inline value)", ln.n)
 			}
-			// gather indented sub-lines
 			j := i + 1
 			var sub []rawLine
 			for j < len(lines) && lines[j].indent > 0 {

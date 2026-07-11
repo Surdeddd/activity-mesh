@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// mustHome returns the test runner's home dir — the user_path rule is built
-// from it dynamically, so tests must be too.
 func mustHome(t *testing.T) string {
 	t.Helper()
 	h, err := os.UserHomeDir()
@@ -17,16 +15,12 @@ func mustHome(t *testing.T) string {
 	return h
 }
 
-// each entry has a positive case (must be redacted) and a negative case
-// (similar-shaped string that must NOT be redacted).
 func TestTier1Patterns(t *testing.T) {
 	cases := []struct {
-		name string
-		// 93 char body for the anthropic key + AA suffix
-		positive string
-		// negative is a similar-shaped legit string
-		negative   string
-		marker     string
+		name            string
+		positive        string
+		negative        string
+		marker          string
 		negShouldRedact bool
 	}{
 		{
@@ -66,7 +60,7 @@ func TestTier1Patterns(t *testing.T) {
 			marker:   "jwt",
 		},
 		{
-			name: "private_key",
+			name:     "private_key",
 			positive: "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
 			negative: "talking about a private key",
 			marker:   "private_key",
@@ -126,10 +120,7 @@ func TestTier1Patterns(t *testing.T) {
 	}
 }
 
-// TestEntropyHeuristic verifies that high-entropy random strings are caught
-// while low-entropy English text is left alone.
 func TestEntropyHeuristic(t *testing.T) {
-	// 64 chars random base64-ish → high entropy
 	hi := "blob=YWxwaGFiZXRiZXRhZ2FtbWFkZWx0YWVwc2lsb24xMjM0NTY3ODkwQUJDREVGR0g end"
 	out, hits := Apply(hi)
 	if !strings.Contains(out, "[REDACTED:") {
@@ -145,7 +136,6 @@ func TestEntropyHeuristic(t *testing.T) {
 		t.Errorf("expected at least one entropy hit, got %+v", hits)
 	}
 
-	// English text 32+ chars with only letters+spaces should NOT trigger.
 	low := "the quick brown fox jumps over the lazy dog and continues running across town"
 	got, _ := Apply(low)
 	if strings.Contains(got, "[REDACTED:high_entropy") {
@@ -153,7 +143,6 @@ func TestEntropyHeuristic(t *testing.T) {
 	}
 }
 
-// TestAllowlist makes sure UUIDs and git SHAs slip through.
 func TestAllowlist(t *testing.T) {
 	uuid := "uuid=550e8400-e29b-41d4-a716-446655440000 end"
 	if !isAllowlisted("550e8400-e29b-41d4-a716-446655440000") {
@@ -168,7 +157,6 @@ func TestAllowlist(t *testing.T) {
 	}
 }
 
-// TestApplyJSONNested ensures recursion into maps/arrays.
 func TestApplyJSONNested(t *testing.T) {
 	tree := map[string]any{
 		"summary": "leak " + "sk-ant-api03-" + strings.Repeat("A", 93) + "AA",
@@ -195,7 +183,6 @@ func TestApplyJSONNested(t *testing.T) {
 	}
 }
 
-// TestEmptyAndPlain — sanity check.
 func TestEmptyAndPlain(t *testing.T) {
 	if out, hits := Apply(""); out != "" || hits != nil {
 		t.Errorf("empty input mutated: %q hits=%v", out, hits)
@@ -206,13 +193,10 @@ func TestEmptyAndPlain(t *testing.T) {
 	}
 }
 
-// TestShannonEntropyMath — direct numeric check.
 func TestShannonEntropyMath(t *testing.T) {
-	// All same char → 0 bits.
 	if shannon("aaaaaaaa") != 0 {
 		t.Errorf("expected 0 entropy for repeated chars")
 	}
-	// 2 distinct equally-likely chars → 1 bit.
 	got := shannon("abababab")
 	if got < 0.99 || got > 1.01 {
 		t.Errorf("expected ≈1 bit/char, got %f", got)

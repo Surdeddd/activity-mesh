@@ -1,6 +1,3 @@
-// Tests for the compact partition/rewrite/archive pipeline. Pure filesystem
-// (t.TempDir()) — deliberately no sqlite/FTS5 dependency so a plain
-// `go test ./...` (no build tags, no cgo) exercises them.
 package main
 
 import (
@@ -14,7 +11,6 @@ import (
 	"time"
 )
 
-// evLine builds a minimal valid event line with the canonical ts layout.
 func evLine(ts, id string) string {
 	return `{"v":1,"id":"` + id + `","ts":"` + ts + `","host":"testhost","agent":"cli","kind":"note","scope":"scope:test","summary":"` + id + `"}`
 }
@@ -28,9 +24,6 @@ const (
 	tsMar  = "2026-03-10T12:00:00.000000Z"
 )
 
-// mixedShard returns shard bytes covering every partition class: two archive
-// months, malformed JSON, a blank line, an event with unparseable ts, a
-// recent event, and a partial trailing line without newline.
 func mixedShard() []byte {
 	lines := []string{
 		evLine(tsJan, "OLD-JAN"),
@@ -55,11 +48,9 @@ func TestPartitionShard(t *testing.T) {
 	if got := len(p.archive["2026-02"]); got != 2 {
 		t.Errorf("2026-02 lines = %d, want 2", got)
 	}
-	// kept = NEW-MAR + PARTIAL-TAIL (parses, never archived without newline)
 	if p.keptEvents != 2 {
 		t.Errorf("keptEvents = %d, want 2", p.keptEvents)
 	}
-	// malformed = bad JSON + unparseable ts (blank line not counted)
 	if p.malformed != 2 {
 		t.Errorf("malformed = %d, want 2", p.malformed)
 	}
@@ -71,14 +62,12 @@ func TestPartitionShard(t *testing.T) {
 	if string(p.keep) != wantKeep {
 		t.Errorf("keep mismatch:\n got: %q\nwant: %q", p.keep, wantKeep)
 	}
-	// archive order within a month preserved
 	if !bytes.Contains(p.archive["2026-02"][0], []byte("OLD-FEB-A")) ||
 		!bytes.Contains(p.archive["2026-02"][1], []byte("OLD-FEB-B")) {
 		t.Errorf("2026-02 archive order not preserved: %q", p.archive["2026-02"])
 	}
 }
 
-// gunzipAll reads every concatenated gzip member (zcat semantics).
 func gunzipAll(t *testing.T, path string) string {
 	t.Helper()
 	f, err := os.Open(path)
@@ -123,7 +112,6 @@ func TestCompactShardEndToEnd(t *testing.T) {
 	if res.archived != 3 || res.kept != 2 || res.malformed != 2 {
 		t.Errorf("counts = archived %d kept %d malformed %d, want 3/2/2", res.archived, res.kept, res.malformed)
 	}
-	// live shard: rewritten, malformed + recent preserved, old gone
 	live, err := os.ReadFile(shard)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +134,6 @@ func TestCompactShardEndToEnd(t *testing.T) {
 	} else if runtimePerms := fi.Mode().Perm(); os.PathSeparator == '/' && runtimePerms != 0o644 {
 		t.Errorf("shard perms = %o, want 0644", runtimePerms)
 	}
-	// archives: month-partitioned, decodable, right rows
 	if len(res.months) != 2 || res.months[0].month != "2026-01" || res.months[1].month != "2026-02" {
 		t.Fatalf("months = %+v, want 2026-01 then 2026-02", res.months)
 	}
@@ -160,9 +147,6 @@ func TestCompactShardEndToEnd(t *testing.T) {
 	}
 }
 
-// TestCompactArchiveAppendsGzipMember — a second compaction into an existing
-// monthly archive must append a new gzip member, and a single multistream
-// read must return rows from both runs.
 func TestCompactArchiveAppendsGzipMember(t *testing.T) {
 	dir := t.TempDir()
 	archiveDir := filepath.Join(dir, "archive")

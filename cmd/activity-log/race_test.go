@@ -1,6 +1,3 @@
-// Regression for the P0 lost-append race: an emit landing while compaction
-// reads-rewrites-renames the shard must never be destroyed. Both sides now
-// hold the per-host lock for their whole critical section.
 package main
 
 import (
@@ -21,8 +18,6 @@ func TestEmitDuringCompactLosesNothing(t *testing.T) {
 	host := event.HostName()
 	shardPath := filepath.Join(syncDir, "events-"+host+".jsonl")
 
-	// Seed 2000 archivable events so the compaction window is wide enough
-	// for concurrent emits to land inside it.
 	old := time.Now().UTC().Add(-120 * 24 * time.Hour).Format("2006-01-02T15:04:05.000000Z")
 	var sb strings.Builder
 	for i := 0; i < 2000; i++ {

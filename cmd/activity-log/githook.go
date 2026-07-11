@@ -1,6 +1,3 @@
-// install-git-hook — wire a repo's post-commit hook to emit a `project`
-// event per commit. Documented as an auto-capture source since v1 but never
-// shippable before; this makes it one command.
 package main
 
 import (
@@ -14,11 +11,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// postCommitHook is the script written to .git/hooks/post-commit. It resolves
-// the activity-log binary the same way the read hooks do (PATH →
-// ~/.local/bin), derives the scope from the repo directory name, and emits a
-// one-line `project` event. Best-effort: a missing binary is a silent no-op,
-// never a failed commit.
 const postCommitHook = `#!/bin/sh
 # activity-mesh post-commit hook (installed by 'activity-log install-git-hook').
 BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
@@ -74,7 +66,6 @@ func installGitHookCmd() *cobra.Command {
 					return err
 				}
 			} else {
-				// Append our snippet (minus its shebang) to the existing hook.
 				snippet := "\n# --- activity-mesh (appended) ---\n" +
 					strings.TrimPrefix(postCommitHook, "#!/bin/sh\n")
 				merged := append(existing, []byte(snippet)...)

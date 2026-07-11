@@ -1,4 +1,4 @@
-.PHONY: help build build-daemon test vet lint shellcheck verify install clean
+.PHONY: help build build-daemon test vet lint shellcheck verify install clean test-mcp test-install test-archives
 
 BIN_DIR := bin
 CMD     := ./cmd/activity-log
@@ -48,7 +48,16 @@ lint: ## Run golangci-lint (requires brew install)
 shellcheck: ## Run shellcheck across all bash scripts
 	@find . -name '*.sh' -not -path './.git/*' -not -path './bin/*' -print0 | xargs -0 shellcheck --severity=warning
 
-verify: vet test shellcheck ## Full verification — vet + test + shellcheck (CI parity)
+test-mcp: ## Run MCP server tests (node)
+	node --test mcp/server_test.mjs
+
+test-install: ## Hermetic bootstrap install test (temp HOME, local fake release)
+	bash tests/install/test-bootstrap.sh
+
+test-archives: ## Release archive content test (needs goreleaser; skips otherwise)
+	bash tests/release/test-archives.sh
+
+verify: vet test shellcheck test-mcp test-hooks ## Full verification — vet + test + shellcheck + mcp + hooks (CI parity)
 
 install: ## Install binaries to /usr/local/bin (requires sudo)
 	$(GO) build $(GOFLAGS) -o /usr/local/bin/activity-log $(CMD)

@@ -24,9 +24,6 @@ agents:
     aliases: [reina]
 `
 
-// TestRefreshAgents_WritesCacheFromRegistry — active agents only, each line
-// id<TAB>aliases<TAB>weak, aliases lowercased; an agent without explicit
-// aliases falls back to its id; archived agents are excluded.
 func TestRefreshAgents_WritesCacheFromRegistry(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ACTIVITY_MESH_CONFIG", dir)
@@ -43,9 +40,9 @@ func TestRefreshAgents_WritesCacheFromRegistry(t *testing.T) {
 	got := string(raw)
 
 	wantLines := map[string]bool{
-		"hermes\thermes,хермес\t":            true,
+		"hermes\thermes,хермес\t":                      true,
 		"claude-mac\tclaude-mac,клод-mac\tclaude,клод": true,
-		"no-alias-agent\tno-alias-agent\t":   true,
+		"no-alias-agent\tno-alias-agent\t":             true,
 	}
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
 	if len(lines) != len(wantLines) {
@@ -61,8 +58,6 @@ func TestRefreshAgents_WritesCacheFromRegistry(t *testing.T) {
 	}
 }
 
-// TestRefreshAgents_DryRunWritesNothing — dry-run prints but never touches
-// the cache file.
 func TestRefreshAgents_DryRunWritesNothing(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("ACTIVITY_MESH_CONFIG", dir)

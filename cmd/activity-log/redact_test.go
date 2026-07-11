@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// TestRedactEventLine_UnchangedKeepsExactBytes — an event with nothing to
-// redact must be returned byte-identical (no cosmetic key reorder).
 func TestRedactEventLine_UnchangedKeepsExactBytes(t *testing.T) {
 	line := []byte(`{"v":1,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts":"2026-07-07T00:00:00.000000Z","host":"h","agent":"a","kind":"note","scope":"s","summary":"nothing secret here"}`)
 	out, changed, isEvent := redactEventLine(line)
@@ -20,8 +18,6 @@ func TestRedactEventLine_UnchangedKeepsExactBytes(t *testing.T) {
 	}
 }
 
-// TestRedactEventLine_RedactsSecret — a secret in the summary is scrubbed and
-// the line is marked changed.
 func TestRedactEventLine_RedactsSecret(t *testing.T) {
 	secret := "ghp_" + strings.Repeat("A", 36)
 	line := []byte(`{"v":1,"id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","ts":"2026-07-07T00:00:00.000000Z","host":"h","kind":"note","scope":"s","summary":"token ` + secret + `"}`)
@@ -37,9 +33,6 @@ func TestRedactEventLine_RedactsSecret(t *testing.T) {
 	}
 }
 
-// TestRedactShard_ScrubsAndPreserves — end-to-end: a shard with one leaky and
-// one clean event and a malformed tail is rewritten with the secret gone, the
-// clean event byte-identical, and the malformed line preserved.
 func TestRedactShard_ScrubsAndPreserves(t *testing.T) {
 	dir := t.TempDir()
 	store := filepath.Join(dir, "store")

@@ -1,6 +1,4 @@
 #!/bin/bash
-# ingester-error — count failed ingests in last hour.
-# Reads $ACTIVITY_MESH_STATE/ingest.log lines like "ERROR ingest..." with timestamps.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

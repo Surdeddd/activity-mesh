@@ -13,8 +13,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// ----- debounce -----
-
 func TestDebouncerDeduplicatesWithinWindow(t *testing.T) {
 	d := newDebouncer(100 * time.Millisecond)
 	now := time.Now()
@@ -51,8 +49,6 @@ func TestDebouncerDistinctKeys(t *testing.T) {
 	}
 }
 
-// ----- hashKey -----
-
 func TestHashKeyStableAndDistinct(t *testing.T) {
 	a := hashKey("src", "/a")
 	b := hashKey("src", "/a")
@@ -66,8 +62,6 @@ func TestHashKeyStableAndDistinct(t *testing.T) {
 		t.Fatal("source name must affect hash")
 	}
 }
-
-// ----- pattern matching -----
 
 func TestMatchPatternBasename(t *testing.T) {
 	cases := []struct {
@@ -95,8 +89,6 @@ func TestMatchPatternBasename(t *testing.T) {
 	}
 }
 
-// ----- op matching -----
-
 func TestMatchOp(t *testing.T) {
 	create := fsnotify.Event{Op: fsnotify.Create}
 	write := fsnotify.Event{Op: fsnotify.Write}
@@ -120,8 +112,6 @@ func TestMatchOp(t *testing.T) {
 		t.Error("remove should not match create")
 	}
 }
-
-// ----- template rendering -----
 
 func TestRenderTemplate(t *testing.T) {
 	out, err := renderTemplate("hi {{.Filename}} on {{.ParentDir}}", map[string]string{
@@ -150,8 +140,6 @@ func TestRenderTemplateBadParse(t *testing.T) {
 	}
 }
 
-// ----- emitFacts -----
-
 func TestEmitFacts(t *testing.T) {
 	src := Source{Name: "foo"}
 	ev := fsnotify.Event{Name: "/x/y/z.md", Op: fsnotify.Create}
@@ -170,8 +158,6 @@ func TestEmitFacts(t *testing.T) {
 	}
 }
 
-// ----- expandHome -----
-
 func TestExpandHome(t *testing.T) {
 	h, _ := os.UserHomeDir()
 	if got := expandHome("~/foo"); got != filepath.Join(h, "foo") {
@@ -181,8 +167,6 @@ func TestExpandHome(t *testing.T) {
 		t.Errorf("absolute path mangled: %q", got)
 	}
 }
-
-// ----- YAML loader -----
 
 func TestLoadConfigBasic(t *testing.T) {
 	dir := t.TempDir()
@@ -214,14 +198,10 @@ sources:
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Pre-create the bin so resolveBin's existence check passes and the
-	// value round-trips through fillDefaults unchanged (no PATH fallback).
 	binPath := filepath.Join(dir, "activity-log")
 	if err := os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// Patch yaml in place: swap /tmp/activity-log for the tmpdir path so the
-	// test stays hermetic regardless of what's on the host's PATH.
 	patched := strings.Replace(yaml, "/tmp/activity-log", binPath, 1)
 	if err := os.WriteFile(cfgPath, []byte(patched), 0o644); err != nil {
 		t.Fatal(err)
@@ -319,8 +299,6 @@ func TestLoadConfigUnknownKey(t *testing.T) {
 	}
 }
 
-// ----- integration: spin up watcher + verify emit invocation -----
-
 func TestWatchSourceCallsEmitOnCreate(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("integration uses POSIX shell shim")
@@ -351,7 +329,6 @@ func TestWatchSourceCallsEmitOnCreate(t *testing.T) {
 	go func() {
 		done <- watchSource(ctx, src, deb, shim)
 	}()
-	// give fsnotify time to subscribe
 	time.Sleep(150 * time.Millisecond)
 
 	target := filepath.Join(watchDir, "hello.md")
@@ -359,13 +336,11 @@ func TestWatchSourceCallsEmitOnCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// debounce fires another write — must not double-emit.
 	time.Sleep(50 * time.Millisecond)
 	if err := os.WriteFile(target, []byte("hi2"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// poll for shim to record one emit
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if data, err := os.ReadFile(logPath); err == nil && len(data) > 0 {
@@ -390,17 +365,12 @@ func TestWatchSourceCallsEmitOnCreate(t *testing.T) {
 	if !strings.Contains(got, "created hello.md") {
 		t.Errorf("summary missing: %q", got)
 	}
-	// debounce: must record exactly one invocation block (one trailing
-	// separator line). Our shim writes one line per arg + a "---" terminator.
 	count := strings.Count(got, "---")
 	if count != 1 {
 		t.Errorf("expected 1 emit, got %d (log:\n%s)", count, got)
 	}
 }
 
-// TestDebouncerCollapsesOpVariants documents the macOS reality that a single
-// os.WriteFile produces both CREATE and WRITE events. The debouncer keys on
-// (source, path) only — so both ops collapse into one logical emit.
 func TestDebouncerCollapsesOpVariants(t *testing.T) {
 	d := newDebouncer(time.Second)
 	now := time.Now()
@@ -417,9 +387,6 @@ func TestDebouncerCollapsesOpVariants(t *testing.T) {
 	}
 }
 
-// writeEmitShim creates an executable that writes its argv to a log file —
-// used to verify activity-watcher shells out with the correct flags without
-// depending on a real activity-log binary.
 func writeEmitShim(t *testing.T, dir, logPath string) string {
 	t.Helper()
 	shim := filepath.Join(dir, "emit-shim.sh")
@@ -434,7 +401,6 @@ exit 0
 	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// sanity check: shell-callable
 	if _, err := exec.LookPath("/bin/sh"); err != nil {
 		t.Fatalf("sh missing: %v", err)
 	}

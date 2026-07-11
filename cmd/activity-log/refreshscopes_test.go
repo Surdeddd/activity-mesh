@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// writeFile is a tiny helper for fixture files.
 func writeFile(t *testing.T, path, content string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -20,8 +19,6 @@ func writeFile(t *testing.T, path, content string) string {
 	return path
 }
 
-// cacheDir points ACTIVITY_MESH_CONFIG (the env the router hook honours) at
-// a temp dir and returns the scopes-cache path inside it.
 func cacheDir(t *testing.T) (dir, cachePath string) {
 	t.Helper()
 	dir = t.TempDir()
@@ -45,9 +42,6 @@ scopes:
     status: deprecated
 `
 
-// TestRefreshScopes_WritesCacheExcludingRouterFalse — active scopes minus
-// router:false land in the cache (sorted, one per line), a pre-existing
-// stale cache is fully replaced, and no temp residue is left behind.
 func TestRefreshScopes_WritesCacheExcludingRouterFalse(t *testing.T) {
 	dir, cachePath := cacheDir(t)
 	writeFile(t, cachePath, "stale-entry\nleftover\n") // must be replaced wholesale
@@ -76,8 +70,6 @@ func TestRefreshScopes_WritesCacheExcludingRouterFalse(t *testing.T) {
 	}
 }
 
-// TestRefreshScopes_FailureKeepsOldCache — malformed YAML and a future
-// schema_version must both error out without touching the existing cache.
 func TestRefreshScopes_FailureKeepsOldCache(t *testing.T) {
 	for name, bad := range map[string]string{
 		"malformed":      "schema_version: 1\nscopes: [",
@@ -105,8 +97,6 @@ func TestRefreshScopes_FailureKeepsOldCache(t *testing.T) {
 	}
 }
 
-// TestRefreshScopes_MissingRegistry — explicit path to a nonexistent file is
-// a clear error; the cache stays untouched.
 func TestRefreshScopes_MissingRegistry(t *testing.T) {
 	_, cachePath := cacheDir(t)
 	const keep = "keep-me\n"
@@ -122,8 +112,6 @@ func TestRefreshScopes_MissingRegistry(t *testing.T) {
 	}
 }
 
-// TestRefreshScopes_DryRun — prints the would-be content + summary, writes
-// nothing.
 func TestRefreshScopes_DryRun(t *testing.T) {
 	_, cachePath := cacheDir(t)
 	reg := writeFile(t, filepath.Join(t.TempDir(), "scopes.yaml"), mixedScopesYAML)
@@ -140,8 +128,6 @@ func TestRefreshScopes_DryRun(t *testing.T) {
 	}
 }
 
-// TestResolveScopesRegistry_PrefersSyncLiveCopy — without --registry the
-// canonical live copy <sync>/scopes.yaml (sync dir from config.json) wins.
 func TestResolveScopesRegistry_PrefersSyncLiveCopy(t *testing.T) {
 	storeDir, syncDir := setupTempEnv(t)
 	live := writeFile(t, filepath.Join(syncDir, "scopes.yaml"), mixedScopesYAML)

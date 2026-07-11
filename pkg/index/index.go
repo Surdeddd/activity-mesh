@@ -1,12 +1,3 @@
-// Package index implements the SQLite + FTS5 indexer for activity-mesh.
-//
-// One Index instance = one SQLite database file (default
-// ~/.local/share/activity-mesh/index.db) holding the events table, BM25 FTS5
-// virtual table, and per-source byte-offset cursors used for incremental
-// ingest of the per-host JSONL shards under ~/Sync/activity/.
-//
-// Concurrency: all public methods are safe for concurrent use; writes are
-// serialised via a process-wide mutex while reads use SQLite's WAL.
 package index
 
 import (
@@ -26,27 +17,23 @@ import (
 	"sync"
 	"time"
 
-	_ "modernc.org/sqlite" // cgo-free sqlite driver, FTS5 compiled in
+	_ "modernc.org/sqlite"
 )
 
-// Event mirrors the on-disk JSONL row but only the fields the index
-// surfaces back to callers. Optional fields are kept lowercase JSON for
-// HTTP wire-format symmetry with the writer side.
 type Event struct {
-	ULID     string                 `json:"id"`
-	TS       string                 `json:"ts"`
-	TSUnix   int64                  `json:"ts_unix"`
-	Host     string                 `json:"host"`
-	Agent    string                 `json:"agent,omitempty"`
-	Scope    string                 `json:"scope,omitempty"`
-	Kind     string                 `json:"kind,omitempty"`
-	Priority string                 `json:"priority,omitempty"`
-	Path     string                 `json:"raw_jsonl_path,omitempty"`
-	Offset   int64                  `json:"raw_byte_offset,omitempty"`
-	Payload  map[string]any         `json:"payload"`
+	ULID     string         `json:"id"`
+	TS       string         `json:"ts"`
+	TSUnix   int64          `json:"ts_unix"`
+	Host     string         `json:"host"`
+	Agent    string         `json:"agent,omitempty"`
+	Scope    string         `json:"scope,omitempty"`
+	Kind     string         `json:"kind,omitempty"`
+	Priority string         `json:"priority,omitempty"`
+	Path     string         `json:"raw_jsonl_path,omitempty"`
+	Offset   int64          `json:"raw_byte_offset,omitempty"`
+	Payload  map[string]any `json:"payload"`
 }
 
-// QueryFilter restricts a Query() call.
 type QueryFilter struct {
 	Since    time.Time
 	Until    time.Time
@@ -58,16 +45,13 @@ type QueryFilter struct {
 	Limit    int
 }
 
-// Index wraps a single SQLite database connection.
 type Index struct {
 	db      *sql.DB
 	path    string
-	mu      sync.Mutex // serialises writes (ingest)
-	cursors string     // path to cursors.json (incremental ingest state)
+	mu      sync.Mutex
+	cursors string
 }
 
-// NewIndex opens (or creates) the SQLite DB at dbPath and ensures schema.
-// The cursors.json file is sibling to the DB.
 func NewIndex(dbPath string) (*Index, error) {
 	if dbPath == "" {
 		return nil, errors.New("dbPath required")
@@ -80,7 +64,7 @@ func NewIndex(dbPath string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	db.SetMaxOpenConns(1) // SQLite single writer; reads are fine on same conn under WAL
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping: %w", err)
@@ -93,13 +77,10 @@ func NewIndex(dbPath string) (*Index, error) {
 	return idx, nil
 }
 
-// Close releases the underlying DB handle.
 func (i *Index) Close() error { return i.db.Close() }
 
-// Path returns the SQLite file path.
 func (i *Index) Path() string { return i.path }
 
-// schemaSQL is the canonical DDL — see ARCHITECTURE.md "Storage layout".
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY,
@@ -118,6 +99,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_ts ON events(ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_agent_ts ON events(agent, ts_unix DESC);
 CREATE INDEX IF NOT EXISTS idx_scope_ts ON events(scope, ts_unix DESC);
+CREATE INDEX IF NOT EXISTS idx_path ON events(raw_jsonl_path);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
   text_content,
   content='events', content_rowid='id',
@@ -129,6 +111,22 @@ CREATE TRIGGER IF NOT EXISTS events_ai AFTER INSERT ON events BEGIN
     COALESCE(json_extract(new.payload, '$.summary'), '') || ' ' ||
     COALESCE(new.agent, '') || ' ' || COALESCE(new.scope, ''));
 END;
+CREATE TRIGGER IF NOT EXISTS events_au AFTER UPDATE ON events BEGIN
+  INSERT INTO events_fts(events_fts, rowid, text_content)
+  VALUES ('delete', old.id,
+    COALESCE(json_extract(old.payload, '$.summary'), '') || ' ' ||
+    COALESCE(old.agent, '') || ' ' || COALESCE(old.scope, ''));
+  INSERT INTO events_fts(rowid, text_content)
+  VALUES (new.id,
+    COALESCE(json_extract(new.payload, '$.summary'), '') || ' ' ||
+    COALESCE(new.agent, '') || ' ' || COALESCE(new.scope, ''));
+END;
+CREATE TRIGGER IF NOT EXISTS events_ad AFTER DELETE ON events BEGIN
+  INSERT INTO events_fts(events_fts, rowid, text_content)
+  VALUES ('delete', old.id,
+    COALESCE(json_extract(old.payload, '$.summary'), '') || ' ' ||
+    COALESCE(old.agent, '') || ' ' || COALESCE(old.scope, ''));
+END;
 `
 
 func (i *Index) ensureSchema() error {
@@ -139,14 +137,12 @@ func (i *Index) ensureSchema() error {
 	return nil
 }
 
-// Stats returns per-host counts and the latest ULID seen — used by /health.
 type Stats struct {
 	TotalEvents     int64    `json:"total_events"`
 	LastIndexedULID string   `json:"last_indexed_ulid"`
 	Hosts           []string `json:"hosts"`
 }
 
-// Stats reads global counters. Cheap (single COUNT, single MAX).
 func (i *Index) Stats() (Stats, error) {
 	var s Stats
 	row := i.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(ulid), '') FROM events`)
@@ -168,27 +164,20 @@ func (i *Index) Stats() (Stats, error) {
 	return s, rows.Err()
 }
 
-// cursorEntry tracks how far a shard has been ingested plus the identity of
-// its first line. Identity matters: compaction (or a Syncthing replace)
-// rewrites the shard, and if the new file is still larger than the stored
-// offset a naive size check would keep a stale mid-line cursor and silently
-// skip the unread tail. Any rewrite that removes events changes the head
-// line, so a head-hash mismatch forces a full rescan (ULID dedupe makes
-// rescans free of duplicates).
 type cursorEntry struct {
 	Offset int64  `json:"offset"`
-	Head   string `json:"head,omitempty"` // sha256 hex of the first line
+	Prefix string `json:"prefix,omitempty"`
 }
 
-// cursorFile is the on-disk representation of cursors.json (v2). Legacy v1
-// files (plain path→offset map) are discarded — one full rescan, no dupes.
 type cursorFile struct {
 	V     int                    `json:"v"`
 	Files map[string]cursorEntry `json:"files"`
 }
 
+const cursorVersion = 3
+
 func (i *Index) loadCursors() (cursorFile, error) {
-	empty := cursorFile{V: 2, Files: map[string]cursorEntry{}}
+	empty := cursorFile{V: cursorVersion, Files: map[string]cursorEntry{}}
 	buf, err := os.ReadFile(i.cursors)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -197,7 +186,7 @@ func (i *Index) loadCursors() (cursorFile, error) {
 		return empty, err
 	}
 	var c cursorFile
-	if err := json.Unmarshal(buf, &c); err != nil || c.V != 2 || c.Files == nil {
+	if err := json.Unmarshal(buf, &c); err != nil || c.V != cursorVersion || c.Files == nil {
 		return empty, nil
 	}
 	return c, nil
@@ -218,31 +207,24 @@ func (i *Index) saveCursors(c cursorFile) error {
 	return os.Rename(tmp, i.cursors)
 }
 
-// headLineHash returns the sha256 hex of the file's first line (bounded to
-// 64KiB), or "" for an empty file.
-func headLineHash(f *os.File) (string, error) {
-	head := make([]byte, 64<<10)
-	n, err := f.ReadAt(head, 0)
-	if n == 0 {
-		if err == io.EOF {
-			return "", nil
-		}
-		return "", err
-	}
-	head = head[:n]
-	if nl := bytes.IndexByte(head, '\n'); nl >= 0 {
-		head = head[:nl]
-	}
-	sum := sha256.Sum256(head)
-	return hex.EncodeToString(sum[:]), nil
-}
+const upsertSQL = `INSERT INTO events
+  (ulid, ts, ts_unix, host, agent, scope, kind, priority, raw_jsonl_path, raw_byte_offset, payload)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))
+ON CONFLICT(ulid) DO UPDATE SET
+  ts = excluded.ts,
+  ts_unix = excluded.ts_unix,
+  host = excluded.host,
+  agent = excluded.agent,
+  scope = excluded.scope,
+  kind = excluded.kind,
+  priority = excluded.priority,
+  raw_jsonl_path = excluded.raw_jsonl_path,
+  raw_byte_offset = excluded.raw_byte_offset,
+  payload = excluded.payload
+WHERE events.payload != excluded.payload
+   OR events.raw_byte_offset != excluded.raw_byte_offset
+   OR events.raw_jsonl_path != excluded.raw_jsonl_path`
 
-// IngestJSONL reads new lines from path starting at the stored byte offset,
-// inserts each into events + FTS5, and atomically updates cursors.json.
-// Lines that fail to parse are skipped (one bad line ≠ aborted ingest).
-// Reads are incremental: Seek to the cursor, never the whole file.
-//
-// Returns count of events actually inserted (dedup hits don't count).
 func (i *Index) IngestJSONL(path string) (int, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -263,39 +245,47 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	head, err := headLineHash(f)
-	if err != nil {
-		return 0, err
-	}
+
 	entry := cursors.Files[abs]
 	startAt := entry.Offset
-	if fi.Size() < startAt || (entry.Head != "" && entry.Head != head) {
-		startAt = 0 // shrunk or rewritten (compaction / sync replace)
+	hasher := sha256.New()
+	if startAt > fi.Size() {
+		startAt = 0
+	} else if startAt > 0 {
+		if _, err := io.CopyN(hasher, f, startAt); err != nil {
+			return 0, err
+		}
+		if entry.Prefix != hex.EncodeToString(hasher.Sum(nil)) {
+			startAt = 0
+		}
 	}
-	if startAt >= fi.Size() && entry.Head == head {
-		return 0, nil // nothing new
+	fullScan := startAt == 0
+	if fullScan {
+		hasher.Reset()
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return 0, err
+		}
+	} else if startAt >= fi.Size() {
+		return 0, nil
 	}
-	if _, err := f.Seek(startAt, io.SeekStart); err != nil {
-		return 0, err
-	}
+
 	tx, err := i.db.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO events
-  (ulid, ts, ts_unix, host, agent, scope, kind, priority, raw_jsonl_path, raw_byte_offset, payload)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`)
+	stmt, err := tx.Prepare(upsertSQL)
 	if err != nil {
 		return 0, err
 	}
 	defer stmt.Close()
+
+	var seen []string
 	r := bufio.NewReaderSize(f, 256<<10)
 	count, offset := 0, startAt
 	for {
 		line, rerr := r.ReadBytes('\n')
 		if rerr == io.EOF {
-			// last line w/o newline — leave for next ingest
 			break
 		}
 		if rerr != nil {
@@ -303,6 +293,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`)
 		}
 		lineOffset := offset
 		offset += int64(len(line))
+		_, _ = hasher.Write(line)
 		trimmed := strings.TrimSpace(string(bytes.TrimRight(line, "\n")))
 		if trimmed == "" {
 			continue
@@ -324,26 +315,42 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, json(?))`)
 		priority, _ := raw["priority"].(string)
 		res, err := stmt.Exec(ulid, ts, tsUnix, host, agent, scope, kind, priority, abs, lineOffset, trimmed)
 		if err != nil {
-			return count, fmt.Errorf("insert ulid=%s: %w", ulid, err)
+			return count, fmt.Errorf("upsert ulid=%s: %w", ulid, err)
+		}
+		if fullScan {
+			seen = append(seen, ulid)
 		}
 		if n, err := res.RowsAffected(); err == nil && n > 0 {
-			count++ // INSERT OR IGNORE: only real inserts count
+			count++
+		}
+	}
+	if fullScan {
+		seenJSON, jerr := json.Marshal(seen)
+		if jerr != nil {
+			return count, jerr
+		}
+		if _, err := tx.Exec(
+			`DELETE FROM events WHERE raw_jsonl_path = ? AND ulid NOT IN (SELECT value FROM json_each(?))`,
+			abs, string(seenJSON)); err != nil {
+			return count, fmt.Errorf("reconcile deletes: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return count, err
 	}
-	cursors.Files[abs] = cursorEntry{Offset: offset, Head: head}
+	cursors.Files[abs] = cursorEntry{Offset: offset, Prefix: hex.EncodeToString(hasher.Sum(nil))}
 	if err := i.saveCursors(cursors); err != nil {
 		return count, fmt.Errorf("save cursors: %w", err)
 	}
 	return count, nil
 }
 
-// IngestDir ingests every events-*.jsonl in syncDir and garbage-collects
-// cursor entries for shards that no longer exist.
 func (i *Index) IngestDir(syncDir string) (int, error) {
-	matches, err := filepath.Glob(filepath.Join(syncDir, "events-*.jsonl"))
+	absDir, err := filepath.Abs(syncDir)
+	if err != nil {
+		return 0, err
+	}
+	matches, err := filepath.Glob(filepath.Join(absDir, "events-*.jsonl"))
 	if err != nil {
 		return 0, err
 	}
@@ -359,15 +366,32 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 		}
 		total += n
 	}
+
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	rows, err := i.db.Query(`SELECT DISTINCT raw_jsonl_path FROM events`)
+	if err != nil {
+		return total, nil //nolint:nilerr
+	}
+	var vanished []string
+	for rows.Next() {
+		var p string
+		if rows.Scan(&p) == nil && filepath.Dir(p) == absDir && !known[p] {
+			vanished = append(vanished, p)
+		}
+	}
+	_ = rows.Close()
+	for _, p := range vanished {
+		_, _ = i.db.Exec(`DELETE FROM events WHERE raw_jsonl_path = ?`, p)
+	}
+
 	cursors, err := i.loadCursors()
 	if err != nil {
-		return total, nil //nolint:nilerr — GC is best-effort
+		return total, nil //nolint:nilerr
 	}
 	dirty := false
 	for path := range cursors.Files {
-		if !known[path] {
+		if filepath.Dir(path) == absDir && !known[path] {
 			delete(cursors.Files, path)
 			dirty = true
 		}
@@ -378,12 +402,10 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	return total, nil
 }
 
-// Query returns events matching filter, sorted by ts_unix DESC.
 func (i *Index) Query(f QueryFilter) ([]Event, error) {
 	return i.QueryContext(context.Background(), f)
 }
 
-// QueryContext is the cancellable variant.
 func (i *Index) QueryContext(ctx context.Context, f QueryFilter) ([]Event, error) {
 	var (
 		sb   strings.Builder
@@ -431,7 +453,6 @@ func (i *Index) QueryContext(ctx context.Context, f QueryFilter) ([]Event, error
 	return scanEvents(rows)
 }
 
-// Search runs an FTS5 BM25-ranked query. Pass `since` zero-value to skip filter.
 func (i *Index) Search(query string, since time.Time, limit int) ([]Event, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("empty query")
@@ -461,8 +482,6 @@ WHERE events_fts MATCH ?`)
 	return scanEvents(rows)
 }
 
-// Aggregate groups events by `by` (scope|agent|kind|host|priority) over the
-// time window (today|yesterday|24h|7d|RFC3339). Returns count map keyed by group.
 func (i *Index) Aggregate(by, window string) (map[string]int, error) {
 	col, ok := aggregateCol(by)
 	if !ok {
@@ -496,8 +515,6 @@ func (i *Index) Aggregate(by, window string) (map[string]int, error) {
 	return out, rows.Err()
 }
 
-// ----- helpers -----
-
 func aggregateCol(by string) (string, bool) {
 	switch by {
 	case "scope", "agent", "kind", "host", "priority":
@@ -506,9 +523,6 @@ func aggregateCol(by string) (string, bool) {
 	return "", false
 }
 
-// windowRange translates "today|yesterday|24h|7d|<RFC3339>" into a
-// [since, until) pair; until is zero when the window is open-ended.
-// "yesterday" is a bounded calendar day — it must not include today.
 func windowRange(window string) (time.Time, time.Time, error) {
 	now := time.Now().UTC()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
@@ -528,8 +542,6 @@ func windowRange(window string) (time.Time, time.Time, error) {
 	return time.Time{}, time.Time{}, fmt.Errorf("unknown window %q", window)
 }
 
-// parseTimeUnix accepts the canonical "2006-01-02T15:04:05.000000Z" plus
-// RFC3339 / RFC3339Nano fallbacks. Returns 0 if all fail (caller decides).
 func parseTimeUnix(ts string) (int64, error) {
 	for _, layout := range []string{
 		"2006-01-02T15:04:05.000000Z",
@@ -543,10 +555,6 @@ func parseTimeUnix(ts string) (int64, error) {
 	return 0, fmt.Errorf("parse ts %q", ts)
 }
 
-// sanitizeFTS turns free text into a safe FTS5 MATCH expression: each
-// whitespace token becomes its own quoted phrase joined by implicit AND.
-// Quoting the whole query as one phrase (the old behaviour) required the
-// words to be adjacent, silently killing recall on multi-word searches.
 func sanitizeFTS(q string) string {
 	var parts []string
 	for _, tok := range strings.Fields(q) {
@@ -581,4 +589,3 @@ func scanEvents(rows *sql.Rows) ([]Event, error) {
 	}
 	return out, rows.Err()
 }
-

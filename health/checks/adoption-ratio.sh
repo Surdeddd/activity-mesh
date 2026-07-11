@@ -1,6 +1,4 @@
 #!/bin/bash
-# adoption-ratio — events per writer agent. Alert if 1 agent dominates >5:1.
-# Uses temp-file aggregation (bash 3 compatible).
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -23,7 +21,6 @@ if [ "$total" -lt 10 ]; then
     am_emit "$NAME" 0 ok "insufficient data (total=$total)"; exit 0
 fi
 
-# top agent + count
 top_line=$(/usr/bin/sort "$TMP" | /usr/bin/uniq -c | /usr/bin/sort -nr | head -1)
 max=$(printf '%s' "$top_line" | awk '{print $1}')
 max_a=$(printf '%s' "$top_line" | awk '{$1=""; sub(/^ /,""); print}')

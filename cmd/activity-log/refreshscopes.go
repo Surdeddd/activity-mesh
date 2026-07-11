@@ -1,24 +1,3 @@
-// refresh-scopes — regenerate the L3 router scopes-cache from the scopes
-// registry.
-//
-// The UserPromptSubmit router (hooks/user-prompt-router.sh) matches prompt
-// text against $ACTIVITY_MESH_CONFIG/scopes-cache (default
-// ~/.config/activity-mesh/scopes-cache, one bare scope name per line). A
-// hand-maintained cache rots silently when scopes change, so this
-// subcommand derives it from the registry: active scopes only, minus those
-// marked `router: false` (scope names colliding with the router's
-// agent-intent names double-filter --scope+--agent to empty — see RB-7).
-//
-// Registry resolution order:
-//
-//  1. --registry PATH              explicit override
-//  2. <sync_dir>/scopes.yaml       canonical live copy (Syncthing-replicated;
-//                                  same location health/checks/schema-drift.sh
-//                                  reads). sync_dir comes from config.json.
-//  3. ./registries/scopes.yaml     repo-checkout seed fallback
-//
-// On read/parse failure: clear error, non-zero exit, existing cache left
-// untouched. The cache is written atomically (temp file + rename).
 package main
 
 import (
@@ -62,9 +41,6 @@ func refreshScopesCmd() *cobra.Command {
 	return cmd
 }
 
-// routerConfigDir resolves the directory the router hook reads its cache
-// from — $ACTIVITY_MESH_CONFIG (the same env hooks/user-prompt-router.sh
-// honours) with ~/.config/activity-mesh as the default.
 func routerConfigDir() (string, error) {
 	if dir := os.Getenv("ACTIVITY_MESH_CONFIG"); dir != "" {
 		return dir, nil
@@ -76,9 +52,6 @@ func routerConfigDir() (string, error) {
 	return filepath.Join(home, ".config", "activity-mesh"), nil
 }
 
-// resolveRegistryFile picks a registry YAML to read. An explicit path wins
-// unconditionally (missing file surfaces as a read error with that path);
-// otherwise the first existing candidate is used.
 func resolveRegistryFile(explicit, base string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
@@ -97,9 +70,6 @@ func resolveRegistryFile(explicit, base string) (string, error) {
 		base, strings.Join(candidates, ", "), base)
 }
 
-// refreshScopes is the testable core: resolve → load/validate → render →
-// atomic write (or dry-run print). Any error before the final rename leaves
-// the existing cache byte-identical.
 func refreshScopes(regArg string, dryRun bool, out io.Writer) error {
 	regPath, err := resolveRegistryFile(regArg, "scopes.yaml")
 	if err != nil {
@@ -138,15 +108,6 @@ func refreshScopes(regArg string, dryRun bool, out io.Writer) error {
 	return nil
 }
 
-// refreshAgents renders the router's agents-cache from agents.yaml. One line
-// per active agent, tab-separated:
-//
-//	<id>\t<alias1,alias2,...>\t<weak1,weak2,...>
-//
-// Aliases are matched as lowercase substrings of the prompt by the router; a
-// strong-alias match may create an agent intent, a weak-alias match only
-// qualifies an existing one. All tokens are lowercased here so the router
-// does no per-prompt normalisation work.
 func refreshAgents(regArg string, dryRun bool, out io.Writer) error {
 	regPath, err := resolveRegistryFile(regArg, "agents.yaml")
 	if err != nil {

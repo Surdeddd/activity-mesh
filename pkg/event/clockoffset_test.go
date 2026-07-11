@@ -60,9 +60,6 @@ func TestReadClockOffsetMS_Garbage(t *testing.T) {
 	}
 }
 
-// TestNewPicksUpCachedOffset proves the wiring: with $ACTIVITY_MESH_STATE
-// pointed at a dir holding clock-offset-ms, New() populates the field; with
-// the file absent the field stays zero (and is omitted by omitempty).
 func TestNewPicksUpCachedOffset(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("ACTIVITY_MESH_STATE", stateDir)

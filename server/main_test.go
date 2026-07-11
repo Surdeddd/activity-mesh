@@ -1,7 +1,3 @@
-// These tests hit the FTS5-backed index (modernc.org/sqlite ships FTS5 —
-// no cgo, no build tag needed).
-
-
 package main
 
 import (
@@ -19,8 +15,6 @@ import (
 	"github.com/Surdeddd/activity-mesh/pkg/index"
 )
 
-// newTestDaemon spins up a daemon backed by a temp index/sync dir but does
-// NOT start the HTTP server / fsnotify loop — handlers are tested via httptest.
 func newTestDaemon(t *testing.T) (*daemon, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -37,12 +31,11 @@ func newTestDaemon(t *testing.T) (*daemon, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = idx.Close() })
-	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir}
+	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir, host: "test-host"}
 	d.m.startedAt = time.Now().UTC()
 	return d, dir
 }
 
-// seedJSONL writes lines into events-<host>.jsonl for the daemon.
 func seedJSONL(t *testing.T, syncDir, host string, events []map[string]any) {
 	t.Helper()
 	path := filepath.Join(syncDir, "events-"+host+".jsonl")
@@ -113,7 +106,6 @@ func TestHandleRecent(t *testing.T) {
 		t.Errorf("expected 2 events, got %d", resp.Count)
 	}
 
-	// scope filter
 	req2 := httptest.NewRequest(http.MethodGet, "/recent?scope=project:openclaw&hours=24", nil)
 	w2 := httptest.NewRecorder()
 	d.handleRecent(w2, req2)
@@ -149,7 +141,6 @@ func TestHandleSearch(t *testing.T) {
 		t.Errorf("expected 1 hit, got %d", resp.Count)
 	}
 
-	// missing q -> 400
 	req2 := httptest.NewRequest(http.MethodGet, "/search", nil)
 	w2 := httptest.NewRecorder()
 	d.handleSearch(w2, req2)
@@ -179,7 +170,6 @@ func TestHandleDigestMarkdown(t *testing.T) {
 		t.Errorf("digest missing scopes: %s", body)
 	}
 
-	// JSON variant
 	req2 := httptest.NewRequest(http.MethodGet, "/digest?window=24h&group_by=scope&format=json", nil)
 	w2 := httptest.NewRecorder()
 	d.handleDigest(w2, req2)
@@ -199,6 +189,7 @@ func TestHandlePush(t *testing.T) {
 		"id":      "01HRX0000000000000000000T1",
 		"ts":      tsNow(0),
 		"host":    "test-host",
+		"agent":   "pusher",
 		"kind":    "note",
 		"scope":   "scope:test",
 		"summary": "hello via push",
@@ -210,12 +201,10 @@ func TestHandlePush(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("push expected 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	// Verify shard exists
 	shard := filepath.Join(d.syncDir, "events-test-host.jsonl")
 	if _, err := os.Stat(shard); err != nil {
 		t.Fatalf("shard missing: %v", err)
 	}
-	// Verify recent picks it up (eager ingest happens inside handler)
 	req2 := httptest.NewRequest(http.MethodGet, "/recent?host=test-host", nil)
 	w2 := httptest.NewRecorder()
 	d.handleRecent(w2, req2)
@@ -227,7 +216,6 @@ func TestHandlePush(t *testing.T) {
 		t.Errorf("expected 1 event after push, got %d", resp.Count)
 	}
 
-	// missing fields -> 400
 	bad, _ := json.Marshal(map[string]any{"id": "x"})
 	req3 := httptest.NewRequest(http.MethodPost, "/push", strings.NewReader(string(bad)))
 	w3 := httptest.NewRecorder()
@@ -236,7 +224,6 @@ func TestHandlePush(t *testing.T) {
 		t.Errorf("expected 400, got %d", w3.Code)
 	}
 
-	// wrong method -> 405
 	req4 := httptest.NewRequest(http.MethodGet, "/push", nil)
 	w4 := httptest.NewRecorder()
 	d.handlePush(w4, req4)
@@ -264,15 +251,12 @@ func TestHandleMetrics(t *testing.T) {
 	}
 }
 
-// TestIntegration_FsnotifyToHTTP: spin up the full daemon (server + watcher),
-// write 100 events to JSONL, verify HTTP /recent picks them up.
 func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipped in -short")
 	}
 	d, _ := newTestDaemon(t)
 
-	// Construct an HTTP server bound to a free port (port 0 -> kernel-chosen).
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", d.handleHealth)
 	mux.HandleFunc("/recent", d.handleRecent)
@@ -280,15 +264,12 @@ func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	// Spawn the fsnotify loop in a context.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go d.watchSync(ctx)
 
-	// Give the watcher a moment to register.
 	time.Sleep(100 * time.Millisecond)
 
-	// Append 100 events directly to the per-host JSONL — daemon should pick up.
 	now := time.Now().UTC()
 	events := make([]map[string]any, 0, 100)
 	for i := 0; i < 100; i++ {
@@ -305,7 +286,6 @@ func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 	}
 	seedJSONL(t, d.syncDir, "macbook", events)
 
-	// Wait until the watcher has ingested all 100 events (debounce + tick + ingest).
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		stats, _ := d.idx.Stats()
@@ -319,7 +299,6 @@ func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 		t.Fatalf("watcher did not ingest 100 events: total=%d", stats.TotalEvents)
 	}
 
-	// HTTP smoke
 	resp, err := http.Get(srv.URL + "/recent?scope=scope:integration&hours=24&limit=200")
 	if err != nil {
 		t.Fatal(err)
@@ -338,4 +317,3 @@ func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 		t.Errorf("expected 100 recent events, got %d", got.Count)
 	}
 }
-

@@ -1,6 +1,4 @@
 #!/bin/bash
-# secrets-bypass — entropy + regex re-scan over the last 30min of events.
-# Catches what tier-1 missed at write time. Tier 4 critical on any hit.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -12,7 +10,6 @@ if [ ! -d "$SYNC" ]; then
     am_emit "$NAME" 2 warn "sync dir missing"; exit 0
 fi
 
-# Patterns NOT covered by tier-1 might still slip through if tier-1 was disabled.
 PATS='sk-ant-[A-Za-z0-9_-]{32,}|sk-[A-Za-z0-9]{40,}|ghp_[A-Za-z0-9]{30,}|xox[abposr]-[A-Za-z0-9-]{20,}|AKIA[0-9A-Z]{16}|AIza[A-Za-z0-9_-]{30,}|-----BEGIN [A-Z ]+PRIVATE KEY-----'
 
 now=$(date +%s); cutoff=$(( now - 1800 ))

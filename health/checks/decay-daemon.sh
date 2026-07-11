@@ -1,9 +1,4 @@
 #!/bin/bash
-# decay-daemon — verifies the compactor ran recently. `activity-log compact`
-# writes $ACTIVITY_MESH_STATE/decay-state.json (last_run_ts) on every run,
-# archived-something or not. The compact job is MONTHLY, so thresholds are
-# calendar-scaled: >40d fail (one missed run + slack), >32d warn. The old
-# 14d/7d thresholds fired for half of every normal month.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

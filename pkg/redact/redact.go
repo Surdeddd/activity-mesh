@@ -1,10 +1,3 @@
-// Package redact implements 3-tier secret redaction for activity-mesh events.
-//
-// Tier 1: regex pack — known secret formats (sk-ant, ghp_, AWS keys, JWT, etc.)
-// Tier 2: entropy heuristic — Shannon ≥4.5 on base64-ish substrings ≥32 chars
-// Tier 3: NER (offline weekly batch) — handled outside this package.
-//
-// Public API: Apply(input) → (output, hits). Replacement form: [REDACTED:type:len].
 package redact
 
 import (
@@ -18,15 +11,13 @@ import (
 	"strings"
 )
 
-// Hit describes a single redaction event for the audit log.
 type Hit struct {
-	Kind         string `json:"kind"`           // pattern category (e.g. "anthropic_key")
-	PatternName  string `json:"pattern_name"`   // human-readable label
-	LenRedacted  int    `json:"len_redacted"`   // length of original secret
+	Kind          string `json:"kind"`           // pattern category (e.g. "anthropic_key")
+	PatternName   string `json:"pattern_name"`   // human-readable label
+	LenRedacted   int    `json:"len_redacted"`   // length of original secret
 	SHA256First12 string `json:"sha256_first12"` // first 12 hex chars of sha256(secret)
 }
 
-// rule pairs a compiled regex with metadata for audit + replacement formatting.
 type rule struct {
 	name    string
 	kind    string
@@ -34,9 +25,7 @@ type rule struct {
 	repType string // short tag used in [REDACTED:<repType>:<len>]
 }
 
-// Tier 1 patterns. Order matters: longer/more specific first to avoid sub-matches.
 var rules = []*rule{
-	// ----- known secret formats -----
 	{
 		name:    "anthropic_key",
 		kind:    "credential",
@@ -47,16 +36,13 @@ var rules = []*rule{
 		name:    "openai_key",
 		kind:    "credential",
 		repType: "openai_key",
-		// \b left boundary: without it "risk-assessment-2026-priority" style
-		// prose matched mid-word and was irreversibly mangled on disk.
-		re: regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,200}`),
+		re:      regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,200}`),
 	},
 	{
 		name:    "github_token",
 		kind:    "credential",
 		repType: "github_token",
-		// ghp/ghs personal+server, gho oauth, ghu user-to-server, ghr refresh
-		re: regexp.MustCompile(`\b(?:gh[posur]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`),
+		re:      regexp.MustCompile(`\b(?:gh[posur]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b`),
 	},
 	{
 		name:    "gitlab_token",
@@ -116,8 +102,7 @@ var rules = []*rule{
 		name:    "private_key_pem",
 		kind:    "credential",
 		repType: "private_key",
-		// (?s) lets . match newlines; non-greedy body.
-		re: regexp.MustCompile(`(?s)-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----.+?-----END[^-]+-----`),
+		re:      regexp.MustCompile(`(?s)-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----.+?-----END[^-]+-----`),
 	},
 	{
 		name:    "db_url",
@@ -137,14 +122,12 @@ var rules = []*rule{
 		repType: "btc_addr",
 		re:      regexp.MustCompile(`\bbc1[a-z0-9]{39,59}\b`),
 	},
-	// ----- PII -----
 	{
 		name:    "email",
 		kind:    "pii",
 		repType: "email",
 		re:      regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`),
 	},
-	// ----- environment leaks -----
 	{
 		name:    "user_path",
 		kind:    "env",
@@ -155,16 +138,10 @@ var rules = []*rule{
 		name:    "lan_ip",
 		kind:    "env",
 		repType: "lan_ip",
-		// All three RFC1918 branches require four octets: the old 10.x
-		// variant matched three ("10.15.7" version strings false-positived,
-		// and real 10.a.b.c addresses leaked their last octet).
-		re: regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b`),
+		re:      regexp.MustCompile(`\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b`),
 	},
 }
 
-// userPathRe builds the home-directory redaction pattern dynamically: the
-// current user's home plus any extra prefixes from
-// $ACTIVITY_MESH_REDACT_HOMES (colon-separated) — no hardcoded usernames.
 func userPathRe() *regexp.Regexp {
 	var homes []string
 	if h, err := os.UserHomeDir(); err == nil && len(h) > 1 {
@@ -176,7 +153,6 @@ func userPathRe() *regexp.Regexp {
 		}
 	}
 	if len(homes) == 0 {
-		// never-matching fallback (no home resolvable)
 		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
 	}
 	quoted := make([]string, len(homes))
@@ -186,11 +162,6 @@ func userPathRe() *regexp.Regexp {
 	return regexp.MustCompile(`(?:` + strings.Join(quoted, "|") + `)\b`)
 }
 
-// allowlist matches strings we never redact even if they look high-entropy:
-//   - canonical UUIDs
-//   - 40-char hex (git SHA)
-//   - SHA-256 hex (64-char hex)
-//   - ULIDs (Crockford base32, 26 chars)
 var (
 	uuidRe   = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	hex40Re  = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
@@ -199,12 +170,8 @@ var (
 	base64Re = regexp.MustCompile(`[A-Za-z0-9+/=_\-]{32,}`)
 )
 
-// minEntropy is the Shannon-bit threshold above which a base64-ish substring is
-// considered likely random / secret-shaped. 4.5 bits/char is the gitleaks default.
 const minEntropy = 4.5
 
-// Apply runs the full redaction pipeline over input and returns the redacted
-// text plus an audit trail (Hit per replaced span).
 func Apply(input string) (string, []Hit) {
 	if input == "" {
 		return input, nil
@@ -212,7 +179,6 @@ func Apply(input string) (string, []Hit) {
 	out := input
 	var hits []Hit
 
-	// Tier 1: regex pack.
 	for _, r := range rules {
 		out = r.re.ReplaceAllStringFunc(out, func(match string) string {
 			hits = append(hits, mkHit(r.kind, r.name, match))
@@ -220,7 +186,6 @@ func Apply(input string) (string, []Hit) {
 		})
 	}
 
-	// Tier 2: entropy heuristic over remaining text.
 	out = base64Re.ReplaceAllStringFunc(out, func(match string) string {
 		if isAllowlisted(match) {
 			return match
@@ -232,14 +197,10 @@ func Apply(input string) (string, []Hit) {
 		return fmt.Sprintf("[REDACTED:high_entropy:%d]", len(match))
 	})
 
-	// Stable order for deterministic audit output.
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].PatternName < hits[j].PatternName })
 	return out, hits
 }
 
-// ApplyJSON walks every string-typed value in the parsed JSON tree and applies
-// redaction recursively. Numbers, booleans, and nil are passed through.
-// Caller decodes/encodes JSON; this works on any nested map[string]any / []any.
 func ApplyJSON(v any) (any, []Hit) {
 	var hits []Hit
 	out := walk(v, &hits)
@@ -267,8 +228,6 @@ func walk(v any, hits *[]Hit) any {
 	}
 }
 
-// ----- helpers -----
-
 func mkHit(kind, pattern, secret string) Hit {
 	sum := sha256.Sum256([]byte(secret))
 	return Hit{
@@ -279,7 +238,6 @@ func mkHit(kind, pattern, secret string) Hit {
 	}
 }
 
-// shannon computes Shannon entropy of s in bits/char.
 func shannon(s string) float64 {
 	if s == "" {
 		return 0
@@ -297,8 +255,6 @@ func shannon(s string) float64 {
 	return h
 }
 
-// isAllowlisted skips strings that look high-entropy but are actually known
-// non-secret content hashes (UUID, git SHA, content-addressed blob, ULID).
 func isAllowlisted(s string) bool {
 	if uuidRe.MatchString(s) {
 		return true
@@ -312,9 +268,9 @@ func isAllowlisted(s string) bool {
 	if ulidRe.MatchString(s) {
 		return true
 	}
-	// Allow strings that are clearly all-lowercase repetitive english (already low entropy
-	// would be filtered by shannon anyway, but this is cheap insurance).
-	if strings.IndexFunc(s, func(r rune) bool { return r >= '0' && r <= '9' || r == '+' || r == '/' || r == '_' || r == '-' || r == '=' || (r >= 'A' && r <= 'Z') }) == -1 {
+	if strings.IndexFunc(s, func(r rune) bool {
+		return r >= '0' && r <= '9' || r == '+' || r == '/' || r == '_' || r == '-' || r == '=' || (r >= 'A' && r <= 'Z')
+	}) == -1 {
 		return true
 	}
 	return false

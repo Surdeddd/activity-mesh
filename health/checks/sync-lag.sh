@@ -1,6 +1,4 @@
 #!/bin/bash
-# sync-lag — per-host shard mtime vs now. Alert >5min lag for live hosts.
-# Live = ones with at least one event in last 24h.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

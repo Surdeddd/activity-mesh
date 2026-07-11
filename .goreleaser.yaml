@@ -53,8 +53,18 @@ archives:
       - README.md
       - LICENSE
       - CHANGELOG.md
+      - VERSION
       - registries/*.yaml
-      - installers/**/*
+      - installers/*.sh
+      - installers/*.ps1
+      - installers/*.md
+      - installers/templates/*
+      - health/*.sh
+      - health/checks/*
+      - health/runbook/*
+      - configs/*
+      - hooks/*
+      - mcp/server.mjs
 
 checksum:
   name_template: checksums.txt

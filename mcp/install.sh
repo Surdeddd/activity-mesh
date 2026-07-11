@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Wire activity-mesh MCP server into Claude Code, Codex, and Hermes configs.
-# Idempotent. Use --dry-run to preview without modifying.
-#
-# Detected runtimes:
-#   - Claude Code  → ~/.claude/.mcp.json (preferred) or ~/.claude/settings.json
-#   - Codex        → ~/.codex/config.toml
-#   - Hermes       → ~/.hermes/config.yaml (HTTP daemon variant on :7459)
-#   - OpenClaw     → manual instruction printed (mcp-bridge.mjs is repo-internal)
 
 set -euo pipefail
 
@@ -29,7 +21,6 @@ if [[ -z "$NODE_BIN" ]]; then echo "ERR: node not on PATH (need 20+)" >&2; exit 
 say() { printf '%s\n' "$*"; }
 plan() { if [[ $DRY_RUN -eq 1 ]]; then say "  [dry-run] $*"; else say "  $*"; fi; }
 
-# ---------- Claude Code ----------
 wire_claude() {
   local mcp_json="$HOME/.claude/.mcp.json"
   local settings="$HOME/.claude/settings.json"
@@ -64,7 +55,6 @@ JSON
   fi
 }
 
-# ---------- Codex ----------
 wire_codex() {
   local cfg="$HOME/.codex/config.toml"
   say "Codex → $cfg"
@@ -87,7 +77,6 @@ TOML
   plan "appended activity-mesh block"
 }
 
-# ---------- Hermes (HTTP variant) ----------
 wire_hermes() {
   local cfg="$HOME/.hermes/config.yaml"
   if [[ ! -f "$cfg" ]]; then
@@ -114,7 +103,6 @@ YAML
   plan "appended Hermes HTTP entry (assumes daemon on :7459)"
 }
 
-# ---------- OpenClaw (manual) ----------
 note_openclaw() {
   say "OpenClaw → manual: edit ~/.openclaw/projects/<proj>/mcp-bridge.mjs"
   say "  add: { name: 'activity-mesh', command: '$NODE_BIN', args: ['$SERVER'] }"

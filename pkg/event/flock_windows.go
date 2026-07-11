@@ -8,10 +8,6 @@ import (
 	"unsafe"
 )
 
-// On Windows we use LockFileEx for exclusive advisory locking on a region
-// covering the whole file. That is sufficient for monotonic_seq increment
-// since the file is small (<= 64-bit number serialised as ASCII).
-
 const (
 	lockfileExclusiveLock = 0x00000002
 )

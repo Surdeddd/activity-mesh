@@ -1,7 +1,4 @@
 #!/bin/bash
-# weekly-digest.sh — every Sunday 09:00 MSK push "system OK" to Telegram.
-# WHY: forced visibility — silence ≠ "OK". If green digest doesn't arrive, something is wrong.
-# bash 3 compatible (macOS default) — no associative arrays.
 
 set -uo pipefail
 
@@ -19,7 +16,6 @@ now=$(date +%s); week_ago=$(( now - 7*86400 ))
 prev_week_ago=$(( now - 14*86400 ))
 iso_week=$(date -u +'%G-W%V' 2>/dev/null || echo unknown)
 
-# Aggregate via temp files
 TMP_SCOPES=$(mktemp); TMP_AGENTS=$(mktemp); TMP_HOSTS=$(mktemp)
 trap 'rm -f "$TMP_SCOPES" "$TMP_AGENTS" "$TMP_HOSTS"' EXIT
 
@@ -47,7 +43,6 @@ if [ -d "$SYNC" ]; then
     done
 fi
 
-# trend
 if [ "$events_prev" -gt 0 ]; then
     pct=$(( (events_now - events_prev) * 100 / events_prev ))
     if [ "$pct" -ge 0 ]; then trend="(+${pct}% vs last week)"; else trend="(${pct}% vs last week)"; fi
@@ -55,7 +50,6 @@ else
     trend="(no baseline)"
 fi
 
-# top scopes / agents (top 3)
 top_scopes=""
 while read -r n s; do
     [ -z "$s" ] && continue
@@ -70,20 +64,17 @@ while read -r n a; do
 done < <(/usr/bin/sort "$TMP_AGENTS" | /usr/bin/uniq -c | /usr/bin/sort -nr | head -3 | awk '{n=$1; $1=""; sub(/^ /,""); print n, $0}')
 top_agents="${top_agents%, }"
 
-# host lines
 host_lines=""
 while read -r host n; do
     [ -z "$host" ] && continue
     host_lines="${host_lines}  • ${host}: ${n}"$'\n'
 done < "$TMP_HOSTS"
 
-# alerts/self-heals from state if exists (count-only; epoch parsing avoided for portability)
 ALERT_LOG="$STATE/alerts.log"; HEAL_LOG="$STATE/self-heal.log"
 alerts_count=0; heals_count=0
 [ -f "$ALERT_LOG" ] && alerts_count=$(/usr/bin/wc -l < "$ALERT_LOG" 2>/dev/null | tr -d ' ' || echo 0)
 [ -f "$HEAL_LOG" ]  && heals_count=$(/usr/bin/wc -l < "$HEAL_LOG"  2>/dev/null | tr -d ' ' || echo 0)
 
-# token budget avg from /tmp counters
 tb_avg=0; tb_n=0
 shopt -s nullglob
 for f in /tmp/activity-tokens-*; do
@@ -95,7 +86,6 @@ shopt -u nullglob
 [ "$tb_n" -gt 0 ] && tb_avg=$(( tb_avg / tb_n )) || tb_avg=0
 tb_pct=$(( tb_avg * 100 / 500 ))
 
-# verdict from health/last-health.json
 verdict="OK"
 verdict_emoji="✅"
 verdict_level_en="OK"
@@ -151,7 +141,6 @@ EOF
 
 printf '%s\n' "$DIGEST"
 
-# Snapshot — markdown for humans + JSON state for digest-freshness check.
 mkdir -p "$STATE" 2>/dev/null || true
 printf '%s\n' "$DIGEST" > "$STATE/last-weekly-digest.md" 2>/dev/null || true
 printf '{"generated_at":%d,"window":"%s","events":%d,"verdict":"%s"}\n' \
@@ -160,8 +149,6 @@ printf '{"generated_at":%d,"window":"%s","events":%d,"verdict":"%s"}\n' \
 
 [ "$DRY_RUN" -eq 1 ] && exit 0
 
-# Push through the shared notifier chain (custom cmd → notify-maxim →
-# direct Telegram). No hardcoded chat id — creds come from env / TELEGRAM_ENV.
 am_notify "$DIGEST" || printf 'warn: weekly digest undeliverable\n' >&2
 
 exit 0

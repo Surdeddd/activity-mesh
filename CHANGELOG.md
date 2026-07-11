@@ -5,6 +5,100 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.1] — 2026-07-12
+
+Release-candidate hardening: index/redaction consistency, honest reproducible
+installs, real invariants at the write paths, synced docs. The per-host JSONL
+shards + local SQLite cache architecture is unchanged.
+
+### Privacy / index consistency (P0)
+- **Retroactive redaction now purges the index.** Ingest upserts by ULID
+  (INSERT..ON CONFLICT DO UPDATE) instead of INSERT OR IGNORE, and the FTS
+  table gained UPDATE/DELETE triggers — after `redact-shard` + re-ingest,
+  neither the SQLite payload nor any FTS entry contains the secret. Old DBs
+  migrate on first open (CREATE TRIGGER IF NOT EXISTS).
+- **Rewrite detection is byte-exact.** The ingest cursor (cursors.json v3)
+  stores a sha256 of the consumed file prefix; ANY rewrite under the cursor —
+  same first line, not-smaller file included — forces a reconciling rescan.
+- **Compaction semantics defined: the index covers live shards only.** A full
+  scan deletes events that left the shard (and their FTS entries) in the same
+  transaction; `IngestDir` drops rows of vanished shard files. Archived events
+  are readable via `zcat`, not via query/daemon/MCP. `raw_jsonl_path` /
+  `raw_byte_offset` are updated on every rescan — never stale. Convergence
+  tests pin: existing index == fresh rebuild after redact-shard and compact.
+
+### Install & release (P0)
+- **`curl | bash` is a complete, verified install.** Runtime assets (health
+  scripts, unit templates, registries, watcher.yaml, hooks, MCP server)
+  install to a versioned `~/.local/share/activity-mesh/dist/<version>/` with a
+  `current` symlink; supervisor units reference `dist/current`, never a repo
+  checkout. Any missing required asset, failed download, checksum mismatch, or
+  unit-registration failure aborts with a non-zero exit — `bootstrap complete`
+  prints only after full success. New flags: `--no-services`, `--local`,
+  `--require-signature`; `ACTIVITY_MESH_BASE_URL` enables hermetic testing.
+- **Honest signing claims.** sha256 is always verified; the cosign keyless
+  signature of checksums.txt is verified when cosign is present (mandatory
+  with `--require-signature`) and the script says plainly when it wasn't.
+- **Release archives actually contain the runtime.** Fixed goreleaser globs
+  (`dir/**/*` missed first-level files — health/master.sh, bootstrap.sh,
+  configs/, hooks/ were absent from every previous archive); archives now
+  ship binaries + health + templates + registries + configs + hooks + mcp +
+  VERSION. `tests/release/test-archives.sh` pins the contents per platform.
+- **Windows is officially CLI-only.** bootstrap.ps1 rewritten for the real
+  release zip (sha256-verified, `activity-log.exe` + registries, correct
+  `init --sync-dir ... --yes` flags, user PATH); the Task Scheduler daemon
+  task that invoked a nonexistent `activity-log daemon` is gone, along with
+  the taskscheduler templates; uninstall.ps1 matches. CI dry-runs both.
+- Hermetic end-to-end install test (`make test-install`): fake release over
+  local HTTP, temp HOME, `--no-services`; asserts binaries, versioned assets,
+  rendered units without checkout references, seeded registries, queryable
+  smoke event, and hard failure on checksum mismatch. Runs in CI on
+  ubuntu+macos.
+
+### Write-path invariants (P1)
+- **/push enforces single-writer**: the event's host must equal the daemon's
+  own host (403 otherwise) — HTTP clients can no longer write another host's
+  shard. Schema version must match; `agent` is mandatory; kind/scope/agent
+  are label-validated; priority is P0–P3; bodies >64KiB get 413 (previously
+  silently truncated into "invalid json"); redaction hits are recorded in the
+  local audit log exactly like CLI emits.
+- **Registries are a real contract at emit**: archived scopes reject events,
+  deprecated scopes warn, unknown bare kinds are rejected when kinds.yaml is
+  published (namespaced `org/name` extensions always allowed); a broken
+  registry file warns and never blocks writes.
+- **Summary is hard-capped at 500 chars** on both emit and /push — truncated
+  with `truncated: true`, never dropped; priority is validated everywhere.
+- **redaction.yaml is documentation, not runtime config** (decision): rules
+  stay compiled-in so a synced file can never weaken redaction; docs stop
+  calling redaction data-driven. `ACTIVITY_MESH_REDACT_HOMES` remains the
+  runtime-configurable piece.
+- **secret-redactor is fail-closed**: a missing/failing binary now suppresses
+  output and exits 1 instead of passing unredacted text through;
+  `ACTIVITY_MESH_REDACTOR_MODE=open` restores passthrough with a loud
+  warning. Hook suite covers both modes.
+
+### MCP / telemetry / docs (P2)
+- MCP: `activity_search` returns newest-first; `since:<ULID>` digest windows
+  actually decode the ULID timestamp (garbage errors); server version comes
+  from the VERSION file; binary resolution uses `darwin` (matching real
+  artifact names — `macos` matched nothing); MCP tests are part of
+  `make verify` and a dedicated CI job.
+- Token telemetry split: the router logs per-injection tokens
+  (`state/injections.log`, self-rotating) alongside the cumulative
+  per-session cap file; the token-budget health check reports per-fire
+  p50/p95/max against the 500 per-fire budget and the max session total
+  against the 2000 cap (it previously compared session totals to the
+  per-fire limit — red by design).
+- Docs synced with reality: README support matrix + index semantics +
+  retroactive redaction; ARCHITECTURE /push contract, prefix-hash
+  reconciliation, honest redaction tiers, CLI-only Windows matrix; ROADMAP
+  rewritten (v1 shipped, real release gate); installers/README + UPGRADE
+  rewritten (versioned assets, real flags, no `reindex`/`--hours`/Task
+  Scheduler fiction); stray legacy unit file removed.
+- CI: `go test -race` in the OS matrix; new jobs — mcp tests, hermetic
+  install test (ubuntu+macos), release-archive contents, bootstrap.ps1
+  dry-run.
+
 ## [0.3.2] — 2026-07-07
 
 Operability fixes surfaced by driving both hosts to green after the redeploy.

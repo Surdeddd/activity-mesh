@@ -1,28 +1,3 @@
-// compact — shard compaction for this host's events-<host>.jsonl.
-//
-// Events older than --keep (default 90d) move, grouped by month, into
-// <sync>/archive/events-<host>-YYYY-MM.jsonl.gz. If a monthly archive
-// already exists the batch is appended as an additional gzip member —
-// concatenated gzip members are a valid stream (RFC 1952 §2.2) readable by
-// zcat and Go's multistream gzip.Reader. The live shard is then rewritten
-// atomically (temp file in same dir + fsync + rename + best-effort dir
-// fsync) while holding the same per-host exclusive flock emit uses
-// (pkg/event.AcquireHostLock on seq-<host>).
-//
-// Daemon safety (pkg/index ingest semantics): the indexer keeps a per-file
-// byte cursor (cursors.json) but dedupes by event id — events.ulid is
-// UNIQUE and inserts are INSERT OR IGNORE. When the rewritten shard is
-// smaller than a daemon's cursor, the cursor resets to 0 and the full file
-// is rescanned with zero duplicates. Caveat: a daemon whose unread backlog
-// exceeds the number of bytes removed keeps its stale cursor and can skip
-// the not-yet-ingested tail; in practice fsnotify (200ms debounce) plus the
-// 5-minute periodic ingest keep cursors current, and compaction only
-// removes events older than --keep. Recovery is deleting cursors.json +
-// index.db and letting the daemon rebuild.
-//
-// Malformed JSONL lines (bad JSON, missing/unparseable ts, blank, or a
-// trailing line without newline — possibly an append in flight) are
-// preserved verbatim in the live shard, never archived, never dropped.
 package main
 
 import (
@@ -80,8 +55,6 @@ func compactCmd() *cobra.Command {
 				return err
 			}
 			if !dryRun {
-				// Close the decay-daemon monitoring loop: record that
-				// compaction ran (whether or not it archived anything).
 				writeDecayState()
 			}
 			printCompactSummary(os.Stdout, res)
@@ -119,9 +92,6 @@ type compactResult struct {
 	months    []monthArchive
 }
 
-// compactShard runs the partition → archive → rewrite pipeline. Archives are
-// written before the live shard is replaced: a crash in between leaves
-// duplicates (deduped downstream by ULID), never data loss.
 func compactShard(o compactOptions) (*compactResult, error) {
 	res := &compactResult{shard: filepath.Base(o.shardPath), dryRun: o.dryRun}
 	if !o.dryRun && o.storeDir != "" {
@@ -164,8 +134,6 @@ func compactShard(o compactOptions) (*compactResult, error) {
 			return nil, fmt.Errorf("archive %s: %w", ma.file, err)
 		}
 	}
-	// Dir fsync so a newly created monthly archive survives a power cut that
-	// happens after the shard rewrite below (best effort — not portable).
 	if d, err := os.Open(o.archiveDir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
@@ -184,11 +152,6 @@ type partition struct {
 	archivedCount int
 }
 
-// partitionShard splits raw shard bytes at cutoff. A line is archived only
-// when it is a complete (newline-terminated) JSON object with a parseable ts
-// older than cutoff; everything else — blank lines, malformed JSON, missing
-// or invalid ts, and a partial trailing line without newline — is preserved
-// byte-exact in the live shard.
 func partitionShard(data []byte, cutoff time.Time) *partition {
 	p := &partition{archive: map[string][][]byte{}}
 	var keep bytes.Buffer
@@ -197,8 +160,6 @@ func partitionShard(data []byte, cutoff time.Time) *partition {
 	for len(rest) > 0 {
 		nl := bytes.IndexByte(rest, '\n')
 		if nl < 0 {
-			// Trailing line without newline — possibly an emit in flight.
-			// Always keep it (never archive an unterminated line).
 			if len(bytes.TrimSpace(rest)) > 0 {
 				if _, ok := lineTimestamp(rest); ok {
 					p.keptEvents++
@@ -236,8 +197,6 @@ func partitionShard(data []byte, cutoff time.Time) *partition {
 	return p
 }
 
-// lineTimestamp extracts and parses the "ts" field through the canonical
-// event.ParseTS layouts (shared with query and pkg/index).
 func lineTimestamp(line []byte) (time.Time, bool) {
 	var raw struct {
 		TS string `json:"ts"`
@@ -252,9 +211,6 @@ func lineTimestamp(line []byte) (time.Time, bool) {
 	return t, true
 }
 
-// appendGzipMember appends lines (newline re-added) as one new gzip member
-// to path, creating it if absent, then fsyncs. Concatenated members keep the
-// archive zcat-readable without ever rewriting old data.
 func appendGzipMember(path string, lines [][]byte) error {
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -276,10 +232,6 @@ func appendGzipMember(path string, lines [][]byte) error {
 	return f.Sync()
 }
 
-// rewriteShard atomically replaces shardPath with content: temp file in the
-// same directory → fsync → rename → best-effort directory fsync. The temp
-// name (.compact-*.tmp) deliberately misses the events-*.jsonl pattern the
-// daemon's fsnotify watcher ingests.
 func rewriteShard(shardPath string, content []byte) error {
 	dir := filepath.Dir(shardPath)
 	tmp, err := os.CreateTemp(dir, ".compact-*.tmp")
@@ -312,16 +264,12 @@ func rewriteShard(shardPath string, content []byte) error {
 	return nil
 }
 
-// writeDecayState records the compaction run time to
-// <state>/decay-state.json, the signal the decay-daemon health check reads.
-// Best-effort: a write failure must never fail the compaction itself.
 func writeDecayState() {
 	dir := event.StateDir()
 	if dir == "" {
 		return
 	}
 	path := filepath.Join(dir, "decay-state.json")
-	// time.Now via the CLI is fine here (not inside a workflow/replay context).
 	payload := fmt.Sprintf(`{"last_run_ts":%d}`+"\n", time.Now().Unix())
 	_ = atomicWriteFile(path, []byte(payload))
 }

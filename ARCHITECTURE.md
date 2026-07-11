@@ -5,7 +5,7 @@
 1. **Per-host shards** — each machine writes to `events-<host>.jsonl`. Single writer per file = zero Syncthing conflicts ever.
 2. **Universal CLI is primary contract** — any agent/SDK works via shell-out. MCP/skills are optimizations on top.
 3. **Local-first reads, daemon-as-cache** — the CLI, the hooks, and the stdio MCP server read the replicated JSONL shards directly and never touch the daemon. The HTTP daemon (`:7459`) is an optional query cache for HTTP-only consumers. Daemon down ⇒ primary contract unaffected (see "Daemon dependence" below). No SPOF.
-4. **Open registries** — kinds.yaml, scopes.yaml, agents.yaml. Adding new = YAML edit, not code change.
+4. **Open registries** — kinds.yaml, scopes.yaml, agents.yaml: adding a kind/scope/agent = YAML edit in the sync dir, enforced at emit time (archived scopes reject new events; unknown bare kinds are rejected when kinds.yaml is published; `org/name` extension kinds are always allowed). Exception: redaction rules are **compiled into the binary** — `redaction.yaml` documents them, so a synced (attacker- or typo-writable) file can never weaken redaction.
 5. **Forced visibility** — failures must be **noisy**. Silence ≠ "all OK". Weekly green-light digest + dead-man heartbeat (independent process).
 
 ## Storage layout
@@ -57,7 +57,7 @@ mixing them (an earlier bug) split health snapshots from the checks reading them
   "agent": "claude-mac",
   "kind": "decision",
   "scope": "demo-app",
-  "summary": "≤500 chars, redacted, UTF-8 validated"
+  "summary": "hard-capped at 500 chars (longer input is truncated + truncated:true), redacted, UTF-8 validated"
 }
 ```
 
@@ -176,9 +176,11 @@ activity_digest(window="today" | "yesterday" | "7d" | "since:ULID", group_by="sc
 
 **Target ≤500 ambient: met for 99% of sessions.** Worst 798 only when user explicitly asked.
 
-## 3-tier privacy redaction
+## Privacy redaction (two tiers live, NER planned)
 
-**Tier 1** (regex, <1ms, blocking): gitleaks rule pack + custom — `sk-ant-`, `sk-`, `ghp_`, `xox`, JWT, AWS, GCP, DB URLs, private keys, user paths, LAN IPs, emails, crypto keys. Applied to **all string fields**, not just summary.
+Runtime rules are compiled into the binary (`pkg/redact`); `registries/redaction.yaml` is their human-readable documentation, not a runtime input. The one runtime-configurable piece: extra home-dir prefixes via `ACTIVITY_MESH_REDACT_HOMES`. `activity-log redact-shard` re-applies the current rules to the host's existing shard after a rule upgrade.
+
+**Tier 1** (regex, <1ms, blocking): `sk-ant-`, `sk-`, `gh*_`, `glpat-`, `AIza`, Stripe, HuggingFace, `xox`, JWT, AWS, DB URLs, private keys, user paths, LAN IPs, emails, crypto keys. Applied to **all string fields**, not just summary.
 
 **Tier 2** (entropy, 5-15ms, blocking): Shannon ≥4.5 on substrings ≥32 chars from base64-ish charset. Skip allowlist (UUIDs, git SHAs, plugin slugs starting with sk-).
 
@@ -188,16 +190,19 @@ Audit log: `~/.local/share/activity-mesh/audit/` stores only `{ts, event, hits:[
 
 ## Cross-OS support matrix
 
-| component | mac | linux | win | how |
-|---|---|---|---|---|
-| storage JSONL | ✅ | ✅ | ✅ | universal |
-| sync (Syncthing) | ✅ | ✅ | ✅ | first-class on all |
-| watcher | fswatch | inotifywait | NTFS USN | `watcher.yaml` abstraction |
-| supervisor | launchd | systemd | NSSM/Task Scheduler | `supervisor.yaml` abstraction |
-| Go binary | darwin/arm64+amd64 | linux/amd64+arm64 | windows/amd64 | cross-compile |
-| SQLite FTS5 | built-in | built-in | built-in | universal |
-| MCP client | works | works | works | stdio JSON-RPC |
-| Universal CLI | bash wrapper | bash wrapper | PowerShell wrapper | shell-out works |
+Windows is **CLI-only** by policy: the release zip ships `activity-log.exe`
+plus registries — no watcher, no daemon, no scheduled tasks.
+
+| component | mac | linux | win |
+|---|---|---|---|
+| storage JSONL (emit/query/compact/redact-shard) | ✅ | ✅ | ✅ |
+| sync (Syncthing) | ✅ | ✅ | ✅ |
+| capture watcher (fsnotify) | ✅ | ✅ | ❌ |
+| HTTP query daemon (`:7459`) | ✅ | ✅ | ❌ |
+| Claude Code hooks (L2/L3) | ✅ | ✅ | ❌ |
+| health checks + heartbeat + weekly digest | ✅ launchd | ✅ cron/timers | ❌ |
+| supervisor units via bootstrap | 6 launchd units | 2 systemd units | none |
+| stdio MCP server | ✅ | ✅ | ✅ (CLI-backed) |
 
 ## Schema versioning + migration
 
@@ -232,10 +237,27 @@ What actually talks to the daemon versus reading the JSONL shards directly:
 
 The daemon binds `127.0.0.1:7459` by default (it serves the full history and
 accepts unauthenticated `/push` writes); exposing it LAN-wide is an explicit
-`--bind 0.0.0.0` / `ACTIVITY_MESH_BIND` decision. `/push` validates the host
-label (path-traversal guard), requires a strict ULID `id`, and runs the same
-redaction pipeline as CLI emit before writing — HTTP pushes are not a side door
-around redaction.
+`--bind 0.0.0.0` / `ACTIVITY_MESH_BIND` decision.
+
+`/push` contract: the event's `host` **must equal the daemon's own host** —
+each shard has exactly one writer, so a client can never append to another
+host's shard through HTTP (403 otherwise). The payload is validated (`v` must
+be the supported schema version; `id` a strict ULID; `ts` parseable; `agent`,
+`kind`, `scope` mandatory and label-safe; `priority` P0–P3; body ≤64KiB →
+413 above), summaries are truncated to 500 chars with `truncated: true`, the
+whole tree runs through the same write-time redaction as CLI emit, and
+redaction hits land in the same local audit log. HTTP pushes are not a side
+door around any write-path invariant.
+
+**Index ↔ shard consistency**: the SQLite cache indexes exactly the live
+shards. The ingest cursor stores a sha256 of the file prefix it has consumed;
+any byte change under the cursor (compaction, `redact-shard`, sync replace —
+including rewrites that keep the first line and don't shrink the file)
+triggers a reconciling rescan: events are UPSERTed (stale payloads replaced —
+FTS entries updated via triggers) and events missing from the shard are
+deleted from the index. Archived events are therefore not searchable via the
+daemon or MCP (`zcat` the archives instead), and an existing index always
+converges to a fresh rebuild.
 
 There is no client-side "auto-failover" logic, because the primary contract (CLI + hooks + stdio MCP) is local-first by construction and needs none — since the data layer is Syncthing-replicated JSONL, every host already holds every shard. The daemon is purely a cache/index for HTTP-only consumers; when it dies those consumers fail until the independent dead-man heartbeat alerts (RB-6 in the runbook). An earlier draft described a `daemon-config.yaml` primary/fallback chain with auto-failover — that was never implemented and is superseded by this table.
 

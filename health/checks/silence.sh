@@ -1,7 +1,4 @@
 #!/bin/bash
-# silence — per-host last_event age vs threshold.
-# Thresholds: macbook=6h, mac-mini=2h, pc=24h, default=12h.
-# Tier 3 (fail) if any host exceeds threshold; tier 1 (ok) otherwise.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"

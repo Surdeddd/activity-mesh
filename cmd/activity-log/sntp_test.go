@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-// cannedResponse builds a valid 48-byte server reply echoing req's transmit
-// timestamp, with the given receive (T2) and transmit (T3) server times.
 func cannedResponse(t *testing.T, req []byte, t2, t3 time.Time) []byte {
 	t.Helper()
 	resp := make([]byte, sntpPacketSize)
@@ -36,11 +34,9 @@ func TestParseSNTPOffset_KnownOffsets(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// True wall-clock at client transmit is base; the skewed local
-			// clock reads base+skew at the same instant.
-			t1 := base.Add(tc.skew)                  // local
-			t2 := base.Add(tc.oneWay)                // server (true)
-			t3 := t2.Add(1 * time.Millisecond)       // server processing
+			t1 := base.Add(tc.skew)                      // local
+			t2 := base.Add(tc.oneWay)                    // server (true)
+			t3 := t2.Add(1 * time.Millisecond)           // server processing
 			t4 := t1.Add(2*tc.oneWay + time.Millisecond) // local
 
 			req := sntpRequest(t1)
@@ -49,7 +45,6 @@ func TestParseSNTPOffset_KnownOffsets(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseSNTPOffset: %v", err)
 			}
-			// NTP wire format quantizes fractions (~0.23ns); allow 1ms slack.
 			if diff := got - tc.skew; diff > time.Millisecond || diff < -time.Millisecond {
 				t.Fatalf("offset = %v, want %v (±1ms)", got, tc.skew)
 			}

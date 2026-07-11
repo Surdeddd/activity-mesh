@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>{{REPO_DIR}}/health/master.sh</string>
+        <string>{{ASSETS_DIR}}/health/master.sh</string>
     </array>
     <key>StartInterval</key>
     <integer>21600</integer>
@@ -23,13 +23,8 @@
         <string>{{STORE_DIR}}</string>
         <key>ACTIVITY_MESH_SYNC</key>
         <string>{{SYNC_DIR}}</string>
-        <!-- Health snapshots (last-health.json) MUST land in the same STATE
-             dir the token-budget / digest-freshness checks read from. -->
         <key>ACTIVITY_MESH_STATE</key>
         <string>{{STATE_DIR}}</string>
-        <!-- Alert delivery: set one of these, else health runs but stays quiet.
-             ACTIVITY_MESH_NOTIFY_CMD reads the message on stdin (any notifier);
-             or provide Telegram creds via TELEGRAM_ENV / TELEGRAM_BOT_TOKEN. -->
         <key>TELEGRAM_ENV</key>
         <string>{{TELEGRAM_ENV}}</string>
         <key>PATH</key>

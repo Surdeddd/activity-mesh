@@ -27,8 +27,6 @@ func TestInstallGitHook_FreshAndIdempotent(t *testing.T) {
 	if !strings.Contains(string(b), hookMarker) {
 		t.Fatalf("hook marker missing: %s", b)
 	}
-	// Unix execute bits are meaningless on Windows (git runs hooks via its
-	// bundled bash + the shebang), so os.Chmod(0o755) leaves mode 0 there.
 	if runtime.GOOS != "windows" {
 		fi, _ := os.Stat(hookPath)
 		if fi.Mode()&0o111 == 0 {
@@ -36,7 +34,6 @@ func TestInstallGitHook_FreshAndIdempotent(t *testing.T) {
 		}
 	}
 
-	// second run must be a no-op (no duplicate snippet)
 	cmd2 := installGitHookCmd()
 	cmd2.SetArgs([]string{"--repo", repo})
 	if err := cmd2.Execute(); err != nil {

@@ -1,13 +1,3 @@
-// Command activity-log is the universal CLI writer/reader for activity-mesh.
-//
-// Subcommands:
-//
-//	activity-log init                                   one-time setup
-//	activity-log emit  --kind X --scope Y --summary Z   append a redacted event
-//	activity-log query --since 24h [filters]            read+filter events
-//	activity-log status                                 print last event per host
-//	activity-log compact --keep 90d                     archive old events from this host's shard
-//	activity-log refresh-scopes                         regenerate the L3 router scopes-cache
 package main
 
 import (
@@ -25,13 +15,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/registry"
 	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
-// version is stamped at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
-// configPath stores the path passed via --config; default determined at runtime.
 var configPath string
 
 const (
@@ -65,8 +54,6 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-// ----- config -----
 
 type config struct {
 	SyncDir  string `json:"sync_dir"`
@@ -118,8 +105,6 @@ func saveConfig(path string, c *config) error {
 	return os.WriteFile(path, buf, 0o644)
 }
 
-// ----- init -----
-
 func initCmd() *cobra.Command {
 	var customSync string
 	var nonInteractive bool
@@ -159,7 +144,6 @@ func initCmd() *cobra.Command {
 				return err
 			}
 
-			// pre-create seq file so first emit is fast.
 			host, _ := os.Hostname()
 			seqPath := filepath.Join(storeDirVal, "seq-"+strings.TrimSpace(host))
 			if _, err := os.Stat(seqPath); errors.Is(err, os.ErrNotExist) {
@@ -184,8 +168,6 @@ func initCmd() *cobra.Command {
 	return cmd
 }
 
-// ----- emit -----
-
 func emitCmd() *cobra.Command {
 	var (
 		kind     string
@@ -203,9 +185,19 @@ func emitCmd() *cobra.Command {
 			if kind == "" || scope == "" || summary == "" {
 				return errors.New("--kind, --scope, --summary required")
 			}
+			if !event.ValidPriority(priority) {
+				return fmt.Errorf("invalid --priority %q (want P0..P3)", priority)
+			}
 			cfg, err := loadConfig()
 			if err != nil {
 				return err
+			}
+			if err := enforceRegistry(cfg.SyncDir, kind, scope); err != nil {
+				return err
+			}
+			summary, truncated := event.NormalizeSummary(summary)
+			if truncated {
+				fmt.Fprintf(os.Stderr, "warn: summary truncated to %d chars (truncated=true recorded)\n", event.MaxSummaryRunes)
 			}
 			opts := []event.Option{}
 			if ref != "" {
@@ -220,9 +212,6 @@ func emitCmd() *cobra.Command {
 			if agent != "" {
 				opts = append(opts, event.WithAgent(agent))
 			}
-			// Hold the host lock across seq → marshal → append: compaction
-			// takes the same lock around its read-rewrite-rename, so an
-			// append can never land inside a rewrite and be destroyed.
 			lock, err := event.AcquireHostLock(cfg.StoreDir, event.HostName())
 			if err != nil {
 				return err
@@ -232,6 +221,9 @@ func emitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if truncated {
+				ev.Truncated = true
+			}
 			line, hits, err := ev.Marshal()
 			if err != nil {
 				return err
@@ -239,8 +231,7 @@ func emitCmd() *cobra.Command {
 			if err := shard.AppendLocked(cfg.SyncDir, ev.Host, line); err != nil {
 				return err
 			}
-			if err := writeAudit(cfg.StoreDir, ev.ID, hits); err != nil {
-				// audit failure must not lose the event; warn loudly.
+			if err := event.AppendAudit(cfg.StoreDir, ev.ID, hits); err != nil {
 				fmt.Fprintf(os.Stderr, "warn: audit append failed: %v\n", err)
 			}
 			fmt.Println(ev.ID)
@@ -257,39 +248,31 @@ func emitCmd() *cobra.Command {
 	return cmd
 }
 
-// writeAudit appends a redaction audit row (one JSON line) to the local
-// (non-synced) audit log, partitioned by month. Hits == nil → noop.
-func writeAudit(storeDir, evID string, hits []event.RedactHit) error {
-	if len(hits) == 0 {
-		return nil
+func enforceRegistry(syncDir, kind, scope string) error {
+	if buf, err := os.ReadFile(filepath.Join(syncDir, "kinds.yaml")); err == nil {
+		reg, lerr := registry.LoadFromBytes(buf, nil, nil, nil)
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "warn: kinds.yaml unreadable (%v) — kind not validated\n", lerr)
+		} else if !reg.IsValidKind(kind) && !strings.Contains(kind, "/") {
+			return fmt.Errorf("kind %q is not in the kinds registry (namespaced org/name extensions are always allowed)", kind)
+		}
 	}
-	dir := filepath.Join(storeDir, "audit")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	if buf, err := os.ReadFile(filepath.Join(syncDir, "scopes.yaml")); err == nil {
+		reg, lerr := registry.LoadFromBytes(nil, buf, nil, nil)
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "warn: scopes.yaml unreadable (%v) — scope not validated\n", lerr)
+		} else {
+			allowed, warnMsg := reg.CanEmitToScope(scope)
+			if !allowed {
+				return fmt.Errorf("scope %q refuses new events: %s", scope, warnMsg)
+			}
+			if warnMsg != "" {
+				fmt.Fprintf(os.Stderr, "warn: %s\n", warnMsg)
+			}
+		}
 	}
-	now := time.Now().UTC()
-	path := filepath.Join(dir, "redactions-"+now.Format("2006-01")+".jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	row := map[string]any{
-		"ts":    now.Format(time.RFC3339Nano),
-		"event": evID,
-		"hits":  hits,
-	}
-	buf, err := json.Marshal(row)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(append(buf, '\n')); err != nil {
-		return err
-	}
-	return f.Sync()
+	return nil
 }
-
-// ----- query -----
 
 func queryCmd() *cobra.Command {
 	var (
@@ -374,7 +357,6 @@ func queryCmd() *cobra.Command {
 	return cmd
 }
 
-// parseDuration accepts Go-style durations + a "Nd" extension for days.
 func parseDuration(s string) (time.Duration, error) {
 	if strings.HasSuffix(s, "d") {
 		n, err := time.ParseDuration(strings.TrimSuffix(s, "d") + "h")
@@ -439,8 +421,6 @@ func writeQuery(events []event.Event, format string) error {
 		return fmt.Errorf("unknown format %q", format)
 	}
 }
-
-// ----- status -----
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
@@ -510,14 +490,8 @@ func lastEvent(path string) (*event.Event, int, error) {
 	return last, count, sc.Err()
 }
 
-// ----- clock-sync -----
-
-// clockSyncTimeout bounds the whole SNTP round-trip (dial + send + recv).
 const clockSyncTimeout = 3 * time.Second
 
-// defaultNTPServers are tried in order until one answers — different networks
-// (corporate DNS, VPNs, split-horizon resolvers) block different providers, so
-// a single hardcoded server made clock-sync fail wholesale on some hosts.
 var defaultNTPServers = []string{
 	"time.google.com:123",
 	"time.cloudflare.com:123",
@@ -561,8 +535,6 @@ func clockSyncCmd() *cobra.Command {
 	return cmd
 }
 
-// measureClockOffsetMulti tries each server in order, returning the first
-// successful offset and the server that answered.
 func measureClockOffsetMulti(servers []string, timeout time.Duration) (time.Duration, string, error) {
 	var lastErr error
 	for _, s := range servers {
@@ -575,8 +547,6 @@ func measureClockOffsetMulti(servers []string, timeout time.Duration) (time.Dura
 	return 0, "", lastErr
 }
 
-// atomicWriteFile writes data to path via a temp file + rename in the same
-// directory, so readers never observe a partial write.
 func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -601,8 +571,6 @@ func atomicWriteFile(path string, data []byte) error {
 	}
 	return os.Rename(tmpPath, path)
 }
-
-// ----- io helpers -----
 
 func isTerminal(f *os.File) bool {
 	fi, err := f.Stat()

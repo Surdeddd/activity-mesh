@@ -1,13 +1,3 @@
-// Command activity-watcher is the cross-platform fswatch capture daemon for
-// activity-mesh. It watches a configurable list of filesystem sources and on
-// matching events shells out to the `activity-log` binary so the daemon stays
-// thin (≤500 LOC, single external dep on fsnotify).
-//
-// Sources are declared in ~/.config/activity-mesh/watcher.yaml — one watch
-// goroutine per source, all coordinated through a debounce ring buffer that
-// suppresses duplicate (path, op) events within a 5s window.
-//
-// Logs to stderr. Graceful shutdown on SIGTERM/SIGINT. launchd/systemd-friendly.
 package main
 
 import (
@@ -36,7 +26,6 @@ const (
 	defaultActivityLog    = "activity-log"
 )
 
-// Source describes one watch entry from watcher.yaml.
 type Source struct {
 	Name            string `yaml:"name"`
 	Path            string `yaml:"path"`
@@ -48,7 +37,6 @@ type Source struct {
 	SummaryTemplate string `yaml:"summary_template"`
 }
 
-// Emit describes the activity-log emit call to perform on match.
 type Emit struct {
 	Kind            string   `yaml:"kind"`
 	KindTemplate    string   `yaml:"kind_template"`
@@ -60,7 +48,6 @@ type Emit struct {
 	SummaryTemplate string   `yaml:"summary_template"`
 }
 
-// Config is the full parsed watcher config.
 type Config struct {
 	ActivityLogBin string        `yaml:"activity_log_bin"`
 	DebounceMs     int           `yaml:"debounce_ms"`
@@ -68,7 +55,6 @@ type Config struct {
 	Sources        []Source      `yaml:"sources"`
 }
 
-// fillDefaults applies fallbacks + post-load tweaks.
 func (c *Config) fillDefaults() {
 	if c.ActivityLogBin == "" {
 		c.ActivityLogBin = defaultActivityLog
@@ -81,7 +67,6 @@ func (c *Config) fillDefaults() {
 	}
 	for i := range c.Sources {
 		c.Sources[i].Path = expandHome(c.Sources[i].Path)
-		// inherit summary template at top-level into Emit if not set there.
 		if c.Sources[i].Emit.SummaryTemplate == "" && c.Sources[i].SummaryTemplate != "" {
 			c.Sources[i].Emit.SummaryTemplate = c.Sources[i].SummaryTemplate
 		}
@@ -97,17 +82,10 @@ func expandHome(p string) string {
 	return p
 }
 
-// resolveBin returns the bin path to use for fork/exec. If the configured
-// absolute path doesn't exist, fall back to a PATH lookup by basename so the
-// daemon survives common cross-machine drift (e.g. binary installed to
-// ~/.local/bin vs /usr/local/bin). The original path is kept as-is when it
-// exists or when PATH lookup also fails — the actual exec will produce the
-// real error in that case.
 func resolveBin(p string) string {
 	if p == "" {
 		return p
 	}
-	// Bare name: let exec.LookPath via Go's stdlib handle PATH.
 	if !strings.ContainsRune(p, filepath.Separator) {
 		return p
 	}
@@ -121,7 +99,6 @@ func resolveBin(p string) string {
 	return p
 }
 
-// debouncer keeps a TTL-window dedup table keyed by uint64 hash.
 type debouncer struct {
 	mu     sync.Mutex
 	seen   map[uint64]time.Time
@@ -132,9 +109,6 @@ func newDebouncer(window time.Duration) *debouncer {
 	return &debouncer{seen: make(map[uint64]time.Time), window: window}
 }
 
-// hit returns true if this event should be processed; false if it's a dup
-// inside the TTL window. Auto-prunes expired entries on each call (cheap; the
-// table is bounded by event rate × window).
 func (d *debouncer) hit(key uint64, now time.Time) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -150,13 +124,6 @@ func (d *debouncer) hit(key uint64, now time.Time) bool {
 	return true
 }
 
-// hashKey returns a stable 64-bit fingerprint for (source, path).
-//
-// We deliberately do NOT include the op string: macOS fsnotify often emits
-// CREATE+WRITE pairs for a single os.WriteFile, and other platforms have
-// similar quirks. Treating any sequence of ops on the same path inside the
-// debounce window as one logical event matches the human intuition the
-// daemon is supposed to capture.
 func hashKey(srcName, path string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(srcName))
@@ -165,7 +132,6 @@ func hashKey(srcName, path string) uint64 {
 	return h.Sum64()
 }
 
-// matchOp returns true if the fsnotify op is allowed by the source's op spec.
 func matchOp(spec string, ev fsnotify.Event) bool {
 	switch strings.ToLower(strings.TrimSpace(spec)) {
 	case "", "create_or_modify":
@@ -182,8 +148,6 @@ func matchOp(spec string, ev fsnotify.Event) bool {
 	return false
 }
 
-// validOp reports whether spec is a recognised op keyword. An unrecognised op
-// silently matches nothing at runtime, so the config loader rejects it early.
 func validOp(spec string) bool {
 	switch strings.ToLower(strings.TrimSpace(spec)) {
 	case "", "create_or_modify", "create", "modify", "delete", "any":
@@ -192,14 +156,10 @@ func validOp(spec string) bool {
 	return false
 }
 
-// matchPattern checks the source pattern against the event path.
-// Supports filepath.Match shell globs (with one extension: "**/" prefix
-// indicating recursive matching, which we honor via filepath.Base fallback).
 func matchPattern(pattern, evPath string) bool {
 	if pattern == "" {
 		return true
 	}
-	// Try full-path match first (e.g. "settings.json" full filename).
 	if ok, _ := filepath.Match(pattern, filepath.Base(evPath)); ok {
 		return true
 	}
@@ -208,7 +168,6 @@ func matchPattern(pattern, evPath string) bool {
 			return true
 		}
 	}
-	// "*/SKILL.md" style: match parent-dir/filename
 	if strings.Contains(pattern, "/") {
 		parts := strings.SplitN(pattern, "/", 2)
 		if len(parts) == 2 {
@@ -224,7 +183,6 @@ func matchPattern(pattern, evPath string) bool {
 	return false
 }
 
-// renderTemplate runs a text/template with a small fact map.
 func renderTemplate(tmpl string, data map[string]string) (string, error) {
 	if tmpl == "" {
 		return "", nil
@@ -240,7 +198,6 @@ func renderTemplate(tmpl string, data map[string]string) (string, error) {
 	return sb.String(), nil
 }
 
-// emitFacts builds the substitution dictionary for templates.
 func emitFacts(src Source, ev fsnotify.Event) map[string]string {
 	abs := ev.Name
 	return map[string]string{
@@ -252,7 +209,6 @@ func emitFacts(src Source, ev fsnotify.Event) map[string]string {
 	}
 }
 
-// runEmit shells out to activity-log emit with the templated values.
 func runEmit(ctx context.Context, bin string, src Source, ev fsnotify.Event) error {
 	facts := emitFacts(src, ev)
 
@@ -306,12 +262,6 @@ func runEmit(ctx context.Context, bin string, src Source, ev fsnotify.Event) err
 	return nil
 }
 
-// watchSource runs one fsnotify watcher loop bound to a single Source.
-// skipWatchDir reports dirs that explode the recursive watch/fd count without
-// ever carrying a signal we emit on (dependency trees, VCS, build output,
-// caches). macOS kqueue costs one fd per watched dir, so descending into a
-// node_modules-heavy tree (e.g. ~/.openclaw/agents) can blow past
-// kern.maxfilesperproc and wedge the watcher with "too many open files".
 func skipWatchDir(name string) bool {
 	switch name {
 	case "node_modules", ".git", ".hg", ".svn", "vendor",
@@ -322,7 +272,6 @@ func skipWatchDir(name string) bool {
 	return false
 }
 
-// Recursively walks the path on init to add subdirectories when src.Recursive.
 func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) error {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -330,7 +279,6 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	}
 	defer w.Close()
 
-	// Normalise path: a missing dir is a config error worth reporting.
 	info, err := os.Stat(src.Path)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", src.Path, err)
@@ -359,12 +307,6 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	}
 	log.Printf("source=%q watching=%q recursive=%v op=%q pattern=%q", src.Name, addRoot, src.Recursive, src.Op, src.Pattern)
 
-	// runEmit forks `activity-log emit` (up to 10s). Running it inline in the
-	// select loop would stall event consumption and let fsnotify's internal
-	// buffer overflow under a burst, silently dropping events. Hand emits to a
-	// bounded worker so the loop keeps draining; if the worker falls far
-	// behind, drop with a loud log rather than block (debounce already thins
-	// most bursts).
 	emitCh := make(chan fsnotify.Event, 256)
 	var wg sync.WaitGroup
 	wg.Add(1)

@@ -1,14 +1,4 @@
 #!/bin/bash
-# dead-man-heartbeat.sh — INDEPENDENT process. NOT the same daemon it's checking.
-#
-# Behavior:
-#   - GET http://localhost:7459/health (5s timeout)
-#   - On miss, increment $STATE/heartbeat-misses (a single integer)
-#   - On hit,  reset miss count to 0
-#   - When misses ≥ 3 → tier-4 alert via DIRECT curl to Telegram bot API
-#     (NO dependency on activity-mesh daemon — that's the whole point)
-#
-# Always exit 0 (cron/launchd unfriendly otherwise).
 
 set -uo pipefail
 
@@ -29,14 +19,12 @@ read_int() {
     case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
 }
 
-# 1. try health probe — 5s budget
 ok=0
 if command -v curl >/dev/null 2>&1; then
     code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$DAEMON_URL" 2>/dev/null || echo 000)
     case "$code" in 200|204) ok=1 ;; esac
 fi
 
-# find the first available activity-log binary (shared by canary + clock-sync).
 find_activity_log() {
     local bin
     for bin in \
@@ -53,13 +41,8 @@ find_activity_log() {
 }
 AL_BIN=$(find_activity_log) || AL_BIN=""
 
-# emit hourly canary event into the shard so the canary health-check sees life.
-# Independent of daemon-alive status — emits regardless. Picks first available
-# binary; silent fail if none. Bounded to <2s by command-budget chain.
 emit_canary() {
     [ -n "$AL_BIN" ] || return 0
-    # scope=activity-mesh is the registered meta scope for self-events
-    # (heartbeat/compile/canary) — keeps schema-drift clean.
     "$AL_BIN" emit \
         --kind canary \
         --scope activity-mesh \
@@ -70,22 +53,14 @@ emit_canary() {
 }
 emit_canary "$ok" || true
 
-# refresh the cached NTP clock offset hourly (feeds clock_offset_ms on every
-# emitted event). Best-effort: the subcommand has its own 3s SNTP timeout and
-# leaves the previous cache untouched on failure — never blocks the heartbeat.
 if [ -n "$AL_BIN" ]; then
     "$AL_BIN" clock-sync >/dev/null 2>&1 || log "clock-sync failed (offset cache stale)"
 fi
 
-# regenerate the L3 router scopes-cache from the scopes registry hourly
-# (active scopes minus router:false). Best-effort: on registry read/parse
-# failure the subcommand exits non-zero and leaves the existing cache
-# untouched — never blocks the heartbeat.
 if [ -n "$AL_BIN" ]; then
     "$AL_BIN" refresh-scopes >/dev/null 2>&1 || log "refresh-scopes failed (scopes-cache stale)"
 fi
 
-# 2. update miss counter
 prev=$(read_int "$MISS_FILE")
 if [ "$ok" -eq 1 ]; then
     echo 0 > "$MISS_FILE" 2>/dev/null
@@ -96,20 +71,14 @@ misses=$(( prev + 1 ))
 echo "$misses" > "$MISS_FILE" 2>/dev/null
 log "miss url=$DAEMON_URL misses=$misses code=${code:-?}"
 
-# 3. trigger alert if threshold hit
 if [ "$misses" -lt "$THRESHOLD" ]; then exit 0; fi
 
-# cooldown
 last=$(read_int "$LAST_ALERT_FILE"); now=$(date +%s)
 if [ "$last" -gt 0 ] && [ $(( now - last )) -lt "$ALERT_COOLDOWN" ]; then
     log "alert suppressed (cooldown $(( now - last ))s < $ALERT_COOLDOWN)"
     exit 0
 fi
 
-# 4. INDEPENDENT alert path. Delivery via am_notify_telegram from lib.sh
-# (env / TELEGRAM_ENV creds, no hardcoded chat id) — lib.sh has no daemon
-# dependency, so the dead-man process stays independent of the thing it
-# watches. Sourced late so a broken lib never blocks the health probe above.
 HERE_DMH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 . "$HERE_DMH/lib.sh"

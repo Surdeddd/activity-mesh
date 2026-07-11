@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// TestNoFalsePositiveProse — prose that used to be mangled by boundary-less
-// patterns must pass through untouched.
 func TestNoFalsePositiveProse(t *testing.T) {
 	cases := []string{
 		"risk-assessment-2026-priority-list updated",   // old sk- rule matched mid-word
@@ -23,8 +21,6 @@ func TestNoFalsePositiveProse(t *testing.T) {
 	}
 }
 
-// TestLanIPFourOctets — full RFC1918 addresses are redacted whole; the last
-// octet must not survive.
 func TestLanIPFourOctets(t *testing.T) {
 	got, _ := Apply("db lives at 10.0.0.17 now")
 	if strings.Contains(got, "10.0.0.17") || strings.Contains(got, ".17") {
@@ -35,7 +31,6 @@ func TestLanIPFourOctets(t *testing.T) {
 	}
 }
 
-// TestModernCredentialPatterns — 2025/26-era formats added to the pack.
 func TestModernCredentialPatterns(t *testing.T) {
 	cases := []struct{ name, in, marker string }{
 		{"github_oauth", "token gho_" + strings.Repeat("A", 36), "github_token"},
@@ -65,9 +60,6 @@ func TestModernCredentialPatterns(t *testing.T) {
 	}
 }
 
-// TestRedactHomesEnvNote — the dynamic user_path rule is compiled at package
-// init, so ACTIVITY_MESH_REDACT_HOMES set at runtime cannot affect this
-// process; here we only pin that the current home is always redacted.
 func TestCurrentHomeRedacted(t *testing.T) {
 	home := mustHome(t)
 	got, _ := Apply("wrote to " + home + "/some/file.txt")

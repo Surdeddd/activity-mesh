@@ -2,14 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- INDEPENDENT process. Must NOT depend on com.activity-mesh.daemon being alive.
-         If the daemon dies, this is the watchdog that raises the alarm. -->
     <key>Label</key>
     <string>com.activity-mesh.heartbeat</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>{{REPO_DIR}}/health/dead-man-heartbeat.sh</string>
+        <string>{{ASSETS_DIR}}/health/dead-man-heartbeat.sh</string>
     </array>
     <key>StartInterval</key>
     <integer>3600</integer>
@@ -21,14 +19,12 @@
     <string>{{STATE_DIR}}/heartbeat-cron.err</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- {{STATE_DIR}} = ~/.local/state/activity-mesh — the SAME place
-             env-less emitters read clock-offset-ms from (ACTIVITY_MESH_STATE).
-             The heartbeat refreshes that cache hourly. -->
         <key>ACTIVITY_MESH_STATE</key>
         <string>{{STATE_DIR}}</string>
+        <key>ACTIVITY_MESH_SYNC</key>
+        <string>{{SYNC_DIR}}</string>
         <key>ACTIVITY_MESH_HEALTH_URL</key>
         <string>http://127.0.0.1:7459/health</string>
-        <!-- Alert delivery: ACTIVITY_MESH_NOTIFY_CMD (stdin) or Telegram creds. -->
         <key>TELEGRAM_ENV</key>
         <string>{{TELEGRAM_ENV}}</string>
         <key>PATH</key>

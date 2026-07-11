@@ -7,9 +7,8 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>{{REPO_DIR}}/health/weekly-digest.sh</string>
+        <string>{{ASSETS_DIR}}/health/weekly-digest.sh</string>
     </array>
-    <!-- Sunday 06:00 UTC -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Weekday</key>
@@ -31,7 +30,6 @@
         <string>{{STORE_DIR}}</string>
         <key>ACTIVITY_MESH_SYNC</key>
         <string>{{SYNC_DIR}}</string>
-        <!-- last-digest.json MUST land where digest-freshness reads it. -->
         <key>ACTIVITY_MESH_STATE</key>
         <string>{{STATE_DIR}}</string>
         <key>TELEGRAM_ENV</key>

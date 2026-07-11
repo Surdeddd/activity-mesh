@@ -1,40 +1,50 @@
 #!/usr/bin/env node
-// activity-mesh MCP stdio server (Layer 4 lazy tool).
-// Exposes 3 read-only tools (recent/search/digest) + 2 resource templates to
-// any MCP client. Node 20+ stdlib only. JSON-RPC 2.0 over stdin/stdout; logs
-// to stderr. Protocol version is negotiated on initialize (supports
-// 2025-06-18 / 2025-03-26 / 2024-11-05).
-//
-// Binary resolution: $ACTIVITY_LOG_BIN -> `activity-log` on PATH ->
-// repo-local ./bin/activity-log-<os>-<arch>. Tests override via env.
 
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
 import os from "node:os";
 
-// Protocol versions we can speak, newest first. On initialize we echo the
-// client's requested version when we support it, else fall back to our
-// preferred (newest). 2024-11-05 stays in the list for old clients.
 const SUPPORTED_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const PREFERRED_PROTOCOL = SUPPORTED_PROTOCOLS[0];
 const NAME = "activity-mesh";
-const VERSION = "0.3.0";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+function readVersion() {
+  try {
+    return readFileSync(resolve(ROOT, "VERSION"), "utf8").trim() || "dev";
+  } catch {
+    return "dev";
+  }
+}
+const VERSION = readVersion();
 
 const log = (...a) => process.stderr.write(`[${NAME}] ${a.join(" ")}\n`);
 
 function resolveBin() {
   if (process.env.ACTIVITY_LOG_BIN) return process.env.ACTIVITY_LOG_BIN;
   const arch = os.arch() === "arm64" ? "arm64" : "amd64";
-  const platform = { darwin: "macos", linux: "linux", win32: "windows" }[process.platform] || "linux";
+  const platform = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform] || "linux";
   const ext = process.platform === "win32" ? ".exe" : "";
   const local = resolve(ROOT, "bin", `activity-log-${platform}-${arch}${ext}`);
   if (existsSync(local)) return local;
-  return "activity-log"; // PATH fallback
+  return "activity-log";
+}
+
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+function ulidToMs(u) {
+  if (typeof u !== "string" || u.length !== 26) return null;
+  let ms = 0;
+  for (const ch of u.slice(0, 10).toUpperCase()) {
+    const v = CROCKFORD.indexOf(ch);
+    if (v < 0) return null;
+    ms = ms * 32 + v;
+  }
+  return ms;
 }
 
 function run(bin, args, { timeoutMs = 8000 } = {}) {
@@ -67,6 +77,7 @@ async function activitySearch({ query, since = "7d", until, limit = 20 } = {}) {
   if (!query) throw new Error("query required");
   const args = ["query", "--since", since, "--limit", "0", "--format", "json"];
   const events = parseJsonl(await run(resolveBin(), args));
+  events.reverse();
   const q = query.toLowerCase();
   const cutoffEnd = until ? Date.parse(until) : null;
   const out = [];
@@ -79,8 +90,6 @@ async function activitySearch({ query, since = "7d", until, limit = 20 } = {}) {
   return out;
 }
 
-// dayBounds returns [startMs, endMs) for a whole UTC calendar day N days ago
-// (0 = today, 1 = yesterday), so "yesterday" excludes today's events.
 function dayBounds(daysAgo) {
   const now = new Date();
   const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo);
@@ -88,13 +97,18 @@ function dayBounds(daysAgo) {
 }
 
 async function activityDigest({ window = "today", group_by = "scope" } = {}) {
-  // Pull a wide enough window, then bound in JS so "yesterday" is a real
-  // calendar day rather than "the last 48h" (which leaked today's events).
   let since = "24h", lo = null, hi = null;
   if (window === "today") { since = "24h"; [lo, hi] = dayBounds(0); }
   else if (window === "yesterday") { since = "48h"; [lo, hi] = dayBounds(1); }
   else if (window === "7d") since = "7d";
-  else if (window?.startsWith?.("since:")) since = "30d"; // ULID — fallback wide window
+  else if (window?.startsWith?.("since:")) {
+    const ms = ulidToMs(window.slice(6));
+    if (ms === null) throw new Error("since: window requires a 26-char ULID");
+    const ageH = Math.max(1, Math.ceil((Date.now() - ms) / 3600000));
+    since = `${ageH}h`;
+    lo = ms;
+    hi = Date.now() + 86400000;
+  }
   let events = parseJsonl(await run(resolveBin(), ["query", "--since", since, "--limit", "0", "--format", "json"]));
   if (lo !== null) {
     events = events.filter(e => { const t = Date.parse(e.ts); return t >= lo && t < hi; });
@@ -114,9 +128,6 @@ async function activityDigest({ window = "today", group_by = "scope" } = {}) {
   return { window, group_by, total: events.length, groups: Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, v.length])), markdown: lines.join("\n") };
 }
 
-// All three tools are read-only (they shell out to `activity-log query`,
-// which never writes). readOnlyHint lets clients surface them without a
-// write-confirmation prompt (MCP tool annotations, 2025-03-26+).
 const READONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const TOOLS = [
   { name: "activity_recent",
@@ -128,8 +139,8 @@ const TOOLS = [
     inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" }, since: { type: "string", default: "7d" }, until: { type: "string" }, limit: { type: "number", default: 20 } } },
     annotations: { title: "Search activity", ...READONLY } },
   { name: "activity_digest",
-    description: "Get pre-summarized digest of activity for a time window. Use for 'статус', 'что было сегодня', weekly review.",
-    inputSchema: { type: "object", properties: { window: { type: "string", enum: ["today", "yesterday", "7d"], default: "today" }, group_by: { type: "string", enum: ["scope", "agent", "kind"], default: "scope" } } },
+    description: "Get pre-summarized digest of activity for a time window: today | yesterday | 7d | since:<26-char ULID> (events at or after that ULID's timestamp).",
+    inputSchema: { type: "object", properties: { window: { type: "string", default: "today", description: "today | yesterday | 7d | since:<ULID>" }, group_by: { type: "string", enum: ["scope", "agent", "kind"], default: "scope" } } },
     annotations: { title: "Activity digest", ...READONLY } },
 ];
 

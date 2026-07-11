@@ -1,6 +1,4 @@
 #!/bin/bash
-# redactor-coverage — sample 1% of events; stricter NER-style scan to catch tier-1 misses.
-# Without GLiNER locally, fall back to broader regex (emails, JWT, URLs with auth).
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -10,7 +8,6 @@ SYNC="$ACTIVITY_MESH_SYNC"
 
 if [ ! -d "$SYNC" ]; then am_emit "$NAME" 2 warn "sync dir missing"; exit 0; fi
 
-# stricter pack: emails, jwt, https://user:pass@, /Users/<name>/, lan IPs
 PATS='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|https?://[^[:space:]/]+:[^[:space:]@]+@|/Users/[a-zA-Z]+/|192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+'
 
 sampled=0; hits=0; sample=""

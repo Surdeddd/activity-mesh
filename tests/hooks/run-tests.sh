@@ -1,19 +1,4 @@
 #!/bin/bash
-# Regression tests for the Claude Code hooks:
-#   hooks/user-prompt-router.sh   (UserPromptSubmit)
-#   hooks/session-start-digest.sh (SessionStart)
-#
-# These hooks run on every prompt / session start and have silently broken
-# before (stale binary path, removed CLI flags). The suite pins:
-#   - exit code 0 in EVERY case (non-zero would block the user's prompt)
-#   - exact activity-log query args per intent class
-#   - graceful silent skip when the binary is missing
-#   - resilience to malformed stdin and to jq missing from PATH
-#     (hooks call /usr/bin/jq by absolute path — the launchd-context property)
-#
-# Plain bash, no test framework. Each case runs the hook via `env -i` with a
-# fresh temp HOME, a minimal controlled PATH, and a stub activity-log injected
-# through ACTIVITY_MESH_BIN that records its argv for exact-match assertions.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,20 +6,14 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ROUTER="$REPO_ROOT/hooks/user-prompt-router.sh"
 DIGEST="$REPO_ROOT/hooks/session-start-digest.sh"
 
-# jq for assertions (same absolute path the hooks themselves use).
 JQ="/usr/bin/jq"
 if [ ! -x "$JQ" ]; then
     JQ="$(command -v jq)" || { echo "jq is required to run assertions" >&2; exit 2; }
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/activity-mesh-hook-tests.XXXXXX")" || exit 2
-# Router state (token budgets) lives under $HOME/.local/state — fresh per case.
 trap 'rm -rf "$WORK"' EXIT
 
-# Controlled PATHs. Hooks resolve jq via PATH then absolute homes, and need
-# cat/date/mkdir + python3 (Cyrillic lowercasing) from PATH. MINPATH
-# deliberately has NO jq, proving the hooks survive launchd-style environments
-# where jq is not on PATH (they fall back to /usr/bin/jq).
 MINPATH="$WORK/minpath"
 FULLPATH="$WORK/fullpath"
 mkdir -p "$MINPATH" "$FULLPATH"
@@ -48,14 +27,9 @@ for tool in cat date mkdir; do
     ln -s "$bin" "$FULLPATH/$tool"
 done
 ln -s "$JQ" "$FULLPATH/jq"
-# python3 is how the router folds Cyrillic case portably (GNU tr can't). Give
-# the FULL environment access to it; MINPATH omits it so the fallback path
-# (ASCII-only tr) is also exercised.
 PY3="$(command -v python3 || true)"
 [ -n "$PY3" ] && ln -s "$PY3" "$FULLPATH/python3"
 
-# Stub activity-log: records argv (one line per invocation) to $STUB_ARGV,
-# prints $STUB_OUTPUT (if non-empty) as the fake query result.
 STUB="$WORK/activity-log"
 cat > "$STUB" <<'EOF'
 #!/bin/bash
@@ -65,7 +39,6 @@ exit 0
 EOF
 chmod +x "$STUB"
 
-# ---------------------------------------------------------------- harness ---
 PASS=0
 FAIL=0
 CASE_N=0
@@ -86,9 +59,6 @@ begin_case() {
     ARGV_FILE="$HOMEDIR/stub-argv"
 }
 
-# seed_agents_cache — registry-derived router cache the agent-intent cases
-# need (id<TAB>aliases<TAB>weak-aliases, as `activity-log refresh-caches`
-# writes it).
 seed_agents_cache() {
     mkdir -p "$HOMEDIR/.config/activity-mesh"
     printf 'hermes\thermes,хермес,гермес\t\nviktor\tviktor,виктор\t\nanton\tanton,антон\t\nclaude-mac\tclaude-mac,клод-mac,клод-мак\tclaude,клод\n' \
@@ -105,8 +75,6 @@ end_case() {
     fi
 }
 
-# run <hook> <stdin> [VAR=VAL ...] — run hook isolated: env -i, fresh HOME,
-# controlled PATH (extra VAR=VAL args may override, e.g. PATH or stub config).
 run() {
     local hook="$1" stdin="$2"
     shift 2
@@ -116,7 +84,6 @@ run() {
     OUT="$(cat "$HOMEDIR/stdout")"
 }
 
-# JSON stdin builders (unique session ids keep /tmp token files isolated).
 pj() { printf '{"prompt":"%s","session_id":"hooktest-%s-%s"}' "$1" "$$" "$2"; }
 sj() { printf '{"session_id":"hooktest-%s-%s"}' "$$" "$1"; }
 
@@ -136,8 +103,6 @@ assert_argv() {
         err "stub argv: got [${got//$'\n'/ | }] want [${expected//$'\n'/ | }]"
 }
 
-# assert_emits <hookEventName> <ctx-substring>... — stdout must be valid hook
-# JSON; additionalContext must contain every given substring. Sets $CTX.
 assert_emits() {
     local event="$1" ev sub
     shift
@@ -157,7 +122,6 @@ assert_emits() {
     done
 }
 
-# ---------------------------------------------- user-prompt-router.sh -------
 echo "== user-prompt-router.sh =="
 
 begin_case "router: empty stdin -> exit 0, silent"
@@ -176,7 +140,6 @@ assert_rc0; assert_silent; assert_stub_not_called
 end_case
 
 begin_case "router: intent match but binary missing -> graceful silent skip"
-# ACTIVITY_MESH_BIN unset, PATH has no activity-log, fresh HOME has no ~/.local/bin.
 run "$ROUTER" "$(pj 'статус по задачам' nobin)"
 assert_rc0; assert_silent
 end_case
@@ -262,6 +225,35 @@ run "$ROUTER" "$(pj 'глянь hermes kanban' nocache)" ACTIVITY_MESH_BIN="$STU
 assert_rc0; assert_silent; assert_stub_not_called
 end_case
 
+begin_case "router: session over 2000-token hard cap -> silent, no query"
+mkdir -p "$HOMEDIR/.local/state/activity-mesh"
+printf '5000\n' > "$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-capped"
+run "$ROUTER" "$(pj 'статус по задачам' capped)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-cap"
+assert_rc0; assert_silent; assert_stub_not_called
+end_case
+
+begin_case "router: emitted injection appends per-fire telemetry line"
+run "$ROUTER" "$(pj 'статус по задачам' telem)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-telem"
+assert_rc0
+assert_emits "UserPromptSubmit" "evt-telem"
+INJ="$HOMEDIR/.local/state/activity-mesh/injections.log"
+if [ ! -s "$INJ" ]; then
+    err "injections.log missing or empty"
+else
+    line="$(tail -1 "$INJ")"
+    case "$line" in
+        *"hooktest-$$-telem"*) ;;
+        *) err "injections.log line lacks session id: $line" ;;
+    esac
+    fire=$(printf '%s' "$line" | awk '{print $3}')
+    case "$fire" in
+        ''|*[!0-9]*) err "injections.log third field not a token count: $line" ;;
+    esac
+fi
+CUM="$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-telem"
+[ -s "$CUM" ] || err "cumulative tokens file missing"
+end_case
+
 begin_case "router: malformed JSON stdin -> exit 0, silent"
 run "$ROUTER" 'this is {{ not json' ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt"
 assert_rc0; assert_silent; assert_stub_not_called
@@ -273,7 +265,6 @@ assert_rc0
 assert_emits "UserPromptSubmit" "(status match)" "evt-nojq"
 end_case
 
-# -------------------------------------------- session-start-digest.sh -------
 echo "== session-start-digest.sh =="
 
 begin_case "digest: empty stdin + stub -> SessionStart JSON, both queries exact"
@@ -305,10 +296,6 @@ BIG="$(/usr/bin/head -c 1500 /dev/zero | /usr/bin/tr '\0' 'x')"
 run "$DIGEST" "$(sj dtrunc)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="$BIG"
 assert_rc0
 assert_emits "SessionStart" "…[truncated]"
-# NOTE: the hook's `cut -c 1-1000` truncates PER LINE, not the whole digest, so
-# the combined two-query context lands ~2050 chars instead of <=1013. The bound
-# below pins "truncation happened at all" (untruncated would be ~3050) while
-# still passing if the per-line quirk is ever fixed (~1050).
 if [ -n "$CTX" ] && [ "${#CTX}" -ge 2200 ]; then
     err "additionalContext not truncated: ${#CTX} chars"
 fi
@@ -320,7 +307,39 @@ assert_rc0
 assert_emits "SessionStart" "evt-dnojq"
 end_case
 
-# ---------------------------------------------------------------- summary ---
+echo "== secret-redactor.sh =="
+REDACTOR="$REPO_ROOT/hooks/secret-redactor.sh"
+
+begin_case "redactor: binary missing, default mode -> FAIL-CLOSED (exit 1, no output)"
+printf 'sensitive text' | env -i HOME="$HOMEDIR" PATH="$MINPATH" \
+    /bin/bash "$REDACTOR" > "$HOMEDIR/stdout" 2> "$HOMEDIR/stderr"
+RC=$?
+OUT="$(cat "$HOMEDIR/stdout")"
+[ "$RC" -eq 1 ] || err "expected exit 1 (fail-closed), got $RC"
+[ -z "$OUT" ] || err "fail-closed must emit NOTHING, got: $OUT"
+end_case
+
+begin_case "redactor: binary missing, ACTIVITY_MESH_REDACTOR_MODE=open -> passthrough"
+printf 'sensitive text' | env -i HOME="$HOMEDIR" PATH="$MINPATH" ACTIVITY_MESH_REDACTOR_MODE=open \
+    /bin/bash "$REDACTOR" > "$HOMEDIR/stdout" 2> "$HOMEDIR/stderr"
+RC=$?
+OUT="$(cat "$HOMEDIR/stdout")"
+[ "$RC" -eq 0 ] || err "fail-open must exit 0, got $RC"
+[ "$OUT" = "sensitive text" ] || err "fail-open must pass text through, got: $OUT"
+grep -q "UNREDACTED" "$HOMEDIR/stderr" || err "fail-open must warn loudly on stderr"
+end_case
+
+begin_case "redactor: binary present -> shells out to redact --stdin"
+printf 'some text' | env -i HOME="$HOMEDIR" PATH="$MINPATH" \
+    ACTIVITY_MESH_BIN="$STUB" STUB_ARGV="$ARGV_FILE" STUB_OUTPUT="redacted-out" \
+    /bin/bash "$REDACTOR" > "$HOMEDIR/stdout" 2> "$HOMEDIR/stderr"
+RC=$?
+OUT="$(cat "$HOMEDIR/stdout")"
+[ "$RC" -eq 0 ] || err "expected exit 0, got $RC"
+assert_argv "redact --stdin"
+[ "$OUT" = "redacted-out" ] || err "expected stub output, got: $OUT"
+end_case
+
 echo
 printf '%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

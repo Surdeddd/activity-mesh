@@ -1,6 +1,4 @@
 #!/bin/bash
-# hook-health — count ERROR lines in hook logs (last hour).
-# Tier 2 warn at 1-5, tier 3 fail at >5.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -16,7 +14,6 @@ now=$(date +%s); cutoff=$(( now - 3600 ))
 errors=0; sample=""
 for log in "$LOG_DIR"/*.log; do
     [ -f "$log" ] || continue
-    # consider only lines whose mtime-relative position is fresh; cheaper: last 200 lines, grep ERROR
     while IFS= read -r line; do
         ts=$(printf '%s' "$line" | grep -oE '\[[^]]+\]' | head -1 | tr -d '[]')
         ts_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null \

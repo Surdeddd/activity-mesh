@@ -1,9 +1,4 @@
 #!/bin/bash
-# digest-freshness — `now - generated_at` of latest digest file.
-# Digest expected at $ACTIVITY_MESH_STATE/last-digest.json with .generated_at epoch.
-# The writer is the WEEKLY digest job, so thresholds are calendar-scaled:
-# >8d fail (one missed run + slack), >7d12h warn. The original 2h threshold
-# guaranteed a permanent red ~99% of every week — pure alert fatigue.
 
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
@@ -12,10 +7,6 @@ NAME=digest-freshness
 F="$ACTIVITY_MESH_STATE/last-digest.json"
 
 if [ ! -f "$F" ]; then
-    # Absent is fine: the weekly digest is a whole-mesh summary that runs on a
-    # single designated host; secondary hosts (and fresh installs) legitimately
-    # have no local snapshot. A STALE digest on the primary still trips the
-    # drift thresholds below.
     am_emit "$NAME" 0 ok "no local digest (runs on the designated digest host)"; exit 0
 fi
 

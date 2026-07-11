@@ -1,7 +1,3 @@
-// These tests exercise FTS5 SQL and need the sqlite_fts5 driver tag
-// (CGO_ENABLED=1). Run via `make test`; plain `go test ./...` skips them.
-
-
 package index
 
 import (
@@ -15,7 +11,6 @@ import (
 	"time"
 )
 
-// helper: build a minimal valid event JSONL line.
 func buildLine(t *testing.T, ulid, ts, host, agent, scope, kind, prio, summary string) string {
 	t.Helper()
 	m := map[string]any{
@@ -32,7 +27,6 @@ func buildLine(t *testing.T, ulid, ts, host, agent, scope, kind, prio, summary s
 	return string(b)
 }
 
-// writeJSONL writes lines (joined by \n) into syncDir/events-<host>.jsonl.
 func writeJSONL(t *testing.T, syncDir, host string, lines []string) string {
 	t.Helper()
 	if err := os.MkdirAll(syncDir, 0o755); err != nil {
@@ -133,7 +127,6 @@ func TestIngestIncremental(t *testing.T) {
 		t.Fatalf("first ingest: n=%d err=%v", n, err)
 	}
 
-	// Append more lines, re-ingest — only new lines should be added.
 	more := []string{
 		buildLine(t, "01HRX0000000000000000000B3", now.Format("2006-01-02T15:04:05.000000Z"), "macbook", "cli", "scope:test", "note", "", "second batch c"),
 	}
@@ -212,7 +205,6 @@ func TestQueryLatencyP95_10K(t *testing.T) {
 	idx, dir := setupIndex(t)
 	syncDir := filepath.Join(dir, "sync")
 
-	// Generate 10K events spread across the last 24h to exercise the index.
 	const N = 10_000
 	base := time.Now().UTC().Add(-24 * time.Hour)
 	scopes := []string{"project:openclaw", "project:hermes", "project:billing", "infra:macbook", "scope:test"}

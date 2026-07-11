@@ -16,8 +16,6 @@ func writeCfg(t *testing.T, body string) string {
 	return p
 }
 
-// TestLoadConfigRejectsUnknownOp — a typo'd op (e.g. "created") silently
-// matched nothing at runtime; the loader now rejects it.
 func TestLoadConfigRejectsUnknownOp(t *testing.T) {
 	p := writeCfg(t, `activity_log_bin: /bin/echo
 sources:
@@ -34,8 +32,6 @@ sources:
 	}
 }
 
-// TestLoadConfigRejectsNonBoolRecursive — `recursive: yes` silently became
-// false; it must now error rather than mis-configure.
 func TestLoadConfigRejectsNonBoolRecursive(t *testing.T) {
 	p := writeCfg(t, `activity_log_bin: /bin/echo
 sources:
@@ -53,7 +49,6 @@ sources:
 	}
 }
 
-// TestLoadConfigAcceptsValidOps — the values the live configs use all parse.
 func TestLoadConfigAcceptsValidOps(t *testing.T) {
 	for _, op := range []string{"create", "modify", "delete", "create_or_modify", "any"} {
 		p := writeCfg(t, `activity_log_bin: /bin/echo

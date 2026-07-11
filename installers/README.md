@@ -1,166 +1,131 @@
 # activity-mesh — Installers
 
-Cross-platform install scripts. Run one command, system is up.
+One command installs binaries, runtime assets, and supervisor units from a
+verified GitHub release.
 
 ## Quick start
 
-### macOS (Apple Silicon or Intel)
+### macOS / Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Surdeddd/activity-mesh/main/installers/bootstrap.sh | bash
 
-# or, if cloned:
-bash installers/bootstrap.sh
+# or, from a cloned repo (uses the checkout as the asset source, builds with Go if needed):
+bash installers/bootstrap.sh --local
 ```
 
-This will:
-1. Detect arch (`darwin-arm64` or `darwin-amd64`)
-2. Download two binaries from the latest GitHub release:
-   - `activity-log-darwin-<arch>` → `/usr/local/bin/activity-log`
-   - `activity-watcher-darwin-<arch>` → `/usr/local/bin/activity-watcher`
-   (will prompt for sudo if `$PREFIX` not writable)
-3. Scaffold dirs: `~/.local/share/activity-mesh/`, `~/Sync/activity/`, `~/.config/activity-mesh/`
-4. Copy default `configs/watcher.yaml` → `~/.config/activity-mesh/watcher.yaml` (only if not already present)
-5. Render + bootstrap two `launchd` agents:
-   - `~/Library/LaunchAgents/com.activity-mesh.watcher.plist` (runs `activity-watcher --config ...`)
-   - `~/Library/LaunchAgents/com.activity-mesh.daemon.plist` (runs `activity-log daemon` — requires P3)
-6. Run `activity-log status` and a smoke `emit` to verify.
+What it does — and fails hard (non-zero exit, no "bootstrap complete") if any step breaks:
 
-### Linux (amd64 or arm64)
+1. Downloads `activity-mesh_<ver>_<os>_<arch>.tar.gz` + `checksums.txt` from the release.
+2. **Verifies sha256** of the archive. If `cosign` is installed, also verifies the
+   keyless signature of `checksums.txt` (`--require-signature` makes that mandatory;
+   without cosign the script says plainly that only the checksum was verified).
+3. Installs `activity-log`, `activity-watcher`, `activity-mesh-daemon` to `--prefix`
+   (default `/usr/local/bin`, sudo only if not writable).
+4. Installs runtime assets (health scripts, unit templates, registries, default
+   `watcher.yaml`, hooks, MCP server) to `~/.local/share/activity-mesh/dist/<version>/`
+   and points the `dist/current` symlink at it. **Supervisor units reference
+   `dist/current`, never a repo checkout.**
+5. Scaffolds `~/.local/share/activity-mesh`, `~/.local/state/activity-mesh`,
+   `~/Sync/activity`, `~/.config/activity-mesh`; seeds missing registries into the
+   sync dir; runs `activity-log init --sync-dir ... --yes` and `refresh-caches`.
+6. macOS: renders + bootstraps **6 launchd units** (`watcher`, `daemon`, `health`,
+   `heartbeat`, `compact`, `weekly-digest`).
+   Linux: renders + enables 2 systemd user units (`watcher`, `daemon`) and calls
+   `loginctl enable-linger`; periodic jobs are documented below.
+7. Smoke-verifies: `--version`, `status`, one `emit`, then prints `bootstrap complete`.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Surdeddd/activity-mesh/main/installers/bootstrap.sh | bash
-```
+### Windows (PowerShell 7+) — CLI only
 
-Same flow, but generates `systemd` user units:
-- `~/.config/systemd/user/activity-mesh-watcher.service`
-- `~/.config/systemd/user/activity-mesh-daemon.service`
-
-The script also calls `loginctl enable-linger $USER` so services keep running after logout. If you don't want that, add `--no-linger` (TODO future flag) or remove with `loginctl disable-linger`.
-
-### Windows (PowerShell 7+)
+Windows releases ship **only `activity-log.exe`**. There is no watcher, no daemon,
+no scheduled tasks on Windows. Emit/query/compact against a Syncthing-replicated
+sync dir work; the auto-capture and HTTP layers are macOS/Linux.
 
 ```powershell
 iwr https://raw.githubusercontent.com/Surdeddd/activity-mesh/main/installers/bootstrap.ps1 -OutFile bootstrap.ps1
-pwsh ./bootstrap.ps1
+pwsh ./bootstrap.ps1            # -DryRun to preview, -Version vX.Y.Z to pin
 ```
 
-This will:
-1. Download both binaries to `%USERPROFILE%\bin\`:
-   - `activity-log-windows-amd64.exe` → `activity-log.exe`
-   - `activity-watcher-windows-amd64.exe` → `activity-watcher.exe`
-2. Add the bin dir to user PATH
-3. State dir: `%LOCALAPPDATA%\activity-mesh\` (per Windows convention)
-4. Copy default `configs\watcher.yaml` → `%APPDATA%\activity-mesh\watcher.yaml`
-5. Register two Task Scheduler tasks (XML-based) under `\activity-mesh\`:
-   - `\activity-mesh\watcher`
-   - `\activity-mesh\daemon`
-6. Run smoke verification
+It downloads the zip + `checksums.txt`, verifies sha256, installs
+`activity-log.exe` to `%USERPROFILE%\bin`, adds it to the user PATH, runs
+`init --sync-dir %USERPROFILE%\Sync\activity --yes`, and seeds registries.
+Signature verification is not implemented on Windows — the script says so.
 
-## Flags
-
-### bootstrap.sh
+## Flags (bootstrap.sh)
 
 | flag | default | meaning |
 |---|---|---|
-| `--dry-run` | off | print every action, do nothing destructive |
-| `--version vX.Y.Z` | `latest` | pin a specific release tag |
-| `--prefix DIR` | `/usr/local/bin` | install dir for binary |
+| `--dry-run` | off | print the plan, do nothing |
+| `--version vX.Y.Z` | `latest` | pin a release tag |
+| `--prefix DIR` | `/usr/local/bin` | binary install dir |
+| `--no-services` | off | render units but do not register them (tests, containers) |
+| `--local` | off | use the repo checkout as the asset source; build binaries with Go if missing |
+| `--require-signature` | off | fail unless the cosign signature of checksums.txt verifies |
 
-### bootstrap.ps1
+Env overrides: `ACTIVITY_MESH_REPO`, `ACTIVITY_MESH_BASE_URL` (custom download
+base; requires `--version`), `ACTIVITY_MESH_SYNC`, `TELEGRAM_ENV`, `PREFIX`, `VERSION`.
 
-| flag | default | meaning |
-|---|---|---|
-| `-DryRun` | off | print every action, do nothing destructive |
-| `-Version vX.Y.Z` | `latest` | pin a specific release tag |
-| `-Prefix DIR` | `$env:USERPROFILE\bin` | install dir |
+## Linux periodic jobs
 
-### uninstall.sh / uninstall.ps1
+The service units cover the watcher and the daemon. Health, heartbeat, compact,
+and the weekly digest run from `~/.local/share/activity-mesh/dist/current/health/`
+— schedule them with cron or systemd timers, e.g.:
 
-| flag | default | meaning |
-|---|---|---|
-| `--purge` (sh) / `-Purge` (ps1) | off | also delete state/config; leaves `~/Sync/activity` alone |
-| `--keep-data` (sh) | on | keep state/config (default) |
-| `--dry-run` / `-DryRun` | off | print plan only |
-
-## Idempotency
-
-All scripts are safe to re-run. The bootstrap path:
-- skips `mkdir` if dir exists,
-- overwrites supervisor unit files (template re-render),
-- bootstraps services after `bootout` to pick up the new unit cleanly,
-- never resets config or state.
-
-That makes the same command both *install* and *upgrade*. See `UPGRADE.md`.
-
-## Verification
-
-After running bootstrap, you should see:
-
-```
-[OK] mkdir ~/.local/share/activity-mesh
-[OK] binary installed → /usr/local/bin/activity-log
-[OK] rendered ~/Library/LaunchAgents/com.activity-mesh.watcher.plist
-[OK] launchd bootstrapped com.activity-mesh.watcher
-[OK] rendered ~/Library/LaunchAgents/com.activity-mesh.daemon.plist
-[OK] launchd bootstrapped com.activity-mesh.daemon
-[OK] verification done
-[OK] bootstrap complete on macbook (darwin/arm64)
+```cron
+0 */6 * * *  /bin/bash ~/.local/share/activity-mesh/dist/current/health/master.sh
+0 * * * *    /bin/bash ~/.local/share/activity-mesh/dist/current/health/dead-man-heartbeat.sh
+40 4 1 * *   /usr/local/bin/activity-log compact --keep 90d
+0 6 * * 0    /bin/bash ~/.local/share/activity-mesh/dist/current/health/weekly-digest.sh
 ```
 
-To poke it manually:
+## Upgrades
+
+Re-run the same bootstrap command. Binaries are replaced, a new
+`dist/<version>/` is installed and `current` re-pointed, units are re-rendered
+and re-registered. Config, state, and the sync dir are never reset. Old
+`dist/<version>` directories can be deleted by hand once nothing references them.
+
+## Uninstall
 
 ```bash
-activity-log status
-activity-log emit --kind status --scope bootstrap --summary "manual test"
-activity-log query --hours 24 | head
-launchctl list | grep activity-mesh   # mac
-systemctl --user status activity-mesh-daemon   # linux
-schtasks /Query /TN \activity-mesh\daemon      # windows
+bash installers/uninstall.sh            # units + binaries + dist assets; keeps data
+bash installers/uninstall.sh --purge    # also removes state/config; never touches ~/Sync/activity
+```
+
+```powershell
+pwsh ./installers/uninstall.ps1         # removes activity-log.exe; -Purge for state
 ```
 
 ## Templates
 
-Supervisor unit templates live in `installers/templates/`. They use `{{PLACEHOLDER}}` syntax — the bootstrap scripts do textual substitution. Edit a template if you need a non-default port, working dir, or environment.
+Unit templates live in `installers/templates/` (shipped inside the release
+archive, installed under `dist/<version>/installers/templates/`). Placeholders
+substituted by bootstrap: `{{BIN_PATH}}`, `{{WATCHER_BIN}}`, `{{DAEMON_BIN}}`,
+`{{STORE_DIR}}`, `{{STATE_DIR}}`, `{{SYNC_DIR}}`, `{{CONFIG_DIR}}`,
+`{{TELEGRAM_ENV}}`, `{{ASSETS_DIR}}` (→ `dist/current`), `{{HOME}}`, `{{USER}}`.
+An unresolved placeholder aborts the install.
 
-Placeholders:
-- `{{BIN_PATH}}` — full path to `activity-log` binary (used by daemon unit)
-- `{{WATCHER_BIN}}` — full path to `activity-watcher` binary (used by watcher unit)
-- `{{STATE_DIR}}` — per-host state (`~/.local/share/activity-mesh` or `%LOCALAPPDATA%\activity-mesh`).
-  Exception: the manually-rendered heartbeat template uses it for `ACTIVITY_MESH_STATE`,
-  which must be the *runtime* state dir `~/.local/state/activity-mesh` (see comment in
-  `launchd-heartbeat.plist.tmpl`)
-- `{{CONFIG_DIR}}` — config dir holding `watcher.yaml`
-- `{{SYNC_DIR}}` — Syncthing-replicated source-of-truth
-- `{{LOG_DIR}}` — daemon stdout/stderr path
-- `{{HOME}}` — user home
-- `{{USER}}` — login name (Windows: `DOMAIN\user`)
+## Testing
 
-## When releases don't exist yet
-
-The repo just got created — there are no GitHub releases yet. The scripts fall back to a warning and skip the binary install when the release URL 404s. The dirs and supervisor units are still created, so you can build both binaries locally:
-
-```bash
-go build -o /usr/local/bin/activity-log     ./cmd/activity-log
-go build -o /usr/local/bin/activity-watcher ./cmd/activity-watcher
-# then re-run bootstrap to verify the rest
-```
-
-The `daemon` supervisor unit runs `activity-log daemon` which is part of P3 (still pending in `ROADMAP.md`). Until P3 ships, the daemon unit will fail to start and launchd/systemd will throttle restarts every 30s. This is harmless — the watcher unit and the CLI work independently.
+`make test-install` runs a hermetic end-to-end install: builds the binaries,
+assembles a fake release archive, serves it over local HTTP, and bootstraps
+into a temp `HOME` with `--no-services`, then asserts binaries, assets, units,
+registries, a queryable smoke event, and hard failure on checksum mismatch.
+`make test-archives` (needs goreleaser) asserts real release archive contents
+per platform. Both run in CI.
 
 ## Troubleshooting
 
 ### macOS
-- `launchctl bootstrap` fails → already loaded; the script `bootout`s first, but if your shell is in a weird state, `launchctl kickstart -k gui/$(id -u)/com.activity-mesh.daemon` forces restart.
-- `Operation not permitted` → grant Terminal/iTerm/Claude full-disk-access in System Settings → Privacy & Security.
+- `launchctl bootstrap` fails → `launchctl bootout gui/$(id -u)/com.activity-mesh.<unit>` then re-run bootstrap.
+- `Operation not permitted` → grant your terminal Full Disk Access (System Settings → Privacy & Security).
 
 ### Linux
-- `Failed to enable unit` → ensure `~/.config/systemd/user/` exists and `XDG_RUNTIME_DIR` is set. Re-login.
-- `loginctl enable-linger` denied → run as user; if still denied, your distro disabled lingering. Services will pause when logged out.
+- `Failed to enable unit` → ensure `~/.config/systemd/user/` exists and `XDG_RUNTIME_DIR` is set; re-login.
+- `loginctl enable-linger` denied → services pause when logged out.
 
 ### Windows
-- `Access denied` running schtasks → run PowerShell as user, not Administrator. Per-user tasks shouldn't need elevation.
-- `Cannot run on this system` policy → `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` then re-run.
+- `Cannot run on this system` policy → `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` and re-run.
 
 ## License
 
