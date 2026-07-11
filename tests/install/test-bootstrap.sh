@@ -95,8 +95,11 @@ fi
 if grep -rq "$REPO_ROOT" "$UNITS_DIR"; then
     fail "rendered units reference the repo checkout"
 fi
-grep -rq "dist/current" "$UNITS_DIR" || fail "units do not reference the versioned assets dir"
-pass "units rendered from versioned assets, no checkout references"
+if [ "$OS" = "darwin" ]; then
+    grep -rq "dist/current" "$UNITS_DIR" || fail "health/heartbeat/digest units must reference the versioned assets dir"
+fi
+grep -rq "$PREFIX_DIR" "$UNITS_DIR" || fail "units do not reference the installed binaries"
+pass "units rendered from versioned assets/prefix, no checkout references"
 
 for reg in kinds scopes agents redaction; do
     [ -f "$FAKE_HOME/Sync/activity/$reg.yaml" ] || fail "registry not seeded: $reg.yaml"
