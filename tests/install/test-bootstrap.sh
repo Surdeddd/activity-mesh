@@ -53,7 +53,7 @@ done
 echo "== running bootstrap in hermetic HOME =="
 FAKE_HOME="$WORK/home"
 PREFIX_DIR="$WORK/bin"
-mkdir -p "$FAKE_HOME" "$PREFIX_DIR"
+mkdir -p "$FAKE_HOME"
 set +e
 HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" \
     ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \

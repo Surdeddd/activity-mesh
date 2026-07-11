@@ -58,8 +58,16 @@ ASSETS_ROOT="$STORE_DIR/dist"
 ASSETS_LINK="$ASSETS_ROOT/current"
 TELEGRAM_ENV="${TELEGRAM_ENV:-$CONFIG_DIR/telegram.env}"
 
+ensure_prefix() {
+    [[ -d "$PREFIX" ]] && return 0
+    mkdir -p "$PREFIX" 2>/dev/null && return 0
+    info "elevating: sudo mkdir -p $PREFIX"
+    sudo mkdir -p "$PREFIX" || die "cannot create prefix dir $PREFIX"
+}
+
 install_bin() {
     local src="$1" dest="$2"
+    ensure_prefix
     if [[ ! -w "$(dirname "$dest")" ]]; then
         info "elevating: sudo install -m 0755 $src $dest"
         sudo install -m 0755 "$src" "$dest" || die "install $dest failed"
