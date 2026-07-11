@@ -234,8 +234,15 @@ install_macos_units() {
             continue
         fi
         launchctl bootout "gui/$(id -u)/com.activity-mesh.${unit}" 2>/dev/null || true
-        launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null \
-            || die "launchctl bootstrap failed for com.activity-mesh.${unit}"
+        local booted=0 lc_err=""
+        for _ in 1 2 3; do
+            if lc_err="$(launchctl bootstrap "gui/$(id -u)" "$plist" 2>&1)"; then
+                booted=1
+                break
+            fi
+            sleep 2
+        done
+        [[ $booted -eq 1 ]] || die "launchctl bootstrap failed for com.activity-mesh.${unit}: $lc_err"
         ok "launchd bootstrapped com.activity-mesh.${unit}"
     done
 }
