@@ -1,14 +1,16 @@
 # activity-mesh
 
-> Shared activity log for multi-machine, multi-runtime AI agent setups. Agents see what other agents did — without explicit tool calls, without bloating context, across all OSes.
+> Your second agent session has no idea what the first one just did. activity-mesh gives them a shared activity log they read automatically — no tool calls, no MCP round-trip, ~180 tokens of context.
 
-**Status**: v1 in development. MIT. Single-user / personal-infra focus.
+**Status**: v1 in development. MIT. Local-first, single-user. macOS/Linux first-class; Windows is CLI-only.
 
 ## The problem
 
-Run AI agents across multiple machines and runtimes — Claude Code sessions, custom agents on remote hosts, scheduled bots, CLI tools. Each agent has its own memory: provider auto-memory, project notes, vector stores, wiki-style knowledge bases.
+You open a second terminal. Fresh session, empty memory. It doesn't know you refactored auth in the other window ten minutes ago, or that last night's scheduled agent already fixed that bug. So you re-explain — every time, in every window.
 
-**The gap**: when one agent does something important, other agents don't know. Cross-system awareness is missing. Existing options don't fit personal infra: vendor-locked SaaS (Mem0/Letta/Zep), heavy databases (Postgres), or ad-hoc shared files that drift.
+Memory tools solve *what you know*: state, project notes, embeddings. None of them solve *what just happened, and who did it*. That is a different layer — operational history — and every agent runtime drops it on session exit.
+
+It compounds as you add agents. Different runtimes (Claude Code sessions, custom agents, cron bots, CLI tools), then different machines, each with its own private memory and no way to see the others. Existing options don't fit personal infra: vendor-locked SaaS (Mem0/Letta/Zep), heavy databases (Postgres), or ad-hoc shared files that drift.
 
 ## What it solves
 
@@ -184,17 +186,11 @@ History does not replace state truth. Don't cite activity events as canonical st
 
 ## Platform support
 
-| capability | macOS | Linux | Windows |
-|---|---|---|---|
-| CLI (emit/query/compact/redact-shard/clock-sync) | ✅ | ✅ | ✅ (`activity-log.exe`) |
-| fsnotify capture watcher | ✅ | ✅ | ❌ |
-| HTTP query daemon (`:7459`) | ✅ | ✅ | ❌ |
-| Claude Code hooks (L2/L3) | ✅ | ✅ | ❌ |
-| health checks / heartbeat / weekly digest | ✅ | ✅ (cron/timers) | ❌ |
-| supervisor units via bootstrap | 6 launchd units | 2 systemd units + documented cron | none (CLI-only) |
+macOS and Linux are first-class — capture, injection, daemon, and monitoring all
+run there. Windows is deliberately CLI-only (`activity-log.exe` emits and queries;
+no watcher, daemon, or scheduled tasks).
 
-Windows is deliberately **CLI-only**: the release zip ships `activity-log.exe`
-and the registries; there is no watcher, daemon, or scheduled task support.
+Full capability matrix: [`docs/platforms.md`](docs/platforms.md).
 
 ## Roadmap
 

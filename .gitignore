@@ -41,8 +41,9 @@ logs/
 test-events/
 sample-events/
 
-# Working docs / plans (not shipped)
-docs/
+# Working docs / plans (not shipped) — except docs the README links to
+docs/*
+!docs/platforms.md
 
 # agent working notes (Cline-style memory bank) — never committed
 memory-bank/
