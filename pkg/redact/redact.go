@@ -23,6 +23,10 @@ type rule struct {
 	kind    string
 	re      *regexp.Regexp
 	repType string // short tag used in [REDACTED:<repType>:<len>]
+	// group > 0 redacts only that capture group, leaving the rest of the match
+	// in place — used by context rules like `AUTH_TOKEN=<hex>`, where the name
+	// is the useful part and only the value is the secret.
+	group int
 }
 
 var rules = []*rule{
@@ -81,16 +85,19 @@ var rules = []*rule{
 		re:      regexp.MustCompile(`\b(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}\b`),
 	},
 	{
+		// Open-ended: a capped quantifier redacts the head and leaves the tail of
+		// a longer token in plaintext, below the entropy floor.
 		name:    "slack_token",
 		kind:    "credential",
 		repType: "slack_token",
-		re:      regexp.MustCompile(`xox[abrsp]-[A-Za-z0-9-]{10,72}`),
+		re:      regexp.MustCompile(`xox[abcerspu]-[A-Za-z0-9-]{10,}`),
 	},
 	{
+		// Bot ids have grown past 10 digits.
 		name:    "telegram_bot",
 		kind:    "credential",
 		repType: "telegram_bot",
-		re:      regexp.MustCompile(`\b\d{9,10}:[A-Za-z0-9_\-]{35}\b`),
+		re:      regexp.MustCompile(`\b\d{8,12}:[A-Za-z0-9_\-]{35}\b`),
 	},
 	{
 		name:    "jwt",
@@ -99,16 +106,32 @@ var rules = []*rule{
 		re:      regexp.MustCompile(`eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9._+/=\-]+`),
 	},
 	{
+		// Any armoured PRIVATE KEY header, including the trailing " BLOCK" that
+		// PGP appends — an enumerated prefix list silently misses new variants.
 		name:    "private_key_pem",
 		kind:    "credential",
 		repType: "private_key",
-		re:      regexp.MustCompile(`(?s)-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----.+?-----END[^-]+-----`),
+		re:      regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----.+?-----END[^-]+-----`),
 	},
 	{
+		// Any scheme carrying URL userinfo, not just the three DB schemes:
+		// redis://, amqp:// and https:// basic-auth leak passwords too. Must stay
+		// ahead of the email rule, which otherwise eats the "user:pass@host" tail
+		// and leaves the password prefix on disk.
 		name:    "db_url",
 		kind:    "credential",
 		repType: "db_url",
-		re:      regexp.MustCompile(`(?:postgres|mysql|mongodb)(?:\+srv)?://[^:\s]+:[^@\s]+@[^\s/]+`),
+		re:      regexp.MustCompile(`\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^/\s:@]+:[^\s/@]+@[^\s/]+`),
+	},
+	{
+		// Hex tops out at 4 bits/char, so a hex-encoded secret can never reach the
+		// tier-2 entropy floor. Anchor on the assignment instead: only the value
+		// is redacted, the variable name stays readable.
+		name:    "hex_secret",
+		kind:    "credential",
+		repType: "hex_secret",
+		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key)\s*[:=]\s*["']?([0-9a-fA-F]{32,64})\b`),
+		group:   1,
 	},
 	{
 		name:    "eth_private_key",
@@ -180,6 +203,10 @@ func Apply(input string) (string, []Hit) {
 	var hits []Hit
 
 	for _, r := range rules {
+		if r.group > 0 {
+			out = replaceGroup(out, r, &hits)
+			continue
+		}
 		out = r.re.ReplaceAllStringFunc(out, func(match string) string {
 			hits = append(hits, mkHit(r.kind, r.name, match))
 			return fmt.Sprintf("[REDACTED:%s:%d]", r.repType, len(match))
@@ -201,6 +228,30 @@ func Apply(input string) (string, []Hit) {
 	return out, hits
 }
 
+// replaceGroup redacts only rule.group of every match, keeping the surrounding
+// context (the variable name) intact.
+func replaceGroup(s string, r *rule, hits *[]Hit) string {
+	locs := r.re.FindAllStringSubmatchIndex(s, -1)
+	if len(locs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range locs {
+		lo, hi := m[2*r.group], m[2*r.group+1]
+		if lo < 0 || lo < last {
+			continue
+		}
+		secret := s[lo:hi]
+		*hits = append(*hits, mkHit(r.kind, r.name, secret))
+		b.WriteString(s[last:lo])
+		fmt.Fprintf(&b, "[REDACTED:%s:%d]", r.repType, len(secret))
+		last = hi
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
 func ApplyJSON(v any) (any, []Hit) {
 	var hits []Hit
 	out := walk(v, &hits)
@@ -214,10 +265,26 @@ func walk(v any, hits *[]Hit) any {
 		*hits = append(*hits, h...)
 		return s
 	case map[string]any:
+		// Keys are caller-controlled on the /push path, so a secret used as a map
+		// key would otherwise land on disk verbatim. Build a fresh map: rewriting
+		// keys in place during a range can revisit what we just inserted.
+		out := make(map[string]any, len(t))
 		for k, child := range t {
-			t[k] = walk(child, hits)
+			cleaned := walk(child, hits)
+			key, keyHits := Apply(k)
+			if key != k {
+				*hits = append(*hits, keyHits...)
+			}
+			base := key
+			for i := 1; ; i++ {
+				if _, taken := out[key]; !taken {
+					break
+				}
+				key = fmt.Sprintf("%s#%d", base, i)
+			}
+			out[key] = cleaned
 		}
-		return t
+		return out
 	case []any:
 		for i, child := range t {
 			t[i] = walk(child, hits)
