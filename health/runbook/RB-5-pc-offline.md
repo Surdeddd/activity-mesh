@@ -18,7 +18,9 @@ echo $(( $(date +%s) - mtime )) "seconds since last pc write"
 Three plausible root causes:
 1. **PC powered off / asleep** — wake remotely (Wake-on-LAN if configured) or contact user.
 2. **PC online but Syncthing dead** — ssh / Anydesk in, restart `syncthing.service` or run as user, verify folder paused/resumed cycle.
-3. **PC online but writer dead** — windows: re-register Task Scheduler entry from `installers/templates/taskscheduler-watcher.xml.tmpl`; linux: `systemctl --user restart activity-mesh-watcher.service`.
+3. **Host online but writer dead** — linux: `systemctl --user restart activity-mesh-watcher.service`.
+   Windows is CLI-only: there is no watcher unit to restart, so events come from
+   explicit `activity-log emit` calls and git hooks only.
 
 ## Verification
 - New events appear in `events-pc.jsonl` within 5 minutes of recovery.

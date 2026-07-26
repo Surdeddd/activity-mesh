@@ -23,7 +23,7 @@ diff <(...) <(...)
 3. Refresh the L3 router's `~/.config/activity-mesh/scopes-cache`:
 
    ```sh
-   activity-log refresh-scopes            # or --dry-run to preview
+   activity-log refresh-caches            # or --dry-run to preview
    ```
 
    The cache is generated from the scopes registry (active scopes minus

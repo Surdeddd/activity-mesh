@@ -20,9 +20,19 @@ du -sh ~/.local/share/activity-mesh/index.db*
 ## Recovery
 1. WAL checkpoint truncate (above) — frees `-wal`/`-shm`.
 2. `VACUUM` (offline; daemon must stop): `launchctl stop com.activity-mesh.daemon && sqlite3 .../index.db 'VACUUM;' && launchctl start ...`.
-3. If FTS5 corrupted: drop and rebuild FTS table only — `DROP TABLE events_fts; INSERT INTO events_fts SELECT ... FROM events;`.
-4. Roll over: `mv index.db index.db.old.$(date +%s) && activity-log reindex --rebuild` (rebuilds in seconds from JSONL).
-5. Add archive-cutoff: `activity-log archive --older-than 90d --compress zstd`.
+3. If FTS5 is corrupted: `DROP TABLE events_fts;` and restart the daemon — it
+   recreates the table and repopulates it from `events` on open.
+4. Roll over the whole index (the daemon rebuilds it from the shards):
+   ```sh
+   launchctl stop "gui/$(id -u)/com.activity-mesh.daemon"
+   cd ~/.local/share/activity-mesh
+   mv index.db "index.db.old.$(date +%s)"; rm -f index.db-wal index.db-shm cursors.json
+   launchctl start "gui/$(id -u)/com.activity-mesh.daemon"
+   ```
+   Deleting `cursors.json` is what forces a full replay; an empty DB also resets
+   stale cursors automatically.
+5. Shrink the live shard: `activity-log compact --keep 90d` (writes
+   `<sync>/archive/events-<host>-YYYY-MM.jsonl.gz`; archives are never indexed).
 
 ## Verification
 - Search query "claude session-start" returns < 100ms.

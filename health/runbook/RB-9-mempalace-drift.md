@@ -18,7 +18,12 @@ Likely roots: indexer crashed mid-run, mempalace embed worker offline, archive c
 
 ## Recovery
 1. Pause both writers.
-2. Compute drift: `activity-log ulids --since 30d > /tmp/am.txt; mempalace export --wing activity --since 30d > /tmp/mp.txt; comm -23 /tmp/am.txt /tmp/mp.txt`.
+2. Compute drift (the event ULID is the `id` field):
+   ```sh
+   activity-log query --since 30d --limit 0 --format json | jq -r .id | sort > /tmp/am.txt
+   mempalace export --wing activity --since 30d | sort > /tmp/mp.txt
+   comm -23 /tmp/am.txt /tmp/mp.txt
+   ```
 3. Re-embed missing events: `mempalace mine --source activity --since 30d --resume`.
 4. For redacted entries: `mempalace mine --source activity --redaction-replay`.
 5. Resume writers.

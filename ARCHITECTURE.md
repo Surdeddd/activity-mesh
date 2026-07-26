@@ -290,7 +290,7 @@ There is no client-side "auto-failover" logic, because the primary contract (CLI
 
 ## Recovery runbook
 
-9 procedures in `docs/runbook/`:
+9 procedures in `health/runbook/`:
 - RB-1: activity dir corrupt
 - RB-2: secret leaked into log (urgent)
 - RB-3: Syncthing wholesale failure

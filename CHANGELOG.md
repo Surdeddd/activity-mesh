@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Audit sweep over every subsystem (Go, shell, node) after v0.4.0-rc.1. 46 defects
+found and confirmed; each fix below has a regression test that fails without it.
+
+### Silent data loss (P0)
+- **A shard drained to empty no longer strands its rows in the index.** The
+  reconcile delete marshalled an empty seen-list as `null`, and
+  `ulid NOT IN (SELECT value FROM json_each('null'))` is NULL for every row — so
+  after `compact` archived *every* event, `/recent` and `/search` kept serving
+  events that no longer existed in any shard.
+- **Recursive watcher sources see directories created after startup.** The
+  re-watch sat behind the op/pattern filters, and a new subdir never matches a
+  file pattern like `*/SKILL.md` — so every recursive source silently froze on
+  the tree that existed at boot. New subtrees are now walked (symlinks
+  included), `w.Add` failures are logged and counted, and directories are no
+  longer emitted as events in their own right.
+- **A burst of filesystem changes is coalesced instead of dropped.** A bulk
+  rewrite spawned one `activity-log emit` subprocess per file until the queue
+  overflowed, then discarded the rest silently. Per-source budget + a rollup
+  event carrying the coalesced count.
+- **`compact` is crash-atomic across archive-then-rewrite.** Every archive
+  touched in a run is truncated back to its pre-run size if any step fails, so
+  an interrupted compaction no longer duplicates or corrupts archived history.
+
+### Write path / daemon
+- **`/push` assigns `monotonic_seq`** from the host counter and drops
+  client-supplied `monotonic_seq` / `ts_mono_ns` / `boot_id`.
+- **`/push` is idempotent per ULID** — a retry after a dropped response returns
+  `duplicate: true` instead of appending a second shard line.
+- **`/push` rejects browser-originated writes** (cross-origin `Origin`,
+  `Sec-Fetch-Site`, form content types). Header-less scripted clients are
+  unaffected.
+- **`/push` enforces the registry** (archived scopes, unregistered kinds) and
+  rejects junk-typed optional fields that would make an event undecodable to
+  `activity-log query`.
+- **A failed listener bind is fatal.** The daemon used to log it and keep
+  running with no listener, which no supervisor would ever restart.
+- **Reads no longer queue behind an ingest.** Queries use a separate WAL read
+  pool; a query during a full rescan went from 4.7s to 0.4ms in the regression
+  test.
+- **Unparseable timestamps are skipped, not indexed at epoch 0**, where they
+  were invisible to every time-windowed query. Count exposed as
+  `activity_mesh_skipped_lines_total`.
+- **The index survives its own documented rebuild.** Deleting `index.db` left
+  `cursors.json` behind, which resumed mid-file and left the index permanently
+  empty; a lost `events_fts` is now repopulated on open.
+
+### Redaction
+- PGP `PRIVATE KEY BLOCK` armour is matched (the enumerated prefix list missed it).
+- Slack tokens are matched open-ended — the `{10,72}` cap left a plaintext tail.
+- Telegram bot ids widened to 8–12 digits.
+- `db_url` covers any scheme carrying userinfo (redis, amqp, https basic-auth),
+  not just postgres/mysql/mongodb.
+- New `hex_secret` rule for hex-encoded secrets bound to a secret-ish variable
+  name — hex tops out at 4.0 bits/char and can never reach the entropy floor.
+  Only the value is redacted; bare hashes are untouched.
+- **JSON object keys are redacted**, closing the one path (`/push`) that accepts
+  caller-controlled keys.
+- `registries/redaction.yaml` now documents the tier-2 heuristic and the
+  allowlist, and a parity test fails if it drifts from the compiled pack.
+
+### CLI
+- `~` is expanded and paths absolutised, so a quoted `--sync-dir '~/Sync/...'`
+  no longer creates a literal `./~/Sync/...` the daemon never indexes.
+- `$ACTIVITY_MESH_SYNC` / `$ACTIVITY_MESH_HOME` work without a `config.json`.
+- An unreadable (not absent) registry now fails the emit instead of silently
+  skipping validation — a fail-open gate is not a gate.
+- `install-git-hook` resolves the hooks dir via `git rev-parse --git-path hooks`
+  (worktrees, submodules, `core.hooksPath`), backs up an existing hook, and
+  guarantees the exec bit.
+- `clock-sync` rejects replies from unsynchronised servers (LI=3, stratum ≥ 16).
+- Duplicate scope/agent/kind names in a registry are a loud error instead of
+  last-wins, which could re-open emits to an archived scope.
+- `compact` reports a failed decay-state write instead of discarding it.
+
+### Shell / MCP / docs
+- `bootstrap.sh --local` rebuilds binaries instead of keeping stale ones while
+  re-pointing `dist/current`; builds go to a private temp dir; the smoke step
+  warns on binary/asset version skew.
+- `stat -c %Y` is tried before the BSD form — GNU `stat -f` prints a mount point
+  and exits 0, which silently zeroed the `silence` and `sync-lag` checks on Linux.
+- `dead-man-heartbeat.sh` honours `$ACTIVITY_MESH_BIN` (so `--prefix` installs work).
+- `weekly-digest.sh` reads token telemetry from the state dir, not the dead
+  `/tmp` path that pinned three metrics at zero.
+- `update-session-end-flush.sh` can actually apply — its post-patch sanity check
+  looked for a marker the injected block never contained.
+- `mcp/install.sh` registers via `claude mcp add` (`~/.claude.json`) instead of
+  a path Claude Code never reads, wires Hermes over stdio instead of a
+  non-existent `/mcp` route, and refuses to duplicate a top-level `mcp_servers:` key.
+- MCP server: multi-byte UTF-8 no longer corrupts on chunk boundaries,
+  notifications are not answered, and `today`/`yesterday` are local days.
+- RB-2 (secret leak) and five more runbooks rewritten against the shipped CLI —
+  they referenced `reindex`, `archive`, `ingest`, `ulids` and installer paths
+  that do not exist. A test now fails if docs name a command the binary lacks.
+
 ## [0.4.0-rc.1] — 2026-07-12
 
 Release-candidate hardening: index/redaction consistency, honest reproducible
