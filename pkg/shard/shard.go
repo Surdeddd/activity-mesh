@@ -46,7 +46,9 @@ func AppendLocked(syncDir, host string, line []byte) error {
 	}
 	defer f.Close()
 	buf := make([]byte, 0, len(line)+2)
-	if tail, err := lastByte(target); err == nil && tail != 0 && tail != '\n' {
+	// A NUL last byte is a torn tail, not an empty file — treating the two the
+	// same skipped the separator and glued the next event onto the broken line.
+	if tail, nonEmpty, err := lastByte(target); err == nil && nonEmpty && tail != '\n' {
 		buf = append(buf, '\n')
 	}
 	buf = append(buf, line...)
@@ -57,19 +59,25 @@ func AppendLocked(syncDir, host string, line []byte) error {
 	return f.Sync()
 }
 
-func lastByte(path string) (byte, error) {
+// lastByte reports the file's final byte and whether the file had any content
+// at all — the two must stay distinguishable, since a NUL byte is a legitimate
+// (if corrupt) last byte.
+func lastByte(path string) (b byte, nonEmpty bool, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer f.Close()
 	fi, err := f.Stat()
-	if err != nil || fi.Size() == 0 {
-		return 0, err
+	if err != nil {
+		return 0, false, err
 	}
-	b := make([]byte, 1)
-	if _, err := f.ReadAt(b, fi.Size()-1); err != nil {
-		return 0, err
+	if fi.Size() == 0 {
+		return 0, false, nil
 	}
-	return b[0], nil
+	one := make([]byte, 1)
+	if _, err := f.ReadAt(one, fi.Size()-1); err != nil {
+		return 0, false, err
+	}
+	return one[0], true, nil
 }
