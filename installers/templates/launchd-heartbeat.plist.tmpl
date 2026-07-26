@@ -19,6 +19,11 @@
     <string>{{STATE_DIR}}/heartbeat-cron.err</string>
     <key>EnvironmentVariables</key>
     <dict>
+        <!-- The installed binary honours --prefix, but PATH below is fixed and
+             does not contain the default ~/.local/bin, so the heartbeat has to
+             be told where the binary actually is. -->
+        <key>ACTIVITY_MESH_BIN</key>
+        <string>{{BIN_PATH}}</string>
         <key>ACTIVITY_MESH_STATE</key>
         <string>{{STATE_DIR}}</string>
         <key>ACTIVITY_MESH_SYNC</key>

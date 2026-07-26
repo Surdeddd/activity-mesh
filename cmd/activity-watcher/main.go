@@ -513,7 +513,21 @@ func main() {
 		log.Fatalf("config has no sources")
 	}
 	if *checkOnly {
-		fmt.Fprintf(os.Stderr, "config OK: %d sources, debounce=%s, bin=%s\n", len(cfg.Sources), cfg.Debounce, cfg.ActivityLogBin)
+		// Parsing is not validation: a config whose paths do not exist parses
+		// perfectly and then every source dies at startup. --check is the
+		// preflight, so it has to touch the filesystem.
+		missing := 0
+		for _, src := range cfg.Sources {
+			if _, err := os.Stat(src.Path); err != nil {
+				fmt.Fprintf(os.Stderr, "source %q: path unusable: %v\n", src.Name, err)
+				missing++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "config OK: %d sources (%d with unusable paths), debounce=%s, bin=%s\n",
+			len(cfg.Sources), missing, cfg.Debounce, cfg.ActivityLogBin)
+		if missing > 0 {
+			os.Exit(1)
+		}
 		return
 	}
 

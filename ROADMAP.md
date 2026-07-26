@@ -19,6 +19,10 @@
 - [x] Release archives verified per platform (content tests; Windows is CLI-only)
 - [ ] Soak: 30 days on two hosts with zero silent-red incidents
 - [ ] Conflict-free verified: 1000 concurrent appends from 3 hosts → 0 sync-conflict files
+  - [x] Single-machine half: 1008 racing appends across 3 shards assert exactly-once
+        `monotonic_seq` allocation, no lost or doubled events, one writer per shard file
+        and zero conflict copies (`tests/conflict_free_test.go`)
+  - [ ] Cross-host half: the same run over a real Syncthing folder on 3 hosts
 
 ## v2 — action propagation (separate project, future)
 
