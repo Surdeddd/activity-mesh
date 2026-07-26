@@ -150,15 +150,24 @@ install_local() {
     [[ -f "$root/health/master.sh" ]] || die "--local requires a repo checkout (health/master.sh not found next to installers/)"
     RESOLVED_VERSION="$(tr -d '[:space:]' < "$root/VERSION" 2>/dev/null || echo dev)-local"
     RELEASE_DIR="$(cd "$root" && pwd)"
+    # Private build dir: a predictable /tmp path lets any local user pre-create
+    # the target and have `install_bin` (often sudo) install their binary.
+    local build
+    build="$(mktemp -d "${TMPDIR:-/tmp}/am-bootstrap-build.XXXXXX")" || die "mktemp failed"
+    trap 'rm -rf "$build"' RETURN
+    # Rebuild first, keep-existing only as a fallback. The other order made
+    # --local a no-op for binaries while still re-pointing dist/current and
+    # re-rendering every unit: assets at version N, binaries at N-1, and a green
+    # "bootstrap complete ... version N" banner. bootstrap IS the upgrade path.
     for b in activity-log activity-watcher activity-mesh-daemon; do
-        if [[ -x "$PREFIX/$b" ]]; then
-            ok "binary present → $PREFIX/$b"
-        elif command -v go >/dev/null 2>&1; then
+        if command -v go >/dev/null 2>&1; then
             local src="./cmd/$b"
             [[ "$b" == "activity-mesh-daemon" ]] && src="./server"
             info "building $b from source"
-            (cd "$RELEASE_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$RESOLVED_VERSION" -o "/tmp/am-bootstrap-$b" "$src") || die "go build $b failed"
-            install_bin "/tmp/am-bootstrap-$b" "$PREFIX/$b"
+            (cd "$RELEASE_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$RESOLVED_VERSION" -o "$build/$b" "$src") || die "go build $b failed"
+            install_bin "$build/$b" "$PREFIX/$b"
+        elif [[ -x "$PREFIX/$b" ]]; then
+            warn "no Go toolchain — keeping existing $PREFIX/$b (may be older than $RESOLVED_VERSION)"
         else
             die "$b not in $PREFIX and Go toolchain unavailable"
         fi
@@ -316,6 +325,10 @@ done
 if [[ "$OS" == "darwin" ]]; then install_macos_units; else install_linux_units; fi
 
 "$LOG_BIN" --version || die "installed activity-log does not run"
+# Catch asset/binary skew: dist/current now points at $RESOLVED_VERSION, so a
+# binary reporting anything else means the install left a stale one behind.
+"$LOG_BIN" --version 2>/dev/null | grep -qF -- "$RESOLVED_VERSION" \
+    || warn "binary version differs from installed assets ($RESOLVED_VERSION) — stale binary in $PREFIX?"
 "$LOG_BIN" status || die "activity-log status failed"
 "$LOG_BIN" emit --kind status --scope activity-mesh --summary "installed on $HOST" >/dev/null \
     || die "smoke emit failed"
