@@ -18,7 +18,8 @@ Common: ThrottleInterval rate-limit after rapid crashes; plist bad XML; binary p
 
 ## Recovery
 1. `launchctl bootout gui/$(id -u)/com.activity-mesh.daemon` (full unload).
-2. Fix plist: rerun installer `installers/macos/install.sh` to render template again.
+2. Fix plist: rerun `bash installers/bootstrap.sh --local` to re-render the unit
+   templates from `installers/templates/`.
 3. `plutil -lint` must report OK.
 4. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.activity-mesh.daemon.plist`.
 5. `launchctl kickstart -k gui/$(id -u)/com.activity-mesh.daemon`.

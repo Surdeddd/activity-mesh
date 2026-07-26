@@ -59,7 +59,7 @@ Signature verification is not implemented on Windows — the script says so.
 | `--version vX.Y.Z` | `latest` | pin a release tag |
 | `--prefix DIR` | `/usr/local/bin` | binary install dir |
 | `--no-services` | off | render units but do not register them (tests, containers) |
-| `--local` | off | use the repo checkout as the asset source; build binaries with Go if missing |
+| `--local` | off | use the repo checkout as the asset source and rebuild all three binaries with Go (falls back to the installed binaries only when no toolchain is present) |
 | `--require-signature` | off | fail unless the cosign signature of checksums.txt verifies |
 
 Env overrides: `ACTIVITY_MESH_REPO`, `ACTIVITY_MESH_BASE_URL` (custom download
