@@ -29,6 +29,16 @@ function makeMockBin(scenario = "ok", tsIso, tsIso2) {
   return bin;
 }
 
+// `today`/`yesterday` are local-day windows (a UTC day boundary misfiles the
+// first hours of the local day for every non-UTC user), so fixtures must be
+// anchored to local noon rather than to a UTC calendar date.
+function localNoonIso(daysAgo = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysAgo);
+  d.setHours(12, 0, 0, 0);
+  return d.toISOString();
+}
+
 function rpcCall(env, ...messages) {
   return new Promise((res, rej) => {
     const p = spawn(process.execPath, [SERVER], { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] });
@@ -115,7 +125,7 @@ test("tools/call activity_search filters by query", async () => {
 });
 
 test("tools/call activity_digest groups by scope", async () => {
-  const today = new Date().toISOString().slice(0, 10) + "T10:00:00.000000Z";
+  const today = localNoonIso();
   const bin = makeMockBin("ok", today);
   const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
     { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
@@ -128,7 +138,7 @@ test("tools/call activity_digest groups by scope", async () => {
 });
 
 test("tools/call activity_digest yesterday excludes today", async () => {
-  const today = new Date().toISOString().slice(0, 10) + "T10:00:00.000000Z";
+  const today = localNoonIso();
   const bin = makeMockBin("ok", today);
   const { replies } = await rpcCall({ ACTIVITY_LOG_BIN: bin },
     { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
