@@ -20,6 +20,7 @@ if grep -qF "$MARKER" "$HOOK"; then
 fi
 
 read -r -d '' INJECT <<'EOF' || true
+# activity-mesh: emit session-summary event
 if command -v activity-log >/dev/null 2>&1; then
     SUMMARY_TXT="claude-mac session ${SESSION_ID:-unknown} ended (cwd=${CWD:-?})"
     activity-log emit \

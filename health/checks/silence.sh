@@ -23,7 +23,10 @@ for f in "$SYNC"/events-*.jsonl; do
         pc)       th=86400 ;;   # 24h
         *)        th=43200 ;;   # 12h
     esac
-    mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo "$now")
+    # GNU `stat -f` means "filesystem status" and prints the mount point with
+    # exit 0, so the BSD form must be tried SECOND — otherwise every Linux host
+    # gets a path here and the age arithmetic silently reads zero.
+    mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo "$now")
     age=$(( now - mtime ))
     if [ "$age" -gt "$th" ] && [ "$age" -gt "$worst_age" ]; then
         worst_age=$age; worst_host=$host; worst_threshold=$th; status_overall=fail

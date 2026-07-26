@@ -25,13 +25,16 @@ if command -v curl >/dev/null 2>&1; then
     case "$code" in 200|204) ok=1 ;; esac
 fi
 
+# $ACTIVITY_MESH_BIN first: bootstrap.sh honours --prefix, so a hardcoded list
+# starting at ~/.local/bin silently picks a stale binary (or none) whenever the
+# install went anywhere else — and then the canary never fires.
 find_activity_log() {
     local bin
     for bin in \
+        "${ACTIVITY_MESH_BIN:-}" \
         "$HOME/.local/bin/activity-log" \
         "/usr/local/bin/activity-log" \
-        "$HOME/Projects/activity-mesh/bin/activity-log-darwin-arm64" \
-        "$HOME/Projects/Personal/activity-mesh/bin/activity-log-darwin-arm64" \
+        "/opt/homebrew/bin/activity-log" \
         "$(command -v activity-log 2>/dev/null)"; do
         [ -n "$bin" ] && [ -x "$bin" ] || continue
         echo "$bin"

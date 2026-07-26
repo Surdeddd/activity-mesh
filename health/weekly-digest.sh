@@ -77,7 +77,10 @@ alerts_count=0; heals_count=0
 
 tb_avg=0; tb_n=0
 shopt -s nullglob
-for f in /tmp/activity-tokens-*; do
+# The router writes $ACTIVITY_MESH_STATE/tokens-<session> (hooks/user-prompt-router.sh:28);
+# the old /tmp path has been dead since the state-dir unification, which pinned
+# every token metric in this digest at zero.
+for f in "$STATE"/tokens-*; do
     [ -f "$f" ] || continue
     v=$(cat "$f" 2>/dev/null | tr -d '[:space:]'); case "$v" in ''|*[!0-9]*) continue ;; esac
     tb_avg=$(( tb_avg + v )); tb_n=$(( tb_n + 1 ))

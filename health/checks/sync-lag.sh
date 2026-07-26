@@ -15,7 +15,8 @@ for f in "$SYNC"/events-*.jsonl; do
     [ -f "$f" ] || continue
     base=$(basename "$f" .jsonl); host=${base#events-}
     [ "$host" = "$self_host" ] && continue   # local host has no sync lag
-    mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo "$now")
+    # GNU `stat -f` prints the mount point and exits 0, so BSD form goes second.
+    mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo "$now")
     age=$(( now - mtime ))
     [ "$age" -gt 86400 ] && continue          # not "live" host, skip
     if [ "$age" -gt "$worst_lag" ]; then worst_lag=$age; worst_host=$host; fi
