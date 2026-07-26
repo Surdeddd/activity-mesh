@@ -50,12 +50,20 @@ function ulidToMs(u) {
 function run(bin, args, { timeoutMs = 8000 } = {}) {
   return new Promise((res, rej) => {
     const p = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let out = "", err = "";
+    // Collect Buffers and decode once: `out += d` decodes each chunk on its own,
+    // so a multi-byte character split across a chunk boundary turns into U+FFFD
+    // — Cyrillic summaries are long enough to hit this routinely.
+    const outChunks = [], errChunks = [];
     const t = setTimeout(() => { p.kill("SIGKILL"); rej(new Error(`timeout ${bin} ${args.join(" ")}`)); }, timeoutMs);
-    p.stdout.on("data", d => out += d);
-    p.stderr.on("data", d => err += d);
+    p.stdout.on("data", d => outChunks.push(d));
+    p.stderr.on("data", d => errChunks.push(d));
     p.on("error", e => { clearTimeout(t); rej(e); });
-    p.on("close", code => { clearTimeout(t); code === 0 ? res(out) : rej(new Error(`exit ${code}: ${err.trim()}`)); });
+    p.on("close", code => {
+      clearTimeout(t);
+      const out = Buffer.concat(outChunks).toString("utf8");
+      if (code === 0) return res(out);
+      rej(new Error(`exit ${code}: ${Buffer.concat(errChunks).toString("utf8").trim()}`));
+    });
   });
 }
 
@@ -90,10 +98,14 @@ async function activitySearch({ query, since = "7d", until, limit = 20 } = {}) {
   return out;
 }
 
+// Local-day bounds. "today" and "yesterday" are what the user sees on their own
+// clock: computing them in UTC files the first hours of a local day (or the last,
+// west of Greenwich) into the wrong bucket for every non-UTC user.
 function dayBounds(daysAgo) {
   const now = new Date();
-  const start = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo);
-  return [start, start + 86400000];
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo + 1);
+  return [start.getTime(), end.getTime()];
 }
 
 async function activityDigest({ window = "today", group_by = "scope" } = {}) {
@@ -184,9 +196,13 @@ async function handle(req) {
     if (method === "resources/templates/list") return { jsonrpc: "2.0", id, result: { resourceTemplates: RESOURCE_TEMPLATES } };
     if (method === "resources/read") return { jsonrpc: "2.0", id, result: { contents: [await readResource(params?.uri)] } };
     if (method === "ping") return { jsonrpc: "2.0", id, result: {} };
+    // A JSON-RPC notification has no id and MUST NOT be answered; replying with
+    // `id: undefined` also produces a response object missing a required field.
+    if (id === undefined || id === null) return null;
     return { jsonrpc: "2.0", id, error: { code: -32601, message: `method not found: ${method}` } };
   } catch (e) {
     log("err:", method, e.message);
+    if (id === undefined || id === null) return null;
     return { jsonrpc: "2.0", id, error: { code: -32000, message: e.message } };
   }
 }

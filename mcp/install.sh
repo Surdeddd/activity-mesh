@@ -22,36 +22,48 @@ say() { printf '%s\n' "$*"; }
 plan() { if [[ $DRY_RUN -eq 1 ]]; then say "  [dry-run] $*"; else say "  $*"; fi; }
 
 wire_claude() {
-  local mcp_json="$HOME/.claude/.mcp.json"
-  local settings="$HOME/.claude/settings.json"
-  local target=""
-  if [[ -f "$mcp_json" ]]; then target="$mcp_json"
-  elif [[ -f "$settings" ]]; then target="$settings"
-  else target="$mcp_json"; fi
-  say "Claude Code → $target"
-  local entry
-  entry=$(cat <<JSON
-{
-  "command": "$NODE_BIN",
-  "args": ["$SERVER"]
-}
-JSON
-)
-  if [[ $DRY_RUN -eq 1 ]]; then
-    plan "would add mcpServers.activity-mesh = $entry"
+  # `claude mcp add` is the only supported way to register a user-scoped server:
+  # it writes ~/.claude.json. The old target (~/.claude/.mcp.json, or
+  # mcpServers in ~/.claude/settings.json) is never read by Claude Code, so the
+  # installer used to report success while the tools never appeared.
+  if command -v claude >/dev/null 2>&1; then
+    say "Claude Code → claude mcp add (user scope → ~/.claude.json)"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      plan "would run: claude mcp add activity-mesh --scope user -- $NODE_BIN $SERVER"
+      return
+    fi
+    claude mcp remove activity-mesh --scope user >/dev/null 2>&1 || true
+    if claude mcp add activity-mesh --scope user -- "$NODE_BIN" "$SERVER" >/dev/null 2>&1; then
+      plan "registered activity-mesh via claude mcp add"
+    else
+      say "  WARN: 'claude mcp add' failed — register manually:"
+      say "    claude mcp add activity-mesh --scope user -- $NODE_BIN $SERVER"
+    fi
     return
   fi
-  mkdir -p "$(dirname "$target")"
-  if [[ ! -f "$target" ]]; then echo '{"mcpServers":{}}' > "$target"; fi
-  if command -v jq >/dev/null 2>&1; then
-    local tmp; tmp=$(mktemp)
-    jq --arg cmd "$NODE_BIN" --arg srv "$SERVER" \
+
+  local target="$HOME/.claude.json"
+  say "Claude Code → $target (claude CLI not on PATH)"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    plan "would add mcpServers.activity-mesh to $target"
+    return
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    say "  WARN: neither the claude CLI nor jq is available — register manually:"
+    say "    claude mcp add activity-mesh --scope user -- $NODE_BIN $SERVER"
+    return
+  fi
+  [[ -f "$target" ]] || echo '{}' > "$target"
+  local tmp; tmp=$(mktemp)
+  if jq --arg cmd "$NODE_BIN" --arg srv "$SERVER" \
        '.mcpServers["activity-mesh"] = {command:$cmd, args:[$srv]}' \
-       "$target" > "$tmp" && mv "$tmp" "$target"
+       "$target" > "$tmp"; then
+    mv "$tmp" "$target"
     plan "wrote activity-mesh entry via jq"
   else
-    say "  WARN: jq missing — please add manually to $target:"
-    say "    \"activity-mesh\": $entry"
+    rm -f "$tmp"
+    say "  WARN: could not patch $target — register manually:"
+    say "    claude mcp add activity-mesh --scope user -- $NODE_BIN $SERVER"
   fi
 }
 
@@ -85,22 +97,36 @@ wire_hermes() {
   fi
   say "Hermes → $cfg"
   if [[ $DRY_RUN -eq 1 ]]; then
-    plan "would add mcp_servers.activity-mesh.url = http://localhost:7459/mcp"
+    plan "would add mcp_servers.activity-mesh stdio entry"
     return
   fi
   if grep -q 'activity-mesh:' "$cfg" 2>/dev/null; then
     plan "already present, skipping"
     return
   fi
+  # A blind append duplicates the top-level key when the config already has one,
+  # and most YAML loaders take the last mapping — silently dropping every server
+  # the user had configured.
+  if grep -qE '^mcp_servers:' "$cfg" 2>/dev/null; then
+    say "  WARN: $cfg already has a top-level 'mcp_servers:' — add this entry under it by hand:"
+    say "    activity-mesh:"
+    say "      transport: stdio"
+    say "      command: $NODE_BIN"
+    say "      args: [\"$SERVER\"]"
+    return
+  fi
+  # stdio, like every other client: the daemon exposes /health, /recent,
+  # /search, /digest, /push and /metrics — there is no /mcp route, so the HTTP
+  # entry this used to write 404'd on every call.
   cat >> "$cfg" <<YAML
 
 mcp_servers:
   activity-mesh:
-    transport: http
-    url: http://localhost:7459/mcp
-    note: Hermes uses the HTTP daemon (P3) instead of stdio so the binary stays single-process.
+    transport: stdio
+    command: $NODE_BIN
+    args: ["$SERVER"]
 YAML
-  plan "appended Hermes HTTP entry (assumes daemon on :7459)"
+  plan "appended Hermes stdio entry"
 }
 
 note_openclaw() {

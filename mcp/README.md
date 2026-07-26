@@ -60,8 +60,10 @@ The installer writes:
 - `~/.claude/.mcp.json` (or `~/.claude/settings.json` if it exists) — adds
   `mcpServers["activity-mesh"]`
 - `~/.codex/config.toml` — appends `[mcp_servers.activity-mesh]`
-- `~/.hermes/config.yaml` — appends HTTP MCP entry pointing at the P3 daemon
-  (`http://localhost:7459/mcp`); skipped if Hermes is not installed
+- `~/.hermes/config.yaml` — appends a stdio MCP entry (same server as the other
+  clients); skipped if Hermes is not installed. The daemon serves `/health`,
+  `/recent`, `/search`, `/digest`, `/push` and `/metrics` — it is not an MCP
+  endpoint.
 - For **OpenClaw**, the installer prints an instruction; the project-local
   `mcp-bridge.mjs` must be edited by hand because path varies per project.
 
