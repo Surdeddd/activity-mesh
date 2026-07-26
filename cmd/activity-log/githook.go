@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -45,9 +46,9 @@ func installGitHookCmd() *cobra.Command {
 				}
 				root = strings.TrimSpace(string(out))
 			}
-			hooksDir := filepath.Join(root, ".git", "hooks")
-			if fi, err := os.Stat(filepath.Join(root, ".git")); err != nil || !fi.IsDir() {
-				return fmt.Errorf("%s is not a git repo (no .git dir)", root)
+			hooksDir, err := resolveHooksDir(root)
+			if err != nil {
+				return err
 			}
 			if err := os.MkdirAll(hooksDir, 0o755); err != nil {
 				return err
@@ -66,11 +67,29 @@ func installGitHookCmd() *cobra.Command {
 					return err
 				}
 			} else {
+				// Keep a one-time copy: this rewrites a file the user wrote by hand.
+				backup := hookPath + ".pre-activity-mesh.bak"
+				if _, serr := os.Stat(backup); errors.Is(serr, os.ErrNotExist) {
+					if err := os.WriteFile(backup, existing, 0o644); err != nil {
+						return fmt.Errorf("back up existing hook: %w", err)
+					}
+					fmt.Printf("backed up existing hook → %s\n", backup)
+				}
 				snippet := "\n# --- activity-mesh (appended) ---\n" +
 					strings.TrimPrefix(postCommitHook, "#!/bin/sh\n")
 				merged := append(existing, []byte(snippet)...)
 				if err := os.WriteFile(hookPath, merged, 0o755); err != nil {
 					return err
+				}
+				if bytes.Contains(existing, []byte("\nexit ")) {
+					fmt.Fprintln(os.Stderr, "warn: the existing hook contains an `exit` — the appended snippet may never run; move it up by hand")
+				}
+			}
+			// os.WriteFile ignores the mode for a file that already existed, so a
+			// hand-made 0644 hook would stay silently inert after the append.
+			if fi, serr := os.Stat(hookPath); serr == nil && fi.Mode()&0o111 == 0 {
+				if err := os.Chmod(hookPath, fi.Mode()|0o755); err != nil {
+					return fmt.Errorf("make hook executable: %w", err)
 				}
 			}
 			fmt.Printf("installed activity-mesh post-commit hook → %s\n", hookPath)
@@ -79,4 +98,26 @@ func installGitHookCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&repo, "repo", "", "target repo path (default: current repo)")
 	return cmd
+}
+
+// resolveHooksDir asks git where hooks actually live. Hardcoding <root>/.git/hooks
+// hard-fails in worktrees and submodules (.git is a file there) and silently
+// no-ops when core.hooksPath is set — husky and lefthook both set it, and the
+// command would report success while git never reads the file it wrote.
+func resolveHooksDir(root string) (string, error) {
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--git-path", "hooks").Output()
+	if err != nil {
+		if fi, serr := os.Stat(filepath.Join(root, ".git")); serr != nil || !fi.IsDir() {
+			return "", fmt.Errorf("%s is not a git repo (git rev-parse failed: %v)", root, err)
+		}
+		return filepath.Join(root, ".git", "hooks"), nil
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		return filepath.Join(root, ".git", "hooks"), nil
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(root, dir)
+	}
+	return dir, nil
 }

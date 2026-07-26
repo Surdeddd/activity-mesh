@@ -43,8 +43,15 @@ func parseSNTPOffset(req, resp []byte, t1, t4 time.Time) (time.Duration, error) 
 	if mode := resp[0] & 0x07; mode != 4 && mode != 5 {
 		return 0, fmt.Errorf("not a server reply (mode %d)", mode)
 	}
+	// A server that says it is itself unsynchronised must not be trusted: its
+	// offset would be cached and stamped onto every event this host emits.
+	if li := resp[0] >> 6; li == 3 {
+		return 0, fmt.Errorf("server clock unsynchronised (LI=3)")
+	}
 	if stratum := resp[1]; stratum == 0 {
 		return 0, fmt.Errorf("kiss-of-death reply (stratum 0)")
+	} else if stratum >= 16 {
+		return 0, fmt.Errorf("server unsynchronised (stratum %d)", stratum)
 	}
 	if string(resp[24:32]) != string(req[40:48]) {
 		return 0, fmt.Errorf("originate timestamp mismatch (stale or spoofed reply)")
