@@ -15,9 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/Surdeddd/activity-mesh/pkg/event"
 )
 
 type Event struct {
@@ -42,15 +45,27 @@ type QueryFilter struct {
 	Kind     string
 	Priority string
 	Host     string
+	ULID     string
 	Limit    int
 }
 
 type Index struct {
-	db      *sql.DB
+	db *sql.DB // single-connection writer; serialises ingest
+	// rdb is a separate read pool. The writer holds one connection for the whole
+	// duration of a full rescan, so sharing it made every /recent and /search
+	// queue behind the ingest — long past the daemon's 15s ReadTimeout on a
+	// large shard. WAL gives readers a consistent snapshot without blocking.
+	rdb     *sql.DB
 	path    string
 	mu      sync.Mutex
 	cursors string
+	// skipped counts shard lines dropped during ingest (unparseable ts) so the
+	// divergence is visible in /metrics instead of silently shrinking the index.
+	skipped atomic.Uint64
 }
+
+// SkippedLines reports how many shard lines this process refused to index.
+func (i *Index) SkippedLines() uint64 { return i.skipped.Load() }
 
 func NewIndex(dbPath string) (*Index, error) {
 	if dbPath == "" {
@@ -74,10 +89,85 @@ func NewIndex(dbPath string) (*Index, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := idx.reconcileWithCursors(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	// Opened after the schema exists so readers never race the initial CREATE.
+	rdb, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite (read pool): %w", err)
+	}
+	rdb.SetMaxOpenConns(4)
+	if err := rdb.Ping(); err != nil {
+		_ = rdb.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("ping (read pool): %w", err)
+	}
+	idx.rdb = rdb
 	return idx, nil
 }
 
-func (i *Index) Close() error { return i.db.Close() }
+// reconcileWithCursors repairs the two ways the DB and its sidecar state can
+// disagree after an out-of-band repair (the runbook's "delete index.db and let
+// it rebuild"): stale cursors that would skip every line of an empty DB, and an
+// events_fts that lost its rows while events kept theirs.
+func (i *Index) reconcileWithCursors() error {
+	var events int64
+	if err := i.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&events); err != nil {
+		return err
+	}
+	if events == 0 {
+		// cursors.json outlived the DB — honouring it would resume mid-file and
+		// leave the index permanently empty.
+		c, err := i.loadCursors()
+		if err == nil && len(c.Files) > 0 {
+			if err := i.saveCursors(cursorFile{V: cursorVersion, Files: map[string]cursorEntry{}}); err != nil {
+				return fmt.Errorf("reset stale cursors: %w", err)
+			}
+		}
+		return nil
+	}
+	// Count via the docsize shadow table: text_content is trigger-computed and
+	// absent from the content table, so any scan of events_fts itself errors.
+	var fts int64
+	if err := i.db.QueryRow(`SELECT COUNT(*) FROM events_fts_docsize`).Scan(&fts); err != nil {
+		return err
+	}
+	if fts == 0 {
+		// The FTS table was dropped/emptied while events survived, so /search
+		// would answer 0 hits with no error. Repopulate explicitly: FTS5's own
+		// 'rebuild' cannot be used here because text_content is a trigger-computed
+		// column that does not exist on the content table.
+		if _, err := i.db.Exec(ftsRepopulateSQL); err != nil {
+			return fmt.Errorf("rebuild fts: %w", err)
+		}
+	}
+	return nil
+}
+
+const ftsRepopulateSQL = `INSERT INTO events_fts(rowid, text_content)
+SELECT id,
+  COALESCE(json_extract(payload, '$.summary'), '') || ' ' ||
+  COALESCE(agent, '') || ' ' || COALESCE(scope, '')
+FROM events`
+
+func (i *Index) Close() error {
+	if i.rdb != nil {
+		_ = i.rdb.Close()
+	}
+	return i.db.Close()
+}
+
+// reader returns the pool reads should use. Falls back to the writer when the
+// read pool is not up yet (during NewIndex's own reconcile pass).
+func (i *Index) reader() *sql.DB {
+	if i.rdb != nil {
+		return i.rdb
+	}
+	return i.db
+}
 
 func (i *Index) Path() string { return i.path }
 
@@ -145,11 +235,11 @@ type Stats struct {
 
 func (i *Index) Stats() (Stats, error) {
 	var s Stats
-	row := i.db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(ulid), '') FROM events`)
+	row := i.reader().QueryRow(`SELECT COUNT(*), COALESCE(MAX(ulid), '') FROM events`)
 	if err := row.Scan(&s.TotalEvents, &s.LastIndexedULID); err != nil {
 		return s, err
 	}
-	rows, err := i.db.Query(`SELECT DISTINCT host FROM events ORDER BY host`)
+	rows, err := i.reader().Query(`SELECT DISTINCT host FROM events ORDER BY host`)
 	if err != nil {
 		return s, err
 	}
@@ -280,9 +370,13 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 	}
 	defer stmt.Close()
 
-	var seen []string
+	// Non-nil: a shard that drained to zero events must marshal to `[]`, not
+	// `null` — `ulid NOT IN (SELECT value FROM json_each('null'))` is NULL for
+	// every row, so the reconcile below would delete nothing and the index would
+	// keep serving events `compact` already moved into the archive.
+	seen := []string{}
 	r := bufio.NewReaderSize(f, 256<<10)
-	count, offset := 0, startAt
+	count, skipped, offset := 0, uint64(0), startAt
 	for {
 		line, rerr := r.ReadBytes('\n')
 		if rerr == io.EOF {
@@ -308,7 +402,13 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 		if ulid == "" || ts == "" || host == "" {
 			continue
 		}
-		tsUnix, _ := parseTimeUnix(ts)
+		tsUnix, terr := parseTimeUnix(ts)
+		if terr != nil {
+			// An unparseable ts would be indexed at epoch 0 and vanish from every
+			// time-windowed query. Skip it like any other malformed line.
+			skipped++
+			continue
+		}
 		agent, _ := raw["agent"].(string)
 		scope, _ := raw["scope"].(string)
 		kind, _ := raw["kind"].(string)
@@ -342,6 +442,7 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 	if err := i.saveCursors(cursors); err != nil {
 		return count, fmt.Errorf("save cursors: %w", err)
 	}
+	i.skipped.Add(skipped)
 	return count, nil
 }
 
@@ -371,35 +472,55 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	defer i.mu.Unlock()
 	rows, err := i.db.Query(`SELECT DISTINCT raw_jsonl_path FROM events`)
 	if err != nil {
-		return total, nil //nolint:nilerr
+		return total, fmt.Errorf("sweep: list indexed paths: %w", err)
 	}
 	var vanished []string
 	for rows.Next() {
 		var p string
-		if rows.Scan(&p) == nil && filepath.Dir(p) == absDir && !known[p] {
+		if err := rows.Scan(&p); err != nil {
+			_ = rows.Close()
+			return total, fmt.Errorf("sweep: scan path: %w", err)
+		}
+		// `known` is a snapshot of the glob taken before the ingest loop; a shard
+		// created (and indexed by the watcher) since then is absent from it, so
+		// confirm the file is really gone before dropping its rows.
+		if filepath.Dir(p) == absDir && !known[p] && !fileExists(p) {
 			vanished = append(vanished, p)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return total, fmt.Errorf("sweep: iterate paths: %w", err)
+	}
 	_ = rows.Close()
 	for _, p := range vanished {
-		_, _ = i.db.Exec(`DELETE FROM events WHERE raw_jsonl_path = ?`, p)
+		if _, err := i.db.Exec(`DELETE FROM events WHERE raw_jsonl_path = ?`, p); err != nil {
+			return total, fmt.Errorf("sweep: delete rows for %s: %w", p, err)
+		}
 	}
 
 	cursors, err := i.loadCursors()
 	if err != nil {
-		return total, nil //nolint:nilerr
+		return total, fmt.Errorf("sweep: load cursors: %w", err)
 	}
 	dirty := false
 	for path := range cursors.Files {
-		if filepath.Dir(path) == absDir && !known[path] {
+		if filepath.Dir(path) == absDir && !known[path] && !fileExists(path) {
 			delete(cursors.Files, path)
 			dirty = true
 		}
 	}
 	if dirty {
-		_ = i.saveCursors(cursors)
+		if err := i.saveCursors(cursors); err != nil {
+			return total, fmt.Errorf("sweep: save cursors: %w", err)
+		}
 	}
 	return total, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (i *Index) Query(f QueryFilter) ([]Event, error) {
@@ -440,12 +561,16 @@ func (i *Index) QueryContext(ctx context.Context, f QueryFilter) ([]Event, error
 		sb.WriteString(` AND host = ?`)
 		args = append(args, f.Host)
 	}
+	if f.ULID != "" {
+		sb.WriteString(` AND ulid = ?`)
+		args = append(args, f.ULID)
+	}
 	sb.WriteString(` ORDER BY ts_unix DESC`)
 	if f.Limit > 0 {
 		sb.WriteString(` LIMIT ?`)
 		args = append(args, f.Limit)
 	}
-	rows, err := i.db.QueryContext(ctx, sb.String(), args...)
+	rows, err := i.reader().QueryContext(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +599,7 @@ WHERE events_fts MATCH ?`)
 	}
 	sb.WriteString(` ORDER BY bm25(events_fts) ASC LIMIT ?`)
 	args = append(args, limit)
-	rows, err := i.db.Query(sb.String(), args...)
+	rows, err := i.reader().Query(sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +623,7 @@ func (i *Index) Aggregate(by, window string) (map[string]int, error) {
 		args = append(args, until.Unix())
 	}
 	q += fmt.Sprintf(` GROUP BY %s ORDER BY 2 DESC`, col)
-	rows, err := i.db.Query(q, args...)
+	rows, err := i.reader().Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -542,17 +667,14 @@ func windowRange(window string) (time.Time, time.Time, error) {
 	return time.Time{}, time.Time{}, fmt.Errorf("unknown window %q", window)
 }
 
+// parseTimeUnix shares the canonical layout list with emit/compact/query —
+// a private copy here is how "ts" formats silently drift apart.
 func parseTimeUnix(ts string) (int64, error) {
-	for _, layout := range []string{
-		"2006-01-02T15:04:05.000000Z",
-		time.RFC3339Nano,
-		time.RFC3339,
-	} {
-		if t, err := time.Parse(layout, ts); err == nil {
-			return t.Unix(), nil
-		}
+	t, err := event.ParseTS(ts)
+	if err != nil {
+		return 0, err
 	}
-	return 0, fmt.Errorf("parse ts %q", ts)
+	return t.Unix(), nil
 }
 
 func sanitizeFTS(q string) string {
