@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"github.com/Surdeddd/activity-mesh/pkg/event"
 	"github.com/Surdeddd/activity-mesh/pkg/index"
 	"github.com/Surdeddd/activity-mesh/pkg/redact"
+	"github.com/Surdeddd/activity-mesh/pkg/registry"
 	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
@@ -120,12 +122,20 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
+	// Bind before announcing: ListenAndServe's failure used to be logged and
+	// swallowed, leaving a live process with no listener that no supervisor
+	// would ever restart (port already held by a stale daemon is the common one).
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		log.Fatalf("listen %s: %v", srv.Addr, err)
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, srv.Addr, syncDir, stateDir)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, ln.Addr(), syncDir, stateDir)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("server error: %v", err)
+			cancel() // a dead listener must take the process down, not run headless
 		}
 	}()
 	<-ctx.Done()
@@ -329,9 +339,46 @@ const maxPushBody = 64 * 1024
 
 var labelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
+// crossSiteWrite reports why a write looks like it came from a page the user
+// merely visited, or "" when it does not. The daemon is unauthenticated by
+// design (loopback, single user), which leaves any browser on the machine able
+// to POST to it — and a forged event is later injected into an agent's context
+// verbatim. The checks below are the ones a browser cannot forge, while a
+// header-less CLI client (curl, a hook script) still passes untouched.
+func crossSiteWrite(r *http.Request) string {
+	// Browsers attach Origin to every cross-origin POST, including the no-cors
+	// "simple request" that needs no preflight. `null` covers sandboxed frames.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if origin == "null" {
+			return "cross-origin write rejected"
+		}
+		if u, err := url.Parse(origin); err != nil || u.Host != r.Host {
+			return "cross-origin write rejected"
+		}
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+	default:
+		return "cross-site write rejected"
+	}
+	// The only three content types a form or no-cors fetch can produce. Sending
+	// no Content-Type at all stays allowed so existing scripted clients keep
+	// working; a browser cannot omit it.
+	ct, _, _ := strings.Cut(r.Header.Get("Content-Type"), ";")
+	switch strings.TrimSpace(strings.ToLower(ct)) {
+	case "text/plain", "application/x-www-form-urlencoded", "multipart/form-data":
+		return "form-encoded write rejected — send application/json"
+	}
+	return ""
+}
+
 func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+	if reason := crossSiteWrite(r); reason != "" {
+		writeErr(w, http.StatusForbidden, reason)
 		return
 	}
 	d.m.pushes.Add(1)
@@ -387,20 +434,64 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "priority must be P0..P3")
 		return
 	}
+	// The registry gate is a write-path rule, not a CLI rule: without this an
+	// archived scope stays writable over HTTP.
+	if warn, rerr := registry.EnforceEmit(d.syncDir, kind, scope); rerr != nil {
+		writeErr(w, http.StatusBadRequest, rerr.Error())
+		return
+	} else if warn != "" {
+		log.Printf("push: %s", warn)
+	}
+	// Optional fields carry declared types. A junk-typed one still round-trips
+	// into the shard, where `activity-log query` cannot unmarshal the line and
+	// silently drops the event — visible to the daemon, invisible to the CLI.
+	if bad := badlyTypedFields(p); bad != "" {
+		writeErr(w, http.StatusBadRequest, bad)
+		return
+	}
 	summary, truncated := event.NormalizeSummary(str("summary"))
 	p["summary"] = summary
 	if truncated {
 		p["truncated"] = true
 	}
-	cleaned, hits := redact.ApplyJSON(p)
-	line, err := json.Marshal(cleaned)
+	// Ordering metadata belongs to this host's writer, not to the client: a
+	// pushed monotonic_seq of 999999 would sort ahead of every subsequent CLI
+	// emit forever.
+	for _, k := range []string{"monotonic_seq", "ts_mono_ns", "boot_id"} {
+		delete(p, k)
+	}
+
+	// Retries after a dropped response used to append a second line with the same
+	// ULID: the CLI (which reads the shard) then double-counts what the index
+	// (keyed by ULID) shows once.
+	if seen, err := d.alreadyIndexed(r.Context(), id); err != nil {
+		d.m.errors.Add(1)
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if seen {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "duplicate": true})
+		return
+	}
+
+	lock, err := event.AcquireHostLock(d.stateDir, host)
 	if err != nil {
 		d.m.errors.Add(1)
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	lock, err := event.AcquireHostLock(d.stateDir, host)
+	seq, seqErr := lock.NextSeq()
+	if seqErr != nil {
+		_ = lock.Release()
+		d.m.errors.Add(1)
+		writeErr(w, http.StatusInternalServerError, seqErr.Error())
+		return
+	}
+	p["monotonic_seq"] = seq
+
+	cleaned, hits := redact.ApplyJSON(p)
+	line, err := json.Marshal(cleaned)
 	if err != nil {
+		_ = lock.Release()
 		d.m.errors.Add(1)
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -422,11 +513,72 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	} else {
 		d.m.ingested.Add(uint64(n))
 	}
-	resp := map[string]any{"ok": true, "id": id, "priority": str("priority")}
+	resp := map[string]any{"ok": true, "id": id, "priority": str("priority"), "monotonic_seq": seq}
 	if truncated {
 		resp["truncated"] = true
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// badlyTypedFields returns a message naming the first optional field whose JSON
+// type does not match the event schema, or "" when the payload is consistent
+// with it. Every field listed here is one `activity-log query` unmarshals into
+// a typed struct field, so a mismatch makes the whole line undecodable.
+func badlyTypedFields(p map[string]any) string {
+	isString := func(v any) bool { _, ok := v.(string); return ok }
+	isNumber := func(v any) bool { _, ok := v.(float64); return ok }
+	isBool := func(v any) bool { _, ok := v.(bool); return ok }
+	isStringSlice := func(v any) bool {
+		arr, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		for _, e := range arr {
+			if _, ok := e.(string); !ok {
+				return false
+			}
+		}
+		return true
+	}
+	checks := []struct {
+		key  string
+		ok   func(any) bool
+		want string
+	}{
+		{"ref", isString, "string"},
+		{"session_id", isString, "string"},
+		{"parent_id", isString, "string"},
+		{"caused_by", isString, "string"},
+		{"actor", isString, "string"},
+		{"originator", isString, "string"},
+		{"tags", isStringSlice, "array of strings"},
+		{"files", isStringSlice, "array of strings"},
+		{"duration_ms", isNumber, "number"},
+		{"exit_code", isNumber, "number"},
+		{"clock_offset_ms", isNumber, "number"},
+		{"truncated", isBool, "boolean"},
+	}
+	for _, c := range checks {
+		v, present := p[c.key]
+		if !present || v == nil {
+			continue
+		}
+		if !c.ok(v) {
+			return fmt.Sprintf("field %q must be a %s", c.key, c.want)
+		}
+	}
+	return ""
+}
+
+// alreadyIndexed reports whether this ULID is already in the index — the cheap
+// half of push idempotency. A ULID present only in the shard but not yet
+// ingested still slips through, which is why /push re-ingests synchronously.
+func (d *daemon) alreadyIndexed(ctx context.Context, id string) (bool, error) {
+	events, err := d.idx.QueryContext(ctx, index.QueryFilter{Limit: 1, ULID: id})
+	if err != nil {
+		return false, err
+	}
+	return len(events) > 0, nil
 }
 
 func (d *daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
@@ -445,6 +597,7 @@ func (d *daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	c("activity_mesh_errors_total", d.m.errors.Load())
 	c("activity_mesh_ingested_events_total", d.m.ingested.Load())
 	c("activity_mesh_uptime_seconds", uint64(time.Since(d.m.startedAt).Seconds()))
+	c("activity_mesh_skipped_lines_total", d.idx.SkippedLines())
 	fmt.Fprintf(w, "# TYPE activity_mesh_indexed_events gauge\nactivity_mesh_indexed_events %d\n", stats.TotalEvents)
 }
 
