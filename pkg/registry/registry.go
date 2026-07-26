@@ -87,6 +87,8 @@ type RedactionPattern struct {
 	Kind        string `yaml:"kind,omitempty"`
 	Regex       string `yaml:"regex"`
 	Replacement string `yaml:"replacement,omitempty"`
+	// Group > 0 documents that only that capture group of the match is redacted.
+	Group int `yaml:"group,omitempty"`
 }
 
 type Registry struct {
@@ -188,19 +190,42 @@ func (r *Registry) validate() error {
 	if r.Redaction.SchemaVersion != 0 && r.Redaction.SchemaVersion != supportedSchemaVersion {
 		return fmt.Errorf("redaction: unsupported schema_version %d", r.Redaction.SchemaVersion)
 	}
+	// Duplicates used to resolve last-wins, so appending an `active` entry for a
+	// name already archived (a plausible two-host merge artifact in the synced
+	// scopes.yaml) silently re-opened emits to it. Fail loudly instead.
+	seenScope := map[string]bool{}
 	for _, s := range r.Scopes.Scopes {
 		if !validStatus(s.Status) {
 			return fmt.Errorf("scope %q: invalid status %q", s.Name, s.Status)
 		}
+		if seenScope[s.Name] {
+			return fmt.Errorf("scope %q is declared more than once — resolve the duplicate", s.Name)
+		}
+		seenScope[s.Name] = true
 	}
+	seenAgent := map[string]bool{}
 	for _, a := range r.Agents.Agents {
 		if !validStatus(a.Status) {
 			return fmt.Errorf("agent %q: invalid status %q", a.ID, a.Status)
 		}
+		if seenAgent[a.ID] {
+			return fmt.Errorf("agent %q is declared more than once — resolve the duplicate", a.ID)
+		}
+		seenAgent[a.ID] = true
 	}
+	seenKind := map[string]bool{}
 	for _, k := range r.Kinds.Core {
 		if !validSeverity(k.SeverityDefault) {
 			return fmt.Errorf("kind %q: invalid severity_default %q", k.Name, k.SeverityDefault)
+		}
+		if seenKind[k.Name] {
+			return fmt.Errorf("kind %q is declared more than once — resolve the duplicate", k.Name)
+		}
+		seenKind[k.Name] = true
+	}
+	for ek := range r.Kinds.Extensions {
+		if seenKind[ek] {
+			return fmt.Errorf("kind %q is declared both as core and as an extension", ek)
 		}
 	}
 	for ek, em := range r.Kinds.Extensions {
@@ -345,6 +370,55 @@ func validSeverity(s string) bool {
 	return false
 }
 
-var errMissing = errors.New("registry file missing")
+// EnforceEmit validates kind and scope against the registries published in
+// syncDir. A registry that is absent means validation is simply off; a registry
+// that exists but cannot be read or parsed is an error, never a silent skip —
+// a gate that fails open is not a gate. warn carries a non-fatal notice (a
+// deprecated scope) that the caller should surface.
+//
+// Both write paths share this: emit enforced it while /push did not, so an
+// archived scope stayed writable over HTTP.
+func EnforceEmit(syncDir, kind, scope string) (warn string, err error) {
+	buf, present, err := readIfPresent(filepath.Join(syncDir, "kinds.yaml"))
+	if err != nil {
+		return "", err
+	}
+	if present {
+		reg, lerr := LoadFromBytes(buf, nil, nil, nil)
+		if lerr != nil {
+			return "", fmt.Errorf("kinds.yaml is present but invalid: %w", lerr)
+		}
+		// Namespaced org/name extensions are always allowed.
+		if !reg.IsValidKind(kind) && !strings.Contains(kind, "/") {
+			return "", fmt.Errorf("kind %q is not in the kinds registry (namespaced org/name extensions are always allowed)", kind)
+		}
+	}
+	buf, present, err = readIfPresent(filepath.Join(syncDir, "scopes.yaml"))
+	if err != nil {
+		return "", err
+	}
+	if present {
+		reg, lerr := LoadFromBytes(nil, buf, nil, nil)
+		if lerr != nil {
+			return "", fmt.Errorf("scopes.yaml is present but invalid: %w", lerr)
+		}
+		allowed, msg := reg.CanEmitToScope(scope)
+		if !allowed {
+			return "", fmt.Errorf("scope %q refuses new events: %s", scope, msg)
+		}
+		return msg, nil
+	}
+	return "", nil
+}
 
-func MissingFileError() error { return errMissing }
+func readIfPresent(path string) ([]byte, bool, error) {
+	buf, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		return buf, true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("%s exists but is unreadable: %w", filepath.Base(path), err)
+	}
+}
