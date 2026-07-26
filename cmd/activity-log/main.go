@@ -60,7 +60,50 @@ type config struct {
 	StoreDir string `json:"store_dir"`
 }
 
+// envDir reads a path override from the environment. The CLI resolves paths
+// flag > env > config.json > default, matching the daemon's pick() — otherwise
+// setting ACTIVITY_MESH_SYNC would silently point the two at different dirs.
+func envDir(name string) string {
+	return normalizeDirBestEffort(strings.TrimSpace(os.Getenv(name)))
+}
+
+// normalizeDir expands a leading `~` and absolutises the path. Without it a
+// `--sync-dir '~/Sync/activity'` (quoted, so the shell never expanded it) or any
+// relative path creates a literal `./~/Sync/activity` next to the caller's cwd —
+// events land in a shard nothing else ever reads.
+func normalizeDir(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", nil
+	}
+	if p == "~" || (len(p) > 1 && p[0] == '~' && os.IsPathSeparator(p[1])) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand %q: %w", p, err)
+		}
+		p = filepath.Join(home, p[1:])
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("absolutise %q: %w", p, err)
+	}
+	return abs, nil
+}
+
+// normalizeDirBestEffort keeps the original value when expansion fails, so a
+// broken $HOME degrades into today's behaviour instead of an empty override.
+func normalizeDirBestEffort(p string) string {
+	out, err := normalizeDir(p)
+	if err != nil || out == "" {
+		return p
+	}
+	return out
+}
+
 func defaultConfigPath() (string, error) {
+	if dir := envDir("ACTIVITY_MESH_HOME"); dir != "" {
+		return filepath.Join(dir, "config.json"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -77,19 +120,36 @@ func loadConfig() (*config, error) {
 		}
 		path = p
 	}
+	var c config
 	buf, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("not initialised — run `activity-log init` first (looked at %s)", path)
+	missing := errors.Is(err, os.ErrNotExist)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(buf, &c); err != nil {
+			return nil, fmt.Errorf("config json: %w", err)
 		}
+	case !missing:
 		return nil, err
 	}
-	var c config
-	if err := json.Unmarshal(buf, &c); err != nil {
-		return nil, fmt.Errorf("config json: %w", err)
+	// env beats the file, and can stand in for it entirely — otherwise a fully
+	// env-configured invocation (sandboxes, tests, per-host units) is impossible.
+	if dir := envDir("ACTIVITY_MESH_SYNC"); dir != "" {
+		c.SyncDir = dir
+	}
+	if dir := envDir("ACTIVITY_MESH_HOME"); dir != "" {
+		c.StoreDir = dir
 	}
 	if c.SyncDir == "" || c.StoreDir == "" {
+		if missing {
+			return nil, fmt.Errorf("not initialised — run `activity-log init` first (looked at %s), or set $ACTIVITY_MESH_SYNC and $ACTIVITY_MESH_HOME", path)
+		}
 		return nil, errors.New("config missing sync_dir / store_dir")
+	}
+	if c.SyncDir, err = normalizeDir(c.SyncDir); err != nil {
+		return nil, err
+	}
+	if c.StoreDir, err = normalizeDir(c.StoreDir); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }
@@ -112,11 +172,19 @@ func initCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Bootstrap state dir, seq counter, and config.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			home, err := os.UserHomeDir()
+			home, homeErr := os.UserHomeDir()
+
+			storeDirVal := envDir("ACTIVITY_MESH_HOME")
+			if storeDirVal == "" {
+				if homeErr != nil {
+					return fmt.Errorf("cannot resolve state dir (no $ACTIVITY_MESH_HOME and no home dir): %w", homeErr)
+				}
+				storeDirVal = filepath.Join(home, defaultStateDir)
+			}
+			storeDirVal, err := normalizeDir(storeDirVal)
 			if err != nil {
 				return err
 			}
-			storeDirVal := filepath.Join(home, defaultStateDir)
 			if err := os.MkdirAll(storeDirVal, 0o755); err != nil {
 				return err
 			}
@@ -124,18 +192,31 @@ func initCmd() *cobra.Command {
 				return err
 			}
 
+			// An explicit --sync-dir or $ACTIVITY_MESH_SYNC also suppresses the
+			// prompt: init must never fall back to the real ~/Sync when the
+			// caller has already said where the shard lives.
 			syncDirVal := customSync
 			if syncDirVal == "" {
+				syncDirVal = envDir("ACTIVITY_MESH_SYNC")
+			}
+			if syncDirVal == "" {
+				if homeErr != nil {
+					return fmt.Errorf("cannot resolve sync dir (no --sync-dir, no $ACTIVITY_MESH_SYNC and no home dir): %w", homeErr)
+				}
 				syncDirVal = filepath.Join(home, defaultSyncDir)
 				if !nonInteractive && isTerminal(os.Stdin) {
-					fmt.Printf("Sync directory [%s]: ", syncDirVal)
+					// Prompt on stderr: stdout is the machine-readable channel, and
+					// `init < /dev/null` still looks like a char device here.
+					fmt.Fprintf(os.Stderr, "Sync directory [%s]: ", syncDirVal)
 					reader := bufio.NewReader(os.Stdin)
-					line, _ := reader.ReadString('\n')
-					line = strings.TrimSpace(line)
-					if line != "" {
+					line, rerr := reader.ReadString('\n')
+					if line = strings.TrimSpace(line); rerr == nil && line != "" {
 						syncDirVal = line
 					}
 				}
+			}
+			if syncDirVal, err = normalizeDir(syncDirVal); err != nil {
+				return err
 			}
 			if err := os.MkdirAll(syncDirVal, 0o755); err != nil {
 				return fmt.Errorf("mkdir sync dir: %w", err)
@@ -249,27 +330,12 @@ func emitCmd() *cobra.Command {
 }
 
 func enforceRegistry(syncDir, kind, scope string) error {
-	if buf, err := os.ReadFile(filepath.Join(syncDir, "kinds.yaml")); err == nil {
-		reg, lerr := registry.LoadFromBytes(buf, nil, nil, nil)
-		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "warn: kinds.yaml unreadable (%v) — kind not validated\n", lerr)
-		} else if !reg.IsValidKind(kind) && !strings.Contains(kind, "/") {
-			return fmt.Errorf("kind %q is not in the kinds registry (namespaced org/name extensions are always allowed)", kind)
-		}
+	warn, err := registry.EnforceEmit(syncDir, kind, scope)
+	if err != nil {
+		return err
 	}
-	if buf, err := os.ReadFile(filepath.Join(syncDir, "scopes.yaml")); err == nil {
-		reg, lerr := registry.LoadFromBytes(nil, buf, nil, nil)
-		if lerr != nil {
-			fmt.Fprintf(os.Stderr, "warn: scopes.yaml unreadable (%v) — scope not validated\n", lerr)
-		} else {
-			allowed, warnMsg := reg.CanEmitToScope(scope)
-			if !allowed {
-				return fmt.Errorf("scope %q refuses new events: %s", scope, warnMsg)
-			}
-			if warnMsg != "" {
-				fmt.Fprintf(os.Stderr, "warn: %s\n", warnMsg)
-			}
-		}
+	if warn != "" {
+		fmt.Fprintf(os.Stderr, "warn: %s\n", warn)
 	}
 	return nil
 }
