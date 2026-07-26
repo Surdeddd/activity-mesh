@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
-	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"text/template"
 	"time"
@@ -124,6 +124,41 @@ func (d *debouncer) hit(key uint64, now time.Time) bool {
 	return true
 }
 
+// maxEmitsPerWindow bounds how many individual `activity-log emit` subprocesses
+// one source may spawn per debounce window; the rest are coalesced.
+const maxEmitsPerWindow = 20
+
+// emitBudget is a per-source token bucket that refills once per window.
+type emitBudget struct {
+	size      int
+	left      int
+	window    time.Duration
+	refilleAt time.Time
+}
+
+func newEmitBudget(size int, window time.Duration) *emitBudget {
+	return &emitBudget{size: size, left: size, window: window}
+}
+
+func (b *emitBudget) take(now time.Time) bool {
+	if b.refilleAt.IsZero() || now.Sub(b.refilleAt) >= b.window {
+		b.left = b.size
+		b.refilleAt = now
+	}
+	if b.left == 0 {
+		return false
+	}
+	b.left--
+	return true
+}
+
+// emitReq is one unit of work for the emit worker: either a filesystem event or
+// a rollup standing in for a coalesced burst.
+type emitReq struct {
+	ev        fsnotify.Event
+	coalesced int // > 0 marks a rollup
+}
+
 func hashKey(srcName, path string) uint64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(srcName))
@@ -209,7 +244,8 @@ func emitFacts(src Source, ev fsnotify.Event) map[string]string {
 	}
 }
 
-func runEmit(ctx context.Context, bin string, src Source, ev fsnotify.Event) error {
+func runEmit(ctx context.Context, bin string, src Source, req emitReq) error {
+	ev := req.ev
 	facts := emitFacts(src, ev)
 
 	kind := src.Emit.Kind
@@ -234,6 +270,11 @@ func runEmit(ctx context.Context, bin string, src Source, ev fsnotify.Event) err
 	}
 	if summary == "" {
 		summary = fmt.Sprintf("%s: %s on %s", src.Name, ev.Op.String(), filepath.Base(ev.Name))
+	}
+	if req.coalesced > 0 {
+		// The burst summary replaces the per-file one — the individual paths are
+		// gone by construction, but the count is not.
+		summary = fmt.Sprintf("%s: %d further changes coalesced", src.Name, req.coalesced)
 	}
 	if kind == "" || scope == "" {
 		return fmt.Errorf("kind/scope empty for source %q (kind=%q scope=%q)", src.Name, kind, scope)
@@ -262,6 +303,56 @@ func runEmit(ctx context.Context, bin string, src Source, ev fsnotify.Event) err
 	return nil
 }
 
+// maxWatchDepth bounds the recursive walk so a pathological tree (or a symlink
+// chain EvalSymlinks cannot collapse) can never spin forever.
+const maxWatchDepth = 64
+
+// addTree watches dir and every directory beneath it, following symlinked
+// directories once each. Add failures are logged rather than dropped: silently
+// half-watching a tree looks identical to "nothing changed".
+func addTree(w *fsnotify.Watcher, root, srcName string) (added, failed int) {
+	seen := map[string]bool{}
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth > maxWatchDepth {
+			log.Printf("watch depth limit reached src=%q path=%q", srcName, dir)
+			return
+		}
+		real, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			real = dir
+		}
+		if seen[real] {
+			return
+		}
+		seen[real] = true
+		if err := w.Add(dir); err != nil {
+			log.Printf("watch add failed src=%q path=%q: %v", srcName, dir, err)
+			failed++
+			return
+		}
+		added++
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			log.Printf("watch scan failed src=%q path=%q: %v", srcName, dir, err)
+			failed++
+			return
+		}
+		for _, e := range entries {
+			if skipWatchDir(e.Name()) {
+				continue
+			}
+			p := filepath.Join(dir, e.Name())
+			// os.Stat (not e.IsDir) so symlinked directories are followed too.
+			if fi, serr := os.Stat(p); serr == nil && fi.IsDir() {
+				walk(p, depth+1)
+			}
+		}
+	}
+	walk(root, 0)
+	return added, failed
+}
+
 func skipWatchDir(name string) bool {
 	switch name {
 	case "node_modules", ".git", ".hg", ".svn", "vendor",
@@ -285,40 +376,53 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	}
 
 	addRoot := src.Path
+	effectivePattern := src.Pattern
 	if !info.IsDir() {
+		// A file path means "watch its directory"; without a pattern that would
+		// silently emit an event for every sibling in that directory.
 		addRoot = filepath.Dir(src.Path)
+		if effectivePattern == "" {
+			effectivePattern = filepath.Base(src.Path)
+		}
 	}
-	if err := w.Add(addRoot); err != nil {
-		return fmt.Errorf("watch %q: %w", addRoot, err)
-	}
-	if src.Recursive && info.IsDir() {
-		_ = filepath.WalkDir(addRoot, func(p string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return nil
-			}
-			if d.IsDir() && p != addRoot {
-				if skipWatchDir(d.Name()) {
-					return filepath.SkipDir
-				}
-				_ = w.Add(p)
-			}
-			return nil
-		})
-	}
-	log.Printf("source=%q watching=%q recursive=%v op=%q pattern=%q", src.Name, addRoot, src.Recursive, src.Op, src.Pattern)
+	src.Pattern = effectivePattern
 
-	emitCh := make(chan fsnotify.Event, 256)
+	added, failed := 0, 0
+	if src.Recursive && info.IsDir() {
+		added, failed = addTree(w, addRoot, src.Name)
+	} else if err := w.Add(addRoot); err != nil {
+		return fmt.Errorf("watch %q: %w", addRoot, err)
+	} else {
+		added = 1
+	}
+	if added == 0 {
+		return fmt.Errorf("watch %q: no directory could be watched (%d failures)", addRoot, failed)
+	}
+	log.Printf("source=%q watching=%q recursive=%v op=%q pattern=%q watched=%d failed=%d",
+		src.Name, addRoot, src.Recursive, src.Op, effectivePattern, added, failed)
+
+	emitCh := make(chan emitReq, 256)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for ev := range emitCh {
-			if err := runEmit(ctx, bin, src, ev); err != nil {
-				log.Printf("emit error src=%q path=%q: %v", src.Name, ev.Name, err)
+		for req := range emitCh {
+			if err := runEmit(ctx, bin, src, req); err != nil {
+				log.Printf("emit error src=%q path=%q: %v", src.Name, req.ev.Name, err)
 			}
 		}
 	}()
 	defer func() { close(emitCh); wg.Wait() }()
+
+	// A bulk rewrite (a plugin update touching hundreds of files) used to fan
+	// out into one `activity-log emit` subprocess per file — each taking the
+	// host lock — and then silently drop everything past the queue. Spend a
+	// bounded per-window budget on individual events and roll the rest up into
+	// one event, so the burst stays visible without becoming a subprocess storm.
+	budget := newEmitBudget(maxEmitsPerWindow, deb.window)
+	var coalesced int
+	rollup := time.NewTicker(deb.window)
+	defer rollup.Stop()
 
 	for {
 		select {
@@ -328,25 +432,53 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 			if !ok {
 				return nil
 			}
+			// Re-watch BEFORE the filters: a new subdirectory never matches a file
+			// pattern like "*.md", so filtering first made every recursive source
+			// blind to any directory created after startup.
+			isDir := false
+			if ev.Op&fsnotify.Create != 0 {
+				if fi, serr := os.Stat(ev.Name); serr == nil && fi.IsDir() {
+					isDir = true
+					if src.Recursive {
+						addTree(w, ev.Name, src.Name)
+					}
+				}
+			}
+			if isDir {
+				continue // directories are watch targets, never events themselves
+			}
 			if !matchOp(src.Op, ev) {
 				continue
 			}
 			if !matchPattern(src.Pattern, ev.Name) {
 				continue
 			}
-			if src.Recursive && ev.Op&fsnotify.Create != 0 {
-				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() && !skipWatchDir(filepath.Base(ev.Name)) {
-					_ = w.Add(ev.Name)
-				}
-			}
 			key := hashKey(src.Name, ev.Name)
-			if !deb.hit(key, time.Now()) {
+			now := time.Now()
+			if !deb.hit(key, now) {
+				continue
+			}
+			if !budget.take(now) {
+				coalesced++
 				continue
 			}
 			select {
-			case emitCh <- ev:
+			case emitCh <- emitReq{ev: ev}:
 			default:
-				log.Printf("emit queue full src=%q path=%q: dropping (worker behind)", src.Name, ev.Name)
+				coalesced++
+			}
+		case <-rollup.C:
+			if coalesced == 0 {
+				continue
+			}
+			n := coalesced
+			coalesced = 0
+			req := emitReq{ev: fsnotify.Event{Name: src.Path, Op: fsnotify.Write}, coalesced: n}
+			select {
+			case emitCh <- req:
+				log.Printf("coalesced %d events src=%q", n, src.Name)
+			default:
+				log.Printf("emit queue full src=%q: %d events lost", src.Name, n)
 			}
 		case err, ok := <-w.Errors:
 			if !ok {
@@ -391,6 +523,7 @@ func main() {
 
 	deb := newDebouncer(cfg.Debounce)
 	var wg sync.WaitGroup
+	var failedSources atomic.Int64
 	for _, src := range cfg.Sources {
 		src := src
 		wg.Add(1)
@@ -398,11 +531,20 @@ func main() {
 			defer wg.Done()
 			if err := watchSource(ctx, src, deb, cfg.ActivityLogBin); err != nil {
 				if !errors.Is(err, context.Canceled) {
+					failedSources.Add(1)
 					log.Printf("source %q ended: %v", src.Name, err)
 				}
 			}
 		}()
 	}
 	wg.Wait()
+	// Exiting 0 with every source dead reads as a clean shutdown to launchd and
+	// systemd, so nothing ever restarts the watcher.
+	if n := failedSources.Load(); n == int64(len(cfg.Sources)) {
+		log.Fatalf("all %d sources failed to start — exiting non-zero so the supervisor restarts us", n)
+	} else if n > 0 {
+		log.Printf("activity-watcher shutdown: %d of %d sources had failed", n, len(cfg.Sources))
+		return
+	}
 	log.Printf("activity-watcher shutdown clean")
 }
