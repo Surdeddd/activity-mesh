@@ -40,7 +40,9 @@ func compactCmd() *cobra.Command {
 			}
 			syncDirVal := cfg.SyncDir
 			if syncArg != "" {
-				syncDirVal = syncArg
+				if syncDirVal, err = normalizeDir(syncArg); err != nil {
+					return err
+				}
 			}
 			host := event.HostName()
 			res, err := compactShard(compactOptions{
@@ -55,7 +57,11 @@ func compactCmd() *cobra.Command {
 				return err
 			}
 			if !dryRun {
-				writeDecayState()
+				// A missing decay-state keeps the decay-daemon health check red
+				// forever while compact keeps reporting success — say so out loud.
+				if err := writeDecayState(); err != nil {
+					fmt.Fprintf(os.Stderr, "warn: decay-state not updated: %v\n", err)
+				}
 			}
 			printCompactSummary(os.Stdout, res)
 			return nil
@@ -129,8 +135,25 @@ func compactShard(o compactOptions) (*compactResult, error) {
 	if err := os.MkdirAll(o.archiveDir, 0o755); err != nil {
 		return nil, err
 	}
+	// Archives are append-only gzip members and the shard rewrite comes after
+	// them, so any failure in between used to leave events in BOTH places: a
+	// half-written member corrupting every later one, and the next run archiving
+	// the same events again. Roll every touched archive back to its pre-run size.
+	var touched []archiveState
+	rollback := func() {
+		for i := len(touched) - 1; i >= 0; i-- {
+			a := touched[i]
+			if !a.existed {
+				_ = os.Remove(a.path)
+				continue
+			}
+			_ = os.Truncate(a.path, a.size)
+		}
+	}
 	for _, ma := range res.months {
+		touched = append(touched, statArchive(ma.file))
 		if err := appendGzipMember(ma.file, p.archive[ma.month]); err != nil {
+			rollback()
 			return nil, fmt.Errorf("archive %s: %w", ma.file, err)
 		}
 	}
@@ -139,9 +162,25 @@ func compactShard(o compactOptions) (*compactResult, error) {
 		_ = d.Close()
 	}
 	if err := rewriteShard(o.shardPath, p.keep); err != nil {
+		rollback()
 		return nil, fmt.Errorf("rewrite shard: %w", err)
 	}
 	return res, nil
+}
+
+// archiveState is an archive file's size before this run appended to it.
+type archiveState struct {
+	path    string
+	size    int64
+	existed bool
+}
+
+func statArchive(path string) archiveState {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return archiveState{path: path}
+	}
+	return archiveState{path: path, size: fi.Size(), existed: true}
 }
 
 type partition struct {
@@ -264,14 +303,14 @@ func rewriteShard(shardPath string, content []byte) error {
 	return nil
 }
 
-func writeDecayState() {
+func writeDecayState() error {
 	dir := event.StateDir()
 	if dir == "" {
-		return
+		return errors.New("cannot resolve state dir (no $ACTIVITY_MESH_STATE and no home dir)")
 	}
 	path := filepath.Join(dir, "decay-state.json")
 	payload := fmt.Sprintf(`{"last_run_ts":%d}`+"\n", time.Now().Unix())
-	_ = atomicWriteFile(path, []byte(payload))
+	return atomicWriteFile(path, []byte(payload))
 }
 
 func printCompactSummary(w io.Writer, res *compactResult) {
