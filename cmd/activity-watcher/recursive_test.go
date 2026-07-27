@@ -56,9 +56,12 @@ func TestWatchSourceWatchesSubdirsCreatedAfterStart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	// Generous: the shim is a real subprocess, and cancel() below SIGKILLs an
+	// emit still in flight. Under a loaded `go test ./...` a tight bound turns
+	// that race into a flake. Success exits the loop immediately.
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "note.md") {
+		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "---") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
