@@ -341,9 +341,13 @@ func TestWatchSourceCallsEmitOnCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	// Wait for the shim's terminator, not merely for bytes: it appends one line
+	// per argument, so a non-empty log only means the emit STARTED. Breaking on
+	// that and then cancel()ing SIGKILLs the shim mid-write and the assertions
+	// below read a truncated argv.
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if data, err := os.ReadFile(logPath); err == nil && len(data) > 0 {
+		if data, err := os.ReadFile(logPath); err == nil && strings.Contains(string(data), "---") {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
