@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.5] — 2026-09-02
+
+### Fixed
+- **`deploy-drift` compares only the files a release ships.** Release archives
+  omit `mcp/README.md`, `mcp/install.sh` and the test file, so the rc.4 check
+  reported the mcp area as drifted on every release install and would have
+  paged every six hours. Source-only extras are ignored; a shipped file that
+  is missing or differs in the source tree still counts as drift.
+- **`bootstrap.sh` no longer kickstarts the heartbeat at install time.** The
+  daemon needs ~30 s to index before it listens, and the immediate probe
+  recorded a false miss; the hourly calendar run covers it.
+
 ## [0.4.0-rc.4] — 2026-09-02
 
 ### Fixed
