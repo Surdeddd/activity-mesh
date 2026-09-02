@@ -16,10 +16,16 @@ if [ ! -d "$DIST" ]; then
 fi
 
 dir_hash() {
-    local d="$1"
+    local d="$1" shipped="$2" f
     [ -d "$d" ] || { echo "missing"; return; }
-    ( cd "$d" && find . -type f ! -name '.DS_Store' ! -name '*.bak-*' -print0 2>/dev/null \
-        | sort -z | xargs -0 shasum -a 256 2>/dev/null ) | shasum -a 256 | awk '{print $1}'
+    ( cd "$shipped" && find . -type f ! -name '.DS_Store' ! -name '*.bak-*' 2>/dev/null | sort ) \
+        | while IFS= read -r f; do
+            if [ -f "$d/$f" ]; then
+                shasum -a 256 "$d/$f" | awk -v f="$f" '{print $1, f}'
+            else
+                echo "missing $f"
+            fi
+        done | shasum -a 256 | awk '{print $1}'
 }
 
 src_ver=$(tr -d '[:space:]' < "$SRC/VERSION" 2>/dev/null)
@@ -34,8 +40,8 @@ fi
 
 for d in installers health registries configs hooks mcp; do
     [ -d "$SRC/$d" ] || continue
-    s=$(dir_hash "$SRC/$d")
-    t=$(dir_hash "$DIST/$d")
+    s=$(dir_hash "$SRC/$d" "$DIST/$d")
+    t=$(dir_hash "$DIST/$d" "$DIST/$d")
     if [ "$s" != "$t" ]; then
         drifted="$drifted $d"
         count=$((count+1))

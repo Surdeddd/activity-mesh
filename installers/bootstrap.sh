@@ -254,7 +254,7 @@ install_macos_units() {
         [[ $booted -eq 1 ]] || die "launchctl bootstrap failed for com.activity-mesh.${unit}: $lc_err"
         ok "launchd bootstrapped com.activity-mesh.${unit}"
         case "$unit" in
-            watcher|daemon|heartbeat)
+            watcher|daemon)
                 if launchctl kickstart "gui/$(id -u)/com.activity-mesh.${unit}" 2>/dev/null; then
                     ok "launchd kickstarted com.activity-mesh.${unit}"
                 else
