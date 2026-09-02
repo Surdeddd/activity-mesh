@@ -18,6 +18,11 @@ fi
 [ -z "$JQ" ] && exit 0
 SESSION_ID=$(echo "$INPUT" | "$JQ" -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
 
+TTY="${ACTIVITY_MESH_SESSION_TTY:-$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')}"
+case "$TTY" in
+    ''|'?'|'??'|'-') log "headless session=$SESSION_ID: no controlling tty"; exit 0 ;;
+esac
+
 BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
 [ -z "$BIN" ] && [ -x "$HOME/.local/bin/activity-log" ] && BIN="$HOME/.local/bin/activity-log"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then

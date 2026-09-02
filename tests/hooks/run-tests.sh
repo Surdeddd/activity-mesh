@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ROUTER="$REPO_ROOT/hooks/user-prompt-router.sh"
 DIGEST="$REPO_ROOT/hooks/session-start-digest.sh"
+DIGEST_TTY="$DIGEST#tty"
 
 JQ="/usr/bin/jq"
 if [ ! -x "$JQ" ]; then
@@ -78,6 +79,7 @@ end_case() {
 run() {
     local hook="$1" stdin="$2"
     shift 2
+    if [ "$hook" = "$DIGEST_TTY" ]; then hook="$DIGEST"; set -- ACTIVITY_MESH_SESSION_TTY=ttys000 "$@"; fi
     printf '%s' "$stdin" | env -i HOME="$HOMEDIR" PATH="$FULLPATH" STUB_ARGV="$ARGV_FILE" "$@" \
         /bin/bash "$hook" > "$HOMEDIR/stdout" 2> "$HOMEDIR/stderr"
     RC=$?
@@ -147,21 +149,21 @@ end_case
 begin_case "router: temporal intent -> --since 24h"
 run "$ROUTER" "$(pj 'что было сегодня' temporal)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-temporal"
 assert_rc0
-assert_argv "query --format text --since 24h --limit 8"
+assert_argv "query --format text --exclude-kind canary,heartbeat --since 24h --limit 8"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-temporal"
 end_case
 
 begin_case "router: status intent -> --kind status --since 48h --limit 10"
 run "$ROUTER" "$(pj 'статус по задачам' status)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-status"
 assert_rc0
-assert_argv "query --format text --kind status --since 48h --limit 10"
+assert_argv "query --format text --exclude-kind canary,heartbeat --kind status --since 48h --limit 10"
 assert_emits "UserPromptSubmit" "(status match)" "evt-status"
 end_case
 
 begin_case "router: incident intent -> --kind error --since 30d --limit 5"
 run "$ROUTER" "$(pj 'что упало вчера' incident)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-incident"
 assert_rc0
-assert_argv "query --format text --kind error --since 30d --limit 5"
+assert_argv "query --format text --exclude-kind canary,heartbeat --kind error --since 30d --limit 5"
 assert_emits "UserPromptSubmit" "(incident match)" "evt-incident"
 end_case
 
@@ -170,7 +172,7 @@ mkdir -p "$HOMEDIR/.config/activity-mesh"
 printf 'billing-proxy\n' > "$HOMEDIR/.config/activity-mesh/scopes-cache"
 run "$ROUTER" "$(pj 'billing-proxy deploy logs' scope)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-scope"
 assert_rc0
-assert_argv "query --format text --scope billing-proxy --since 30d --limit 15"
+assert_argv "query --format text --exclude-kind canary,heartbeat --scope billing-proxy --since 30d --limit 15"
 assert_emits "UserPromptSubmit" "(scope match)" "evt-scope"
 end_case
 
@@ -178,7 +180,7 @@ begin_case "router: agent intent (agents-cache) -> --agent hermes --limit 10"
 seed_agents_cache
 run "$ROUTER" "$(pj 'глянь hermes kanban' agent)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-agent"
 assert_rc0
-assert_argv "query --format text --agent hermes --limit 10"
+assert_argv "query --format text --exclude-kind canary,heartbeat --agent hermes --limit 10"
 assert_emits "UserPromptSubmit" "(agent match)" "evt-agent"
 end_case
 
@@ -186,7 +188,7 @@ begin_case "router: Cyrillic agent alias 'антон' -> --agent anton"
 seed_agents_cache
 run "$ROUTER" "$(pj 'глянь что антон наделал в проде' cyragent)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-anton"
 assert_rc0
-assert_argv "query --format text --agent anton --limit 10"
+assert_argv "query --format text --exclude-kind canary,heartbeat --agent anton --limit 10"
 assert_emits "UserPromptSubmit" "(agent match)" "evt-anton"
 end_case
 
@@ -194,7 +196,7 @@ begin_case "router: temporal+agent combo -> --since 24h --agent hermes"
 seed_agents_cache
 run "$ROUTER" "$(pj 'что делал hermes сегодня' combo)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-combo"
 assert_rc0
-assert_argv "query --format text --since 24h --limit 8 --agent hermes"
+assert_argv "query --format text --exclude-kind canary,heartbeat --since 24h --limit 8 --agent hermes"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-combo"
 end_case
 
@@ -202,7 +204,7 @@ begin_case "router: UPPERCASE Cyrillic prompt -> intents still match (LC_ALL fix
 seed_agents_cache
 run "$ROUTER" "$(pj 'ЧТО ДЕЛАЛ HERMES СЕГОДНЯ' upcyr)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-upcyr"
 assert_rc0
-assert_argv "query --format text --since 24h --limit 8 --agent hermes"
+assert_argv "query --format text --exclude-kind canary,heartbeat --since 24h --limit 8 --agent hermes"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-upcyr"
 end_case
 
@@ -216,7 +218,7 @@ begin_case "router: weak alias qualifies an existing intent -> --agent claude-ma
 seed_agents_cache
 run "$ROUTER" "$(pj 'что клод делал сегодня' weakqual)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-weak"
 assert_rc0
-assert_argv "query --format text --since 24h --limit 8 --agent claude-mac"
+assert_argv "query --format text --exclude-kind canary,heartbeat --since 24h --limit 8 --agent claude-mac"
 assert_emits "UserPromptSubmit" "(temporal match)" "evt-weak"
 end_case
 
@@ -267,8 +269,13 @@ end_case
 
 echo "== session-start-digest.sh =="
 
+begin_case "digest: headless session (no controlling tty) -> silent, no query"
+run "$DIGEST" "$(sj dheadless)" ACTIVITY_MESH_SESSION_TTY='??' ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-digest"
+assert_rc0; assert_silent; assert_stub_not_called
+end_case
+
 begin_case "digest: empty stdin + stub -> SessionStart JSON, both queries exact"
-run "$DIGEST" "" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-digest"
+run "$DIGEST_TTY" "" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-digest"
 assert_rc0
 assert_argv "query --since 24h --exclude-kind canary,heartbeat --limit 8 --format text
 query --kind error --since 30d --limit 5 --format text"
@@ -276,24 +283,24 @@ assert_emits "SessionStart" "recent activity since last session:" "evt-digest" "
 end_case
 
 begin_case "digest: binary missing -> graceful silent skip"
-run "$DIGEST" "$(sj dnobin)"
+run "$DIGEST_TTY" "$(sj dnobin)"
 assert_rc0; assert_silent
 end_case
 
 begin_case "digest: stub returns no events -> silent (zero token cost)"
-run "$DIGEST" "$(sj dempty)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT=""
+run "$DIGEST_TTY" "$(sj dempty)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT=""
 assert_rc0; assert_silent
 end_case
 
 begin_case "digest: malformed JSON stdin -> exit 0, still emits"
-run "$DIGEST" 'garbage {{ not json' ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-mal"
+run "$DIGEST_TTY" 'garbage {{ not json' ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-mal"
 assert_rc0
 assert_emits "SessionStart" "evt-mal"
 end_case
 
 begin_case "digest: oversized output -> truncation marker, capped context"
 BIG="$(/usr/bin/head -c 1500 /dev/zero | /usr/bin/tr '\0' 'x')"
-run "$DIGEST" "$(sj dtrunc)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="$BIG"
+run "$DIGEST_TTY" "$(sj dtrunc)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="$BIG"
 assert_rc0
 assert_emits "SessionStart" "…[truncated]"
 if [ -n "$CTX" ] && [ "${#CTX}" -ge 2200 ]; then
@@ -302,7 +309,7 @@ fi
 end_case
 
 begin_case "digest: jq absent from PATH -> still emits (absolute /usr/bin/jq)"
-run "$DIGEST" "$(sj dnojq)" PATH="$MINPATH" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-dnojq"
+run "$DIGEST_TTY" "$(sj dnojq)" PATH="$MINPATH" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-dnojq"
 assert_rc0
 assert_emits "SessionStart" "evt-dnojq"
 end_case

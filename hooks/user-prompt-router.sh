@@ -91,7 +91,7 @@ BIN="${ACTIVITY_MESH_BIN:-$(command -v activity-log 2>/dev/null || true)}"
 [ -z "$BIN" ] && [ -x "$HOME/.local/bin/activity-log" ] && BIN="$HOME/.local/bin/activity-log"
 if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then log "skip intent=$INTENT: no binary"; exit 0; fi
 
-ARGS=(query --format text)
+ARGS=(query --format text --exclude-kind "canary,heartbeat")
 case "$INTENT" in
     temporal) ARGS+=(--since 24h --limit 8) ;;
     status)   ARGS+=(--kind status --since 48h --limit 10) ;;
