@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.6] — 2026-09-02
+
+### Fixed
+- **`sync-lag` measures Syncthing delivery, not event cadence.** It compared
+  `now` with the remote shard's mtime, which Syncthing preserves from the
+  source, so an hourly heartbeat alone produced "lag" of up to an hour and a
+  napping host paged tier 3 several times a day. Delivery lag is now
+  `ctime - mtime` of the synced shard (ctime is set on receipt and cannot be
+  preserved); a quiet host is the `silence` check's business.
+- **Session-start digest skips headless sessions.** Every `claude -p` run
+  (scheduled agents, delegates) fired the digest — about 2 000 injections a
+  month for nobody. A session without a controlling tty is logged as
+  `headless` and gets no context; `ACTIVITY_MESH_SESSION_TTY` overrides the
+  detection for tests.
+- **Prompt router drops self-monitoring events.** Its queries now pass
+  `--exclude-kind canary,heartbeat` like the digest already did, so an
+  injected slice no longer carries "hourly heartbeat ok=1" lines.
+
 ## [0.4.0-rc.5] — 2026-09-02
 
 ### Fixed
