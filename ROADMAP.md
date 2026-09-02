@@ -4,7 +4,7 @@
 
 **Goal**: agents naturally know what other agents did, across machines, without explicit calls.
 
-**Status**: implemented and deployed. All v1 phases (repo/docs, redaction, Go binaries, indexer + HTTP daemon + watcher, the 5 read layers, 19 health checks + dead-man heartbeat + weekly digest, cross-OS installers, open registries, memory-layer boundary rules) shipped across v0.1.0–v0.3.x. See `CHANGELOG.md` for the per-release record.
+**Status**: implemented and deployed. All v1 phases (repo/docs, redaction, Go binaries, indexer + HTTP daemon + watcher, the 5 read layers, 20 health checks + dead-man heartbeat + weekly digest, cross-OS installers, open registries, memory-layer boundary rules) shipped across v0.1.0–v0.3.x. See `CHANGELOG.md` for the per-release record.
 
 ## v1.0 release gate (remaining)
 

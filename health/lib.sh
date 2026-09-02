@@ -35,6 +35,28 @@ am_now_ms() {
     fi
 }
 
+am_offline_hosts() {
+    local state="${OFFLINE_HOSTS_JSON:-$HOME/.claude/channels/telegram/state/offline-hosts.json}"
+    [ -r "$state" ] || return 0
+    /usr/bin/python3 -c '
+import json, sys
+try:
+    print(" ".join(json.load(open(sys.argv[1])).keys()))
+except Exception:
+    pass
+' "$state" 2>/dev/null || true
+}
+
+am_host_is_offline() {
+    local h off o
+    h="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    off="${2:-}"
+    for o in $off; do
+        case "$h" in *"$o"*) return 0 ;; esac
+    done
+    return 1
+}
+
 am_emit() {
     local name="$1" tier="$2" status="$3" message="$4"
     local end dur
@@ -75,7 +97,8 @@ am_notify_telegram() {
 }
 
 am_notify() {
-    local msg="$1"
+    local msg="$1" severity="${2:-warn}"
+    export NOTIFY_SEVERITY="$severity"
     if [ -n "${ACTIVITY_MESH_NOTIFY_CMD:-}" ]; then
         # shellcheck disable=SC2086
         printf '%s' "$msg" | ${ACTIVITY_MESH_NOTIFY_CMD} 2>/dev/null && return 0
@@ -85,7 +108,7 @@ am_notify() {
     elif [ -x "$HOME/.local/bin/notify-maxim" ]; then legacy="$HOME/.local/bin/notify-maxim"
     fi
     if [ -n "$legacy" ]; then
-        printf '%s' "$msg" | "$legacy" 2>/dev/null && return 0
+        printf '%s' "$msg" | "$legacy" --severity="$severity" 2>/dev/null && return 0
     fi
     am_notify_telegram "$msg"
 }

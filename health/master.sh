@@ -93,7 +93,9 @@ if [ "$max_tier" -ge 2 ] && [ "$DRY_RUN" -eq 0 ]; then
         '[.[] | select(.status != "ok") | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
     msg=$(printf 'activity-mesh health: tier=%d ok=%d warn=%d fail=%d critical=%d (host=%s)\n%s' \
         "$max_tier" "$ok" "$warn" "$fail" "$critical" "$HOST" "$failing")
-    if ! am_notify "$msg"; then
+    severity=warn
+    [ "$fail" -gt 0 ] || [ "$critical" -gt 0 ] && severity=fail
+    if ! am_notify "$msg" "$severity"; then
         printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
     fi
 fi

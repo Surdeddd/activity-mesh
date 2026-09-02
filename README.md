@@ -22,7 +22,7 @@ A shared activity log that is:
 4. **Cross-machine** — per-host JSONL shards synced via Syncthing (zero conflicts by construction).
 5. **Cross-OS** — single Go binary cross-compiled for macOS/Linux/Windows; YAML-described supervisors (launchd/systemd/Task Scheduler) and watchers (fswatch/inotify/USN).
 6. **Coexists** — adds a *history* layer (when/who) on top of existing memory layers (state truth, knowledge, semantic recall) — clear boundary rules, no replacement.
-7. **Self-monitoring** — 19 health checks, dead-man heartbeat (independent process), weekly digest, recovery runbook.
+7. **Self-monitoring** — 20 health checks, dead-man heartbeat (independent process), weekly digest, recovery runbook.
 8. **Privacy-first** — two-tier redaction (compiled-in regex pack + Shannon-entropy heuristic) at write time, before a line hits disk, plus retroactive `redact-shard` for rule upgrades. (Offline NER is a v2 roadmap item.)
 
 ## How it works
@@ -166,7 +166,7 @@ pkg/index/             # SQLite FTS5 (cgo-free, modernc.org/sqlite)
 pkg/registry/          # YAML loader/validator
 mcp/                   # Node stdio MCP server
 hooks/                 # SessionStart digest + UserPromptSubmit auto-context
-health/                # 19 checks + dead-man heartbeat + master runner
+health/                # 20 checks + dead-man heartbeat + master runner
 installers/            # bootstrap.sh / .ps1 + launchd/systemd templates
 registries/            # kinds / scopes / agents / redaction (generic examples)
 ```

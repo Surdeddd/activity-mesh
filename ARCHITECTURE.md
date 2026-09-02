@@ -263,7 +263,7 @@ There is no client-side "auto-failover" logic, because the primary contract (CLI
 
 ## Health checks (19) + dead-man heartbeat
 
-19 checks across categories:
+20 checks across categories:
 - silence (per-host event freshness)
 - conflict (Syncthing `.sync-conflict-*`)
 - schema (drift in kinds/scopes vs registry)

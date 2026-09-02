@@ -20,9 +20,33 @@ read_int() {
 }
 
 ok=0
+why=""
 if command -v curl >/dev/null 2>&1; then
-    code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$DAEMON_URL" 2>/dev/null || echo 000)
-    case "$code" in 200|204) ok=1 ;; esac
+    code=$(curl -s -o /dev/null -m "${CANARY_TIMEOUT:-15}" -w '%{http_code}' "$DAEMON_URL" 2>/dev/null)
+    rc=$?
+    case "$code" in
+        200|204) ok=1 ;;
+        *)
+            case "$rc" in
+                7)  why="connect-refused" ;;
+                28) why="timeout" ;;
+                52) why="empty-reply" ;;
+                *)  why="curl-rc-$rc" ;;
+            esac
+            ;;
+    esac
+    [ -z "$code" ] && code=000
+fi
+
+loadavg=$(/usr/bin/uptime 2>/dev/null | /usr/bin/awk -F'averages?:' '{print $2}' | /usr/bin/awk '{gsub(/,/,"."); print $1}')
+case "$loadavg" in ''|*[!0-9.]*) loadavg="?" ;; esac
+
+BUSY_LOAD="${CANARY_BUSY_LOAD:-12}"
+inconclusive=0
+if [ "$ok" -eq 0 ] && { [ "$why" = "timeout" ] || [ "$why" = "empty-reply" ]; } && [ "$loadavg" != "?" ]; then
+    if [ "$(printf '%s\n%s\n' "$loadavg" "$BUSY_LOAD" | /usr/bin/sort -g | /usr/bin/tail -1)" = "$loadavg" ]; then
+        inconclusive=1
+    fi
 fi
 
 # $ACTIVITY_MESH_BIN first: bootstrap.sh honours --prefix, so a hardcoded list
@@ -70,9 +94,14 @@ if [ "$ok" -eq 1 ]; then
     log "ok url=$DAEMON_URL prev_misses=$prev"
     exit 0
 fi
+if [ "$inconclusive" -eq 1 ]; then
+    log "inconclusive url=$DAEMON_URL why=$why load=$loadavg (>$BUSY_LOAD) — счётчик не трогаю, misses=$prev"
+    exit 0
+fi
+
 misses=$(( prev + 1 ))
 echo "$misses" > "$MISS_FILE" 2>/dev/null
-log "miss url=$DAEMON_URL misses=$misses code=${code:-?}"
+log "miss url=$DAEMON_URL misses=$misses code=${code:-?} why=${why:-?} load=$loadavg"
 
 if [ "$misses" -lt "$THRESHOLD" ]; then exit 0; fi
 
@@ -96,6 +125,7 @@ Daemon not responding to /health for $misses consecutive checks — operational 
 • host: $host
 • url: $DAEMON_URL
 • misses: $misses in a row (threshold $THRESHOLD)
+• last failure: ${why:-?} (curl code ${code:-?}), load average $loadavg
 • runbook: RB-6 launchd-stuck
 
 ⚡ Action: revive daemon
@@ -120,7 +150,7 @@ log: \`$LOG\`
 
 \`$ts_iso · $host\`"
 
-if am_notify "$TEXT"; then
+if am_notify "$TEXT" fail; then
     log "alert sent"
     echo "$now" > "$LAST_ALERT_FILE" 2>/dev/null
 else

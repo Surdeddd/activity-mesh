@@ -20,12 +20,18 @@ TMP_SCOPES=$(mktemp); TMP_AGENTS=$(mktemp); TMP_HOSTS=$(mktemp)
 trap 'rm -f "$TMP_SCOPES" "$TMP_AGENTS" "$TMP_HOSTS"' EXIT
 
 events_now=0; events_prev=0
+canary_total=0; canary_bad=0
+events_self=0
+
+offline_hosts="$(am_offline_hosts)"
 
 if [ -d "$SYNC" ]; then
     for f in "$SYNC"/events-*.jsonl; do
         [ -f "$f" ] || continue
         host=$(basename "$f" .jsonl); host=${host#events-}
         host_n=0
+        host_offline=0
+        am_host_is_offline "$host" "$offline_hosts" && host_offline=1
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             ts=$(printf '%s' "$line" | /usr/bin/jq -r '.ts // empty' 2>/dev/null)
@@ -33,8 +39,17 @@ if [ -d "$SYNC" ]; then
                       || date -u -d "$ts" +%s 2>/dev/null || echo 0)
             if [ "$ts_epoch" -ge "$week_ago" ]; then
                 events_now=$((events_now+1)); host_n=$((host_n+1))
-                printf '%s\n' "$line" | /usr/bin/jq -r '.scope // "?"' 2>/dev/null >> "$TMP_SCOPES"
+                scope=$(printf '%s\n' "$line" | /usr/bin/jq -r '.scope // "?"' 2>/dev/null)
+                printf '%s\n' "$scope" >> "$TMP_SCOPES"
                 printf '%s\n' "$line" | /usr/bin/jq -r '.agent // "?"' 2>/dev/null >> "$TMP_AGENTS"
+                [ "$scope" = "activity-mesh" ] && events_self=$((events_self+1))
+                if [ "$host_offline" -eq 0 ] \
+                   && [ "$(printf '%s\n' "$line" | /usr/bin/jq -r '.kind // "?"' 2>/dev/null)" = "canary" ]; then
+                    canary_total=$((canary_total+1))
+                    case "$(printf '%s\n' "$line" | /usr/bin/jq -r '.summary // ""' 2>/dev/null)" in
+                        *ok=0*) canary_bad=$((canary_bad+1)) ;;
+                    esac
+                fi
             elif [ "$ts_epoch" -ge "$prev_week_ago" ] && [ "$ts_epoch" -lt "$week_ago" ]; then
                 events_prev=$((events_prev+1))
             fi
@@ -42,6 +57,16 @@ if [ -d "$SYNC" ]; then
         printf '%s %d\n' "$host" "$host_n" >> "$TMP_HOSTS"
     done
 fi
+
+CANARY_FAIL_PCT_MAX=${CANARY_FAIL_PCT_MAX:-10}
+canary_bad_pct=0
+[ "$canary_total" -gt 0 ] && canary_bad_pct=$(( canary_bad * 100 / canary_total ))
+if [ "$canary_total" -eq 0 ]; then
+    canary_line="canary: замеров нет — проверить не удалось"
+else
+    canary_line="canary: ${canary_bad}/${canary_total} без ответа (${canary_bad_pct}%, порог ${CANARY_FAIL_PCT_MAX}%)"
+fi
+events_useful=$(( events_now - events_self ))
 
 if [ "$events_prev" -gt 0 ]; then
     pct=$(( (events_now - events_prev) * 100 / events_prev ))
@@ -102,6 +127,11 @@ if [ -f "$STATE/last-health.json" ]; then
     esac
 fi
 
+if [ "$canary_total" -gt 0 ] && [ "$canary_bad_pct" -gt "$CANARY_FAIL_PCT_MAX" ] && [ "$verdict" = "OK" ]; then
+    verdict="DEGRADED"; verdict_emoji="⚠️"; verdict_level_en="WARN"; verdict_level_ru="ВНИМАНИЕ"
+    canary_line="$canary_line — статус снижен до DEGRADED"
+fi
+
 ts_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 host_short=$(hostname -s 2>/dev/null || echo "?")
 
@@ -112,6 +142,8 @@ Week ${iso_week}. Status: **${verdict}**.
 
 📊 Details:
 • events captured: ${events_now} ${trend}
+• of them self-monitoring: ${events_self} (useful: ${events_useful})
+• ${canary_line}
 • top scopes: ${top_scopes:-none}
 • top agents: ${top_agents:-none}
 • alerts fired: ${alerts_count}
@@ -128,6 +160,8 @@ ${host_lines}
 
 📊 Детали:
 • events captured: ${events_now} ${trend}
+• из них самонаблюдение: ${events_self} (полезных: ${events_useful})
+• ${canary_line}
 • top scopes: ${top_scopes:-none}
 • top agents: ${top_agents:-none}
 • alerts fired: ${alerts_count}
@@ -146,12 +180,18 @@ printf '%s\n' "$DIGEST"
 
 mkdir -p "$STATE" 2>/dev/null || true
 printf '%s\n' "$DIGEST" > "$STATE/last-weekly-digest.md" 2>/dev/null || true
-printf '{"generated_at":%d,"window":"%s","events":%d,"verdict":"%s"}\n' \
-    "$now" "$iso_week" "$events_now" "$verdict" \
+printf '{"generated_at":%d,"window":"%s","events":%d,"events_self":%d,"canary_total":%d,"canary_bad":%d,"canary_bad_pct":%d,"verdict":"%s"}\n' \
+    "$now" "$iso_week" "$events_now" "$events_self" \
+    "$canary_total" "$canary_bad" "$canary_bad_pct" "$verdict" \
     > "$STATE/last-digest.json" 2>/dev/null || true
 
 [ "$DRY_RUN" -eq 1 ] && exit 0
 
-am_notify "$DIGEST" || printf 'warn: weekly digest undeliverable\n' >&2
+case "$verdict" in
+    CRITICAL) severity=fail ;;
+    DEGRADED) severity=warn ;;
+    *) severity=ok ;;
+esac
+am_notify "$DIGEST" "$severity" || printf 'warn: weekly digest undeliverable\n' >&2
 
 exit 0
