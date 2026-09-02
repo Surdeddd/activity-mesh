@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.4] — 2026-09-02
+
+### Fixed
+- **`bootstrap.sh` kickstarts the watcher, daemon and heartbeat after
+  bootstrapping them.** With launchd in on-demand-only mode a freshly
+  bootstrapped KeepAlive/RunAtLoad unit never starts on its own: the rc.3
+  install left the daemon down until a manual `launchctl kickstart`. Explicit
+  demand spawns go through in that mode.
+
 ## [0.4.0-rc.3] — 2026-09-02
 
 Health layer hardening after five weeks in production, plus the launchd
