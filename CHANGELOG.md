@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.3] — 2026-09-02
+
+Health layer hardening after five weeks in production, plus the launchd
+scheduling change that the on-demand-only incident forced.
+
+### Fixed
+- **Periodic launchd units no longer depend on `StartInterval`.** When
+  launchd puts the gui domain into on-demand-only mode (observed under heavy
+  swap), every StartInterval and RunAtLoad spawn stays pended for good; the
+  health runner went 43 hours without a run and nothing could say so. The
+  health and heartbeat templates now use `StartCalendarInterval`
+  (0/6/12/18 at :44 and hourly at :20); calendar triggers keep firing in
+  that mode.
+- **Dead-man heartbeat separates "daemon dead" from "machine busy".** curl
+  exit codes (7/28/52) name the cause; a timeout above `BUSY_LOAD` is logged
+  as inconclusive and does not advance the miss counter. Load average is
+  read as the first of the three values (macOS separates them by spaces).
+- **`silence` and the weekly digest respect owner-disabled hosts** via the
+  offline registry (`am_offline_hosts` in lib.sh): a host switched off on
+  purpose is listed at tier 1 ok instead of paging every few hours.
+- **Weekly digest** counts self-monitoring events separately from activity
+  and reports the canary failure share over the week; above 10% the verdict
+  drops to DEGRADED even when the last snapshot is green.
+- **Alerts carry a severity.** `am_notify msg severity` exports
+  `NOTIFY_SEVERITY` and passes `--severity` to notify-maxim, so digests stop
+  being filed as failures.
+
+### Added
+- `deploy-drift` health check: source working copy vs `dist/current`
+  (20 checks now).
+
 ## [0.4.0-rc.2] — 2026-07-27
 
 Audit sweep over every subsystem (Go, shell, node) after v0.4.0-rc.1. 46 defects
