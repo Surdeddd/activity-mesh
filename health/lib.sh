@@ -99,6 +99,7 @@ am_notify_telegram() {
 am_notify() {
     local msg="$1" severity="${2:-warn}"
     export NOTIFY_SEVERITY="$severity"
+    export NOTIFY_LABEL="${NOTIFY_LABEL:-activity-mesh}"
     if [ -n "${ACTIVITY_MESH_NOTIFY_CMD:-}" ]; then
         # shellcheck disable=SC2086
         printf '%s' "$msg" | ${ACTIVITY_MESH_NOTIFY_CMD} 2>/dev/null && return 0

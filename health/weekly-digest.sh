@@ -116,63 +116,37 @@ tb_pct=$(( tb_avg * 100 / 500 ))
 
 verdict="OK"
 verdict_emoji="✅"
-verdict_level_en="OK"
 verdict_level_ru="OK"
 if [ -f "$STATE/last-health.json" ]; then
     mt=$(/usr/bin/jq -r '.summary.max_tier // 0' "$STATE/last-health.json" 2>/dev/null)
     case "$mt" in
-        3) verdict="DEGRADED"; verdict_emoji="⚠️"; verdict_level_en="WARN"; verdict_level_ru="ВНИМАНИЕ" ;;
-        4) verdict="CRITICAL"; verdict_emoji="🚨"; verdict_level_en="CRITICAL"; verdict_level_ru="КРИТИЧНО" ;;
-        *) verdict="OK"; verdict_emoji="✅"; verdict_level_en="OK"; verdict_level_ru="OK" ;;
+        3) verdict="DEGRADED"; verdict_emoji="⚠️"; verdict_level_ru="ВНИМАНИЕ" ;;
+        4) verdict="CRITICAL"; verdict_emoji="🚨"; verdict_level_ru="КРИТИЧНО" ;;
+        *) verdict="OK"; verdict_emoji="✅"; verdict_level_ru="OK" ;;
     esac
 fi
 
 if [ "$canary_total" -gt 0 ] && [ "$canary_bad_pct" -gt "$CANARY_FAIL_PCT_MAX" ] && [ "$verdict" = "OK" ]; then
-    verdict="DEGRADED"; verdict_emoji="⚠️"; verdict_level_en="WARN"; verdict_level_ru="ВНИМАНИЕ"
+    verdict="DEGRADED"; verdict_emoji="⚠️"; verdict_level_ru="ВНИМАНИЕ"
     canary_line="$canary_line — статус снижен до DEGRADED"
 fi
 
-ts_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-host_short=$(hostname -s 2>/dev/null || echo "?")
-
 DIGEST=$(cat <<EOF
-📊 *Activity-mesh weekly digest / Недельный дайджест Activity-mesh* · ${verdict_emoji} ${verdict_level_en} / ${verdict_level_ru}
+📊 Недельный дайджест activity-mesh · ${verdict_emoji} ${verdict_level_ru}
 
-Week ${iso_week}. Status: **${verdict}**.
+Неделя ${iso_week}, статус: ${verdict}.
 
-📊 Details:
-• events captured: ${events_now} ${trend}
-• of them self-monitoring: ${events_self} (useful: ${events_useful})
-• ${canary_line}
-• top scopes: ${top_scopes:-none}
-• top agents: ${top_agents:-none}
-• alerts fired: ${alerts_count}
-• self-heals: ${heals_count}
-• token budget avg: ${tb_avg}/500 ambient (${tb_pct}% of cap)
-
-per-host counts:
-${host_lines}
-⚡ Action: automatic — keep watching (silence ≠ OK)
-
-━━━━━━━━━━━━━━━━━
-
-🇷🇺 Неделя ${iso_week}. Status: **${verdict}**.
-
-📊 Детали:
-• events captured: ${events_now} ${trend}
+• событий: ${events_now} ${trend}
 • из них самонаблюдение: ${events_self} (полезных: ${events_useful})
 • ${canary_line}
-• top scopes: ${top_scopes:-none}
-• top agents: ${top_agents:-none}
-• alerts fired: ${alerts_count}
-• self-heals: ${heals_count}
-• token budget avg: ${tb_avg}/500 ambient (${tb_pct}% от cap)
+• темы: ${top_scopes:-нет}
+• агенты: ${top_agents:-нет}
+• алертов: ${alerts_count}, самолечений: ${heals_count}
+• бюджет токенов: в среднем ${tb_avg}/500 (${tb_pct}%)
 
-per-host counts:
+по хостам:
 ${host_lines}
-⚡ Действие: автоматически — следить (silence ≠ OK)
-
-\`${ts_iso} · ${host_short}\`
+⚡ Действие: автоматически — следить (тишина ≠ OK)
 EOF
 )
 

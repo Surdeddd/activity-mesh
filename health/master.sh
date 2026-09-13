@@ -91,8 +91,8 @@ fi
 if [ "$max_tier" -ge 2 ] && [ "$DRY_RUN" -eq 0 ]; then
     failing=$(printf '%s' "$results_json" | /usr/bin/jq -r \
         '[.[] | select(.status != "ok") | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
-    msg=$(printf 'activity-mesh health: tier=%d ok=%d warn=%d fail=%d critical=%d (host=%s)\n%s' \
-        "$max_tier" "$ok" "$warn" "$fail" "$critical" "$HOST" "$failing")
+    msg=$(printf 'activity-mesh: в норме %d, предупреждений %d, отказов %d, критичных %d (уровень %d, %s)\n%s' \
+        "$ok" "$warn" "$fail" "$critical" "$max_tier" "$HOST" "$failing")
     severity=warn
     [ "$fail" -gt 0 ] || [ "$critical" -gt 0 ] && severity=fail
     if ! am_notify "$msg" "$severity"; then
