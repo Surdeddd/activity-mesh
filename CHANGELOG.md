@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.7] — 2026-09-13
+
+### Fixed
+- **Health alerts carry a source label and go out once.** The weekly digest
+  glued an English and a Russian copy of the same text plus a timestamp
+  footer; it now sends a single Russian text. `am_notify` exports
+  `NOTIFY_LABEL=activity-mesh`, so the report bot names the sender instead of
+  a generic header.
+- **The health summary is no longer a priority alert.** It used `critical=`
+  as a key, and that word alone made every health alert a priority one that
+  went straight to the DM. The counts are now spelled out.
+
 ## [0.4.0-rc.6] — 2026-09-02
 
 ### Fixed
