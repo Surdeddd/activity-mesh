@@ -61,7 +61,11 @@ func redactShardCmd() *cobra.Command {
 			}
 			syncDirVal := cfg.SyncDir
 			if syncArg != "" {
-				syncDirVal = syncArg
+				v, nerr := normalizeDir(syncArg)
+				if nerr != nil {
+					return nerr
+				}
+				syncDirVal = v
 			}
 			host := event.HostName()
 			res, err := redactShard(filepath.Join(syncDirVal, "events-"+host+".jsonl"), cfg.StoreDir, host, dryRun)
@@ -101,7 +105,7 @@ func redactShard(shardPath, storeDir, host string, dryRun bool) (*redactShardRes
 	data, err := os.ReadFile(shardPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return res, nil
+			return nil, fmt.Errorf("no shard for this host at %s", shardPath)
 		}
 		return nil, err
 	}
@@ -154,7 +158,9 @@ func redactEventLine(line []byte) (out []byte, changed, isEvent bool) {
 		return line, false, false
 	}
 	var obj map[string]any
-	if err := json.Unmarshal(trimmed, &obj); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.UseNumber()
+	if err := dec.Decode(&obj); err != nil || dec.Decode(new(json.RawMessage)) != io.EOF {
 		return line, false, false
 	}
 	before, err := json.Marshal(obj)

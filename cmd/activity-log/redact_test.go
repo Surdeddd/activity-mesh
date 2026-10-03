@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Surdeddd/activity-mesh/pkg/event"
 )
 
 func TestRedactEventLine_UnchangedKeepsExactBytes(t *testing.T) {
@@ -64,5 +67,76 @@ func TestRedactShard_ScrubsAndPreserves(t *testing.T) {
 	}
 	if !strings.Contains(gs, "{malformed tail") {
 		t.Errorf("malformed tail dropped: %s", gs)
+	}
+}
+
+func TestRedactShardExpandsTildeInSyncDir(t *testing.T) {
+	_, _, home := sandboxEnv(t)
+	t.Setenv("USERPROFILE", home)
+	alt := filepath.Join(home, "alt")
+	if err := os.MkdirAll(alt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	token := "ghp_" + strings.Repeat("A", 36)
+	shardPath := filepath.Join(alt, "events-"+event.HostName()+".jsonl")
+	line := fmt.Sprintf(`{"v":1,"id":"01HRX0000000000000000000R1","ts":"2026-10-01T00:00:00.000000Z","host":%q,"agent":"a","kind":"note","scope":"s","summary":"leak %s"}`+"\n", event.HostName(), token)
+	if err := os.WriteFile(shardPath, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := redactShardCmd()
+	cmd.SilenceErrors, cmd.SilenceUsage = true, true
+	cmd.SetArgs([]string{"--sync-dir", "~/alt"})
+	out, err := captureStdout(t, cmd.Execute)
+	if err != nil {
+		t.Fatalf("redact-shard --sync-dir '~/alt': %v", err)
+	}
+	raw, _ := os.ReadFile(shardPath)
+	if strings.Contains(string(raw), token) {
+		t.Fatalf("redact-shard --sync-dir '~/alt' reported %q but the token is still in %s", strings.TrimSpace(out), shardPath)
+	}
+	if !strings.Contains(out, "redacted 1 of 1 events") {
+		t.Errorf("unexpected report %q", out)
+	}
+}
+
+func TestRedactShardFailsWhenThisHostHasNoShard(t *testing.T) {
+	syncDir, _, _ := sandboxEnv(t)
+	want := "no shard for this host at " + filepath.Join(syncDir, "events-"+event.HostName()+".jsonl")
+	for _, args := range [][]string{{}, {"--dry-run"}} {
+		cmd := redactShardCmd()
+		cmd.SilenceErrors, cmd.SilenceUsage = true, true
+		cmd.SetArgs(args)
+		out, err := captureStdout(t, cmd.Execute)
+		if err == nil || err.Error() != want {
+			t.Errorf("args %v: err = %v (stdout %q), want %q", args, err, out, want)
+		}
+	}
+}
+
+func TestRedactEventLineKeepsNumberLiteralsExact(t *testing.T) {
+	token := "ghp_" + strings.Repeat("B", 36)
+	line := []byte(`{"v":1,"id":"01HRX0000000000000000000R2","ts":"2026-10-01T00:00:00.000000Z","host":"h","agent":"a","kind":"note","scope":"s","summary":"leak ` + token + `","ext_ts_ns":1759480000123456789,"huge":12345678901234567890123,"ratio":1.50}`)
+	out, changed, isEvent := redactEventLine(line)
+	if !isEvent || !changed {
+		t.Fatalf("precondition: the line carries a secret and must be rewritten (changed=%v isEvent=%v)", changed, isEvent)
+	}
+	if strings.Contains(string(out), token) {
+		t.Fatalf("secret survived: %s", out)
+	}
+	for _, literal := range []string{`"ext_ts_ns":1759480000123456789`, `"huge":12345678901234567890123`, `"ratio":1.50`} {
+		if !strings.Contains(string(out), literal) {
+			t.Errorf("redact-shard altered a non-secret number, missing %s in %s", literal, out)
+		}
+	}
+}
+
+func TestRedactEventLineTreatsTrailingDataAsMalformed(t *testing.T) {
+	secret := "ghp_" + strings.Repeat("C", 36)
+	for _, tail := range []string{` junk`, `{"id":"second"}`, ` 1`} {
+		line := []byte(`{"v":1,"id":"01HRX0000000000000000000R3","summary":"key ` + secret + `"}` + tail)
+		out, changed, isEvent := redactEventLine(line)
+		if isEvent || changed || string(out) != string(line) {
+			t.Errorf("tail %q: isEvent=%v changed=%v out=%s, want the line preserved verbatim as malformed", tail, isEvent, changed, out)
+		}
 	}
 }
