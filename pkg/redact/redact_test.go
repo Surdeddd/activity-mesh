@@ -318,7 +318,6 @@ func TestUserPathRedactsOnlyTheHome(t *testing.T) {
 		{"a chain of overlapping homes is one span", "/a/b:/b/c:/c/d", "/a/b/c/d/x", "[REDACTED:user_path:8]/x", 1},
 		{"invalid UTF-8 after an ASCII home", bob, bob + "\xff/x", red(bob) + "\xff/x", 1},
 		{"invalid UTF-8 after a non-ASCII home", jose, jose + "\xff/x", red(jose) + "\xff/x", 1},
-		{"invalid UTF-8 inside a configured home", "/home/b\xffb", "see /home/b\xffb/x", "see " + red("/home/b\xffb") + "/x", 1},
 		{"home that trims to nothing", "//", "plain text /tmp/x", "plain text /tmp/x", 0},
 	}
 	for _, tc := range cases {
@@ -357,6 +356,27 @@ func TestUserPathUnionOfPrimaryAndExtraHomes(t *testing.T) {
 	}
 	if len(hits) != 1 {
 		t.Errorf("got %d hits, want 1: %+v", len(hits), hits)
+	}
+}
+
+func TestUserPathRedactsConfiguredHomeWithInvalidUTF8(t *testing.T) {
+	const home = "/home/b\xffb"
+	r := &rule{name: "user_path", kind: "env", repType: "user_path", find: homeSpans([]string{home})}
+	var hits []Hit
+	got := replaceSpans("see "+home+"/x", r, &hits)
+	want := fmt.Sprintf("see [REDACTED:user_path:%d]/x", len(home))
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if len(hits) != 1 {
+		t.Errorf("got %d hits, want 1: %+v", len(hits), hits)
+	}
+}
+
+func TestHomeSpansIgnoresEmptyHome(t *testing.T) {
+	got := homeSpans([]string{"", "/home/bob"})("x /home/bob/y")
+	if len(got) != 1 || got[0] != (span{2, 11}) {
+		t.Errorf("got %v, want one span {2 11}", got)
 	}
 }
 

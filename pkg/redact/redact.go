@@ -197,6 +197,9 @@ func homeSpans(homes []string) func(s string) []span {
 	return func(s string) []span {
 		var found []span
 		for _, h := range homes {
+			if h == "" {
+				continue
+			}
 			for from := 0; ; {
 				k := strings.Index(s[from:], h)
 				if k < 0 {
