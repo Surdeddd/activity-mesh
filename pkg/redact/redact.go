@@ -185,24 +185,31 @@ func userPathRe() *regexp.Regexp {
 	if len(homes) == 0 {
 		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
 	}
-	quoted := make([]string, len(homes))
 	for i, h := range homes {
-		quoted[i] = regexp.QuoteMeta(strings.TrimRight(h, "/\\"))
+		homes[i] = strings.TrimRight(h, "/\\")
 	}
-	sort.SliceStable(quoted, func(i, j int) bool { return len(quoted[i]) > len(quoted[j]) })
-	return regexp.MustCompile(`(?:` + strings.Join(quoted, "|") + `)`)
+	sort.SliceStable(homes, func(i, j int) bool { return len(homes[i]) > len(homes[j]) })
+	alternatives := make([]string, len(homes))
+	for i, h := range homes {
+		alternatives[i] = regexp.QuoteMeta(h)
+		if last, _ := utf8.DecodeLastRuneInString(h); isASCIIWord(last) {
+			alternatives[i] += `\b`
+		}
+	}
+	return regexp.MustCompile(`(?:` + strings.Join(alternatives, "|") + `)`)
 }
 
 func continuesHome(s string, lo, hi int) bool {
 	last, _ := utf8.DecodeLastRuneInString(s[lo:hi])
-	next, _ := utf8.DecodeRuneInString(s[hi:])
-	switch {
-	case isASCIIWord(last):
-		return isASCIIWord(next)
-	case unicode.IsLetter(last) || unicode.IsNumber(last):
-		return unicode.IsLetter(next) || unicode.IsNumber(next) || next == '_'
+	if last < utf8.RuneSelf || !isLetterOrNumber(last) {
+		return false
 	}
-	return false
+	next, _ := utf8.DecodeRuneInString(s[hi:])
+	return isLetterOrNumber(next) || next == '_'
+}
+
+func isLetterOrNumber(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
 }
 
 func isASCIIWord(r rune) bool {

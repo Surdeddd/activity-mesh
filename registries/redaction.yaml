@@ -147,13 +147,16 @@ patterns:
       Home-directory prefix. Built DYNAMICALLY at runtime from the current
       user's home plus $ACTIVITY_MESH_REDACT_HOMES (colon-separated extra
       prefixes) — no hardcoded usernames in code or config. The prefixes form
-      one alternation, longest first. A match is kept only if the character
-      after it does not continue the home's last character: after an ASCII
-      letter, digit or underscore only an ASCII letter, digit or underscore
-      continues it; after a non-ASCII letter or number any Unicode letter,
-      number or underscore does; end of text always counts as a boundary. The
-      check runs on the text after the match, so adjacent homes are all
-      redacted.
+      one alternation, longest first, and nothing after a prefix is consumed,
+      so adjacent homes are all redacted. A prefix that ends in an ASCII
+      letter, digit or underscore is followed by an ASCII word boundary inside
+      the regexp: an ASCII word character right after it means a longer name,
+      and the engine then falls back to a shorter configured prefix, so a
+      nested home cannot shadow the primary one. A prefix that ends in a
+      non-ASCII letter or number is kept only if the character after it is not
+      a Unicode letter, number or underscore; that check runs on the text after
+      the match. End of text always counts as a boundary, and a prefix that
+      ends in any other character has no boundary requirement.
     kind: env
     regex: '<dynamic: $HOME + $ACTIVITY_MESH_REDACT_HOMES>'
     replacement: '[REDACTED:user_path:{len}]'

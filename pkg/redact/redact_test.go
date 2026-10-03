@@ -302,6 +302,10 @@ func TestUserPathRedactsOnlyTheHome(t *testing.T) {
 		{"longest configured home wins", bob + ":" + bobby, "see " + bobby + "/x", "see " + red(bobby) + "/x", 1},
 		{"the same home twice in a row", bob, "stat " + bob + bob + "/.config", "stat " + red(bob) + red(bob) + "/.config", 2},
 		{"two different homes in a row", maxHome + ":" + extHome, maxHome + extHome + "/f", red(maxHome) + red(extHome) + "/f", 2},
+		{"nested home does not shadow the primary one", maxHome + ":" + maxHome + "/work", maxHome + "/workshop/x", red(maxHome) + "/workshop/x", 1},
+		{"nested home wins as a whole path component", maxHome + ":" + maxHome + "/work", maxHome + "/work/x", red(maxHome+"/work") + "/x", 1},
+		{"nested home extended by a hyphen does not shadow the shorter one", bob + ":" + bob + "-work", "see " + bob + "-worksee", "see " + red(bob) + "-worksee", 1},
+		{"nested home extended by a hyphen wins as a whole name", bob + ":" + bob + "-work", "see " + bob + "-work/x", "see " + red(bob+"-work") + "/x", 1},
 		{"home that trims to nothing", "//", "plain text /tmp/x", "plain text /tmp/x", 0},
 	}
 	for _, tc := range cases {
