@@ -136,9 +136,13 @@ func (l *logTap) Write(p []byte) (int, error) {
 }
 
 func (l *logTap) has(s string) bool {
+	return l.count(s) > 0
+}
+
+func (l *logTap) count(s string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return strings.Contains(l.buf.String(), s)
+	return strings.Count(l.buf.String(), s)
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -238,14 +242,14 @@ func TestWatchSourceReattachesAReplacedRoot(t *testing.T) {
 		Name: "notes", Path: watchDir, Pattern: "*.md", Op: "create_or_modify",
 		Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "changed {{.Filename}}"},
 	}
-	got := runSourceDuring(t, src, shim, logPath, func(*logTap) {
+	got := runSourceDuring(t, src, shim, logPath, func(tap *logTap) {
 		if err := os.Rename(watchDir, watchDir+".old"); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.MkdirAll(watchDir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(300 * time.Millisecond)
+		waitFor(t, "the replaced root to be re-attached", func() bool { return tap.has("re-attached") })
 		if err := os.WriteFile(filepath.Join(watchDir, "after.md"), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -334,5 +338,229 @@ func TestWatchSourceDoesNotReportASymlinkedDirectory(t *testing.T) {
 	}
 	if strings.Contains(got, "a-link") {
 		t.Fatalf("a symlinked directory was reported as a file: %q", got)
+	}
+}
+
+func TestWatchSourceIgnoresASkippedDirectoryThatArrivesPopulated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	dir := t.TempDir()
+	watchDir := filepath.Join(dir, "project")
+	stage := filepath.Join(dir, "stage", "node_modules")
+	for _, d := range []string{watchDir, filepath.Join(stage, "pkg")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(stage, "pkg", "README.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "emit.log")
+	shim := writeEmitShim(t, dir, logPath)
+	src := Source{
+		Name: "project", Path: watchDir, Pattern: "*.md", Op: "create", Recursive: true,
+		Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "created {{.Filename}}"},
+	}
+	arrived := filepath.Join(watchDir, "node_modules")
+	got := runSourceDuring(t, src, shim, logPath, func(*logTap) {
+		if err := os.Rename(stage, arrived); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(watchDir, "z-first.md"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the first sentinel", func() bool { return emitLogHas(logPath, []string{"created z-first.md"}) })
+		if err := os.WriteFile(filepath.Join(arrived, "pkg", "LATER.md"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(watchDir, "z-second.md"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, "created z-second.md")
+	if !strings.Contains(got, "created z-second.md") {
+		t.Fatalf("the second sentinel was never reported (emit log: %q)", got)
+	}
+	if strings.Contains(got, "node_modules") {
+		t.Fatalf("a skipped directory that arrived populated was announced or watched: %q", got)
+	}
+}
+
+func TestWatchSourceAnnouncesWhatAReplacementRootArrivesWith(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shortRootPoll(t)
+	dir := t.TempDir()
+	watchDir := filepath.Join(dir, "notes")
+	stage := filepath.Join(dir, "stage")
+	for _, d := range []string{watchDir, filepath.Join(stage, "sub")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{filepath.Join(stage, "top.md"), filepath.Join(stage, "sub", "deep.md")} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	logPath := filepath.Join(dir, "emit.log")
+	shim := writeEmitShim(t, dir, logPath)
+	src := Source{
+		Name: "notes", Path: watchDir, Pattern: "*.md", Op: "create_or_modify", Recursive: true,
+		Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "changed {{.Filename}}"},
+	}
+	want := []string{"changed top.md", "changed deep.md"}
+	got := runSourceDuring(t, src, shim, logPath, func(*logTap) {
+		if err := os.Rename(watchDir, watchDir+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(stage, watchDir); err != nil {
+			t.Fatal(err)
+		}
+	}, want...)
+	for _, s := range want {
+		if !strings.Contains(got, s) {
+			t.Errorf("a file the replacement root arrived with was never reported: no %q (emit log: %q)", s, got)
+		}
+	}
+}
+
+func TestWatchSourceDropsEditsInsideTheMovedAwayRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shortRootPoll(t)
+	dir := t.TempDir()
+	watchDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(filepath.Join(watchDir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(watchDir, "sub", "a.md"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "emit.log")
+	shim := writeEmitShim(t, dir, logPath)
+	src := Source{
+		Name: "notes", Path: watchDir, Pattern: "*.md", Op: "create_or_modify", Recursive: true,
+		Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "changed {{.Filename}}"},
+	}
+	movedAway := watchDir + ".old"
+	got := runSourceDuring(t, src, shim, logPath, func(tap *logTap) {
+		if err := os.Rename(watchDir, movedAway); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(movedAway, "sub", "a.md"), []byte("edited"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the root to be reported gone", func() bool { return tap.has("went away") })
+		if err := os.MkdirAll(watchDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "the replaced root to be re-attached", func() bool { return tap.has("re-attached") })
+		if err := os.WriteFile(filepath.Join(watchDir, "z-sentinel.md"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, "changed z-sentinel.md")
+	if !strings.Contains(got, "changed z-sentinel.md") {
+		t.Fatalf("the sentinel file was never reported (emit log: %q)", got)
+	}
+	if strings.Contains(got, "changed a.md") {
+		t.Fatalf("an edit inside the moved-away root was reported under the root's path: %q", got)
+	}
+}
+
+func TestWatchSourceLogsAnUnwatchableRootOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses the directory permissions this test relies on")
+	}
+	for _, tc := range []struct {
+		name      string
+		recursive bool
+	}{{"flat", false}, {"recursive", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			shortRootPoll(t)
+			dir := t.TempDir()
+			watchDir := filepath.Join(dir, "notes")
+			if err := os.MkdirAll(watchDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			logPath := filepath.Join(dir, "emit.log")
+			shim := writeEmitShim(t, dir, logPath)
+			src := Source{
+				Name: "notes", Path: watchDir, Pattern: "*.md", Op: "create_or_modify", Recursive: tc.recursive,
+				Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "changed {{.Filename}}"},
+			}
+			failures := func(tap *logTap) int { return tap.count(`re-attach "`) + tap.count("watch add failed") }
+			got := runSourceDuring(t, src, shim, logPath, func(tap *logTap) {
+				if err := os.Rename(watchDir, watchDir+".old"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(watchDir, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				waitFor(t, "a failed re-attach", func() bool { return failures(tap) > 0 })
+				time.Sleep(10 * rootPoll)
+				if err := os.Chmod(watchDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				waitFor(t, "the recovered root to be re-attached", func() bool { return tap.has("re-attached") })
+				if n := failures(tap); n != 1 {
+					t.Errorf("a root that could not be watched was logged %d times, want once until it recovers", n)
+				}
+				if err := os.WriteFile(filepath.Join(watchDir, "after.md"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}, "changed after.md")
+			if !strings.Contains(got, "changed after.md") {
+				t.Fatalf("the recovered root was not watched (emit log: %q)", got)
+			}
+		})
+	}
+}
+
+func TestWatchSourceReattachesARootReplacedTwice(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shortRootPoll(t)
+	dir := t.TempDir()
+	watchDir := filepath.Join(dir, "notes")
+	if err := os.MkdirAll(watchDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "emit.log")
+	shim := writeEmitShim(t, dir, logPath)
+	src := Source{
+		Name: "notes", Path: watchDir, Pattern: "*.md", Op: "create_or_modify",
+		Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "changed {{.Filename}}"},
+	}
+	rounds := []struct{ movedAway, file string }{{"notes.old1", "round1.md"}, {"notes.old2", "round2.md"}}
+	got := runSourceDuring(t, src, shim, logPath, func(tap *logTap) {
+		for i, r := range rounds {
+			if err := os.Rename(watchDir, filepath.Join(dir, r.movedAway)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(watchDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "the replaced root to be re-attached", func() bool { return tap.count("re-attached") == i+1 })
+			if err := os.WriteFile(filepath.Join(watchDir, r.file), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			waitFor(t, "the file in the re-attached root", func() bool { return emitLogHas(logPath, []string{"changed " + r.file}) })
+		}
+		time.Sleep(5 * rootPoll)
+		if n := tap.count("re-attached"); n != len(rounds) {
+			t.Errorf("re-attached %d times for %d replacements: the retry timer kept running after a successful re-attach", n, len(rounds))
+		}
+	}, "changed round1.md", "changed round2.md")
+	for _, r := range rounds {
+		if !strings.Contains(got, "changed "+r.file) {
+			t.Errorf("round %s went unreported (emit log: %q)", r.file, got)
+		}
 	}
 }

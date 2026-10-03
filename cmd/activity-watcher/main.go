@@ -479,9 +479,8 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 			return nil
 		})
 	}
-	rootGone := false
-	reattach := time.NewTicker(rootPoll)
-	defer reattach.Stop()
+	rootGone, reattachFailing := false, false
+	var reattach <-chan time.Time
 
 	for {
 		select {
@@ -496,12 +495,13 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 			}
 			if ev.Name == addRoot && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 				rootGone = true
+				reattach = time.After(rootPoll)
 				log.Printf("source=%q root %q went away, waiting for it to return", src.Name, addRoot)
 				continue
 			}
 			if ev.Op&fsnotify.Create != 0 {
 				if fi, serr := os.Stat(ev.Name); serr == nil && fi.IsDir() {
-					if recursive {
+					if recursive && !skipWatchDir(filepath.Base(ev.Name)) {
 						addTree(w, ev.Name, src.Name)
 						announce(ev.Name)
 					}
@@ -509,31 +509,30 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 				}
 			}
 			handle(ev)
-		case <-reattach.C:
-			if !rootGone {
-				continue
-			}
+		case <-reattach:
+			reattach = time.After(rootPoll)
 			if fi, serr := os.Stat(addRoot); serr != nil || !fi.IsDir() {
 				continue
 			}
 			fresh, err := fsnotify.NewWatcher()
+			if err == nil {
+				if err = fresh.Add(addRoot); err != nil {
+					fresh.Close()
+				}
+			}
 			if err != nil {
-				log.Printf("source=%q re-attach %q failed: %v", src.Name, addRoot, err)
+				if !reattachFailing {
+					reattachFailing = true
+					log.Printf("source=%q re-attach %q failed: %v", src.Name, addRoot, err)
+				}
 				continue
 			}
 			if recursive {
-				if n, _ := addTree(fresh, addRoot, src.Name); n == 0 {
-					fresh.Close()
-					continue
-				}
-			} else if err := fresh.Add(addRoot); err != nil {
-				fresh.Close()
-				log.Printf("source=%q re-attach %q failed: %v", src.Name, addRoot, err)
-				continue
+				addTree(fresh, addRoot, src.Name)
 			}
 			w.Close()
 			w = fresh
-			rootGone = false
+			rootGone, reattachFailing, reattach = false, false, nil
 			announce(addRoot)
 			log.Printf("source=%q root %q re-attached", src.Name, addRoot)
 		case <-rollup.C:
