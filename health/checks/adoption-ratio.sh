@@ -5,34 +5,33 @@
 am_start
 NAME=adoption-ratio
 SYNC="$ACTIVITY_MESH_SYNC"
+WINDOW_S="${ACTIVITY_MESH_ADOPTION_WINDOW_S:-604800}"
 
 if [ ! -d "$SYNC" ]; then am_emit "$NAME" 2 warn "sync dir missing"; exit 0; fi
 
-TMP=$(mktemp)
-trap 'rm -f "$TMP"' EXIT
+cutoff=$(( $(date +%s) - WINDOW_S ))
+stats=$(awk 1 "$SYNC"/events-*.jsonl 2>/dev/null | "$AM_JQ" -nrR --argjson cutoff "$cutoff" '
+    [inputs | fromjson? | select(type == "object")
+     | select(((.ts // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0) >= $cutoff)
+     | select((.agent // "") != "heartbeat" and (.kind // "") != "canary"
+              and (.kind // "") != "heartbeat" and (.scope // "") != "activity-mesh")
+     | (.agent // "unknown")]
+    | group_by(.) | map({a: .[0], n: length}) | sort_by(-.n)
+    | "\(map(.n) | add // 0) \(length) \(.[0].a // "-") \(.[0].n // 0)"')
+read -r total n top max <<< "${stats:-0 0 - 0}"
 
-for f in "$SYNC"/events-*.jsonl; do
-    [ -f "$f" ] || continue
-    /usr/bin/jq -r '.agent // empty' < <(tail -n 500 "$f") 2>/dev/null
-done >> "$TMP"
-
-total=$(/usr/bin/wc -l < "$TMP" | tr -d ' ')
-if [ "$total" -lt 10 ]; then
-    am_emit "$NAME" 0 ok "insufficient data (total=$total)"; exit 0
-fi
-
-top_line=$(/usr/bin/sort "$TMP" | /usr/bin/uniq -c | /usr/bin/sort -nr | head -1)
-max=$(printf '%s' "$top_line" | awk '{print $1}')
-max_a=$(printf '%s' "$top_line" | awk '{$1=""; sub(/^ /,""); print}')
-n=$(/usr/bin/sort -u "$TMP" | /usr/bin/wc -l | tr -d ' ')
-
-[ "$n" -le 1 ] && { am_emit "$NAME" 2 warn "only $n agent writing"; exit 0; }
-
-others=$(( total - max )); [ "$others" -lt 1 ] && others=1
-ratio=$(( max / others ))
-if [ "$ratio" -gt 5 ]; then
-    am_emit "$NAME" 2 warn "agent=$max_a dominates ${ratio}:1 (max=$max,others=$others)"
+days=$(( WINDOW_S / 86400 ))
+if [ "$n" -eq 0 ]; then
+    am_emit "$NAME" 1 warn "no agent events in ${days}d, only self-monitoring"
+elif [ "$n" -eq 1 ]; then
+    am_emit "$NAME" 1 warn "only $top wrote in ${days}d ($total events)"
 else
-    am_emit "$NAME" 1 ok "balanced (top=$max_a ratio=${ratio}:1)"
+    others=$(( total - max ))
+    ratio=$(awk -v m="$max" -v o="$others" 'BEGIN { printf "%.1f", m / o }')
+    if awk -v m="$max" -v o="$others" 'BEGIN { exit !(m > 5 * o) }'; then
+        am_emit "$NAME" 1 warn "$top dominates ${ratio}:1 across $n agents in ${days}d ($max of $total events)"
+    else
+        am_emit "$NAME" 1 ok "balanced: $n agents in ${days}d, top=$top ${ratio}:1"
+    fi
 fi
 exit 0
