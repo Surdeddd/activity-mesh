@@ -63,6 +63,28 @@ func captureStdout(t *testing.T, f func() error) (string, error) {
 	return string(out), runErr
 }
 
+func captureStderr(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stderr
+	os.Stderr = w
+	runErr := f()
+	_ = w.Close()
+	os.Stderr = old
+	out, _ := io.ReadAll(r)
+	return string(out), runErr
+}
+
+func dbURLAtCapBoundary() (summary, password string) {
+	password = "S3cr3tPassw0rd"
+	head := "postgres://admin:" + password
+	pad := strings.Repeat("word ", 200)[:event.MaxSummaryRunes-2-len(head)] + " "
+	return pad + head + "@db.internal:5432/app", password
+}
+
 func TestEnforceRegistryLifecycle(t *testing.T) {
 	sync := t.TempDir()
 	if err := os.WriteFile(filepath.Join(sync, "scopes.yaml"), []byte(contractScopesYAML), 0o644); err != nil {
@@ -124,9 +146,7 @@ func TestNormalizeSummaryHardCap(t *testing.T) {
 
 func TestEmitTruncationBeforeRedactionLeaksPassword(t *testing.T) {
 	syncDir, _, _ := sandboxEnv(t)
-	password := "S3cr3tPassw0rd"
-	head := "postgres://admin:" + password
-	summary := strings.Repeat("word ", 200)[:event.MaxSummaryRunes-2-len(head)] + " " + head + "@db.internal:5432/app"
+	summary, password := dbURLAtCapBoundary()
 	if red, _ := redact.Apply(summary); strings.Contains(red, password) {
 		t.Fatal("precondition: the untruncated summary must be redactable")
 	}
@@ -141,6 +161,39 @@ func TestEmitTruncationBeforeRedactionLeaksPassword(t *testing.T) {
 	}
 	if strings.Contains(string(raw), password) {
 		t.Fatalf("emit wrote the db password to the shard in plaintext (summary truncated before redaction):\n%s", raw)
+	}
+}
+
+func TestEmitTruncationWarningFollowsStoredEvent(t *testing.T) {
+	shrinks, _ := dbURLAtCapBoundary()
+	cases := []struct {
+		name    string
+		summary string
+		want    bool
+	}{
+		{"redaction inflates past the cap", strings.TrimSpace(strings.Repeat("10.0.0.1 ", 55)), true},
+		{"redaction shrinks under the cap", shrinks, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			syncDir, _, _ := sandboxEnv(t)
+			cmd := emitCmd()
+			cmd.SetArgs([]string{"--kind", "note", "--scope", "s", "--summary", tc.summary})
+			stderr, err := captureStderr(t, func() error {
+				_, runErr := captureStdout(t, cmd.Execute)
+				return runErr
+			})
+			if err != nil {
+				t.Fatalf("emit: %v", err)
+			}
+			stored := readShard(t, syncDir, event.HostName())
+			if len(stored) != 1 || stored[0].Truncated != tc.want {
+				t.Fatalf("premise broken: want one stored event with truncated=%v, got %+v", tc.want, stored)
+			}
+			if warned := strings.Contains(stderr, "summary truncated"); warned != tc.want {
+				t.Fatalf("warning printed=%v, want %v (stored truncated=%v): %q", warned, tc.want, stored[0].Truncated, stderr)
+			}
+		})
 	}
 }
 

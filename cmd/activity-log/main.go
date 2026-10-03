@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -277,9 +276,6 @@ func emitCmd() *cobra.Command {
 			if err := enforceRegistry(cfg.SyncDir, kind, scope); err != nil {
 				return err
 			}
-			if utf8.RuneCountInString(summary) > event.MaxSummaryRunes {
-				fmt.Fprintf(os.Stderr, "warn: summary truncated to %d chars (truncated=true recorded)\n", event.MaxSummaryRunes)
-			}
 			opts := []event.Option{}
 			if ref != "" {
 				opts = append(opts, event.WithRef(ref))
@@ -305,6 +301,9 @@ func emitCmd() *cobra.Command {
 			line, hits, err := ev.Marshal()
 			if err != nil {
 				return err
+			}
+			if ev.Truncated {
+				fmt.Fprintf(os.Stderr, "warn: summary truncated to %d chars (truncated=true recorded)\n", event.MaxSummaryRunes)
 			}
 			if err := shard.AppendLocked(cfg.SyncDir, ev.Host, line); err != nil {
 				return err
