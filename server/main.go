@@ -479,7 +479,12 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "ts must be RFC3339 or canonical event layout")
 		return
 	}
-	p["ts"] = at.UTC().Format("2006-01-02T15:04:05.000000Z")
+	canonicalTS := at.UTC().Format("2006-01-02T15:04:05.000000Z")
+	if _, err := event.ParseTS(canonicalTS); err != nil {
+		writeErr(w, http.StatusBadRequest, "ts must fall within years 0000-9999 once converted to UTC")
+		return
+	}
+	p["ts"] = canonicalTS
 	if !labelRe.MatchString(kind) || !labelRe.MatchString(scope) || !labelRe.MatchString(agent) {
 		writeErr(w, http.StatusBadRequest, "kind/scope/agent must match ^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 		return

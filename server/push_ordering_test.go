@@ -166,6 +166,8 @@ func TestHandlePushStoresTimestampAsCanonicalUTC(t *testing.T) {
 		{"no fraction", "2026-10-04T07:00:00Z", "2026-10-04T07:00:00.000000Z"},
 		{"nanoseconds", "2026-10-04T07:00:00.123456789Z", "2026-10-04T07:00:00.123456Z"},
 		{"already canonical", "2026-10-04T07:00:00.123456Z", "2026-10-04T07:00:00.123456Z"},
+		{"earliest year", "0000-01-01T01:00:00+01:00", "0000-01-01T00:00:00.000000Z"},
+		{"latest year", "9999-12-31T22:59:59.999999-01:00", "9999-12-31T23:59:59.999999Z"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,6 +198,28 @@ func TestHandlePushStoresTimestampAsCanonicalUTC(t *testing.T) {
 			}
 			if indexed[0].TS != tc.want || indexed[0].TSUnix != wantAt.Unix() {
 				t.Errorf("indexed ts = %q (unix %d), want %q (unix %d)", indexed[0].TS, indexed[0].TSUnix, tc.want, wantAt.Unix())
+			}
+		})
+	}
+}
+
+func TestHandlePushRejectsTimestampWhoseUTCFormLeavesTheYearRange(t *testing.T) {
+	cases := []struct {
+		name, sent string
+	}{
+		{"before year 0000", "0000-01-01T00:30:00+01:00"},
+		{"after year 9999", "9999-12-31T23:30:00-01:00"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := newTestDaemon(t)
+			for attempt := 1; attempt <= 2; attempt++ {
+				if w := doPush(t, d, pushBody(map[string]any{"ts": tc.sent})); w.Code != http.StatusBadRequest {
+					t.Fatalf("attempt %d: push of ts %q answered %d %s, want 400", attempt, tc.sent, w.Code, w.Body.String())
+				}
+			}
+			if _, err := os.Stat(filepath.Join(d.syncDir, "events-test-host.jsonl")); !os.IsNotExist(err) {
+				t.Errorf("a rejected push left a shard behind (stat err=%v)", err)
 			}
 		})
 	}
