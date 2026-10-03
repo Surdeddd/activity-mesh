@@ -605,7 +605,7 @@ func (i *Index) QueryContext(ctx context.Context, f QueryFilter) ([]Event, error
 		sb.WriteString(` AND ulid = ?`)
 		args = append(args, f.ULID)
 	}
-	sb.WriteString(` ORDER BY ts_unix DESC`)
+	sb.WriteString(` ORDER BY ts_unix DESC, ts DESC, ulid DESC`)
 	if f.Limit > 0 {
 		sb.WriteString(` LIMIT ?`)
 		args = append(args, f.Limit)

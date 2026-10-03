@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Surdeddd/activity-mesh/pkg/index"
 )
 
 func pushWithHeaders(t *testing.T, d *daemon, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -151,4 +154,49 @@ func TestHandlePushAllowsScriptedClients(t *testing.T) {
 
 func ulidForIndex(i int) string {
 	return "01HRX0000000000000000000A" + string(rune('1'+i))
+}
+
+func TestHandlePushStoresTimestampAsCanonicalUTC(t *testing.T) {
+	const canonical = "2006-01-02T15:04:05.000000Z"
+	cases := []struct {
+		name, sent, want string
+	}{
+		{"positive offset", "2026-10-04T10:00:00.5+03:00", "2026-10-04T07:00:00.500000Z"},
+		{"negative offset", "2026-10-03T23:30:00-05:00", "2026-10-04T04:30:00.000000Z"},
+		{"no fraction", "2026-10-04T07:00:00Z", "2026-10-04T07:00:00.000000Z"},
+		{"nanoseconds", "2026-10-04T07:00:00.123456789Z", "2026-10-04T07:00:00.123456Z"},
+		{"already canonical", "2026-10-04T07:00:00.123456Z", "2026-10-04T07:00:00.123456Z"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, _ := newTestDaemon(t)
+			if w := doPush(t, d, pushBody(map[string]any{"ts": tc.sent})); w.Code != http.StatusOK {
+				t.Fatalf("push: %d %s", w.Code, w.Body.String())
+			}
+			lines := rawShardLines(t, d)
+			if len(lines) != 1 {
+				t.Fatalf("want one shard line, got %d", len(lines))
+			}
+			var stored struct {
+				TS string `json:"ts"`
+			}
+			if err := json.Unmarshal([]byte(lines[0]), &stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored.TS != tc.want {
+				t.Errorf("shard ts = %q, want %q", stored.TS, tc.want)
+			}
+			wantAt, err := time.Parse(canonical, tc.want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexed, err := d.idx.Query(index.QueryFilter{Limit: 1})
+			if err != nil || len(indexed) != 1 {
+				t.Fatalf("index query: %v, %d rows", err, len(indexed))
+			}
+			if indexed[0].TS != tc.want || indexed[0].TSUnix != wantAt.Unix() {
+				t.Errorf("indexed ts = %q (unix %d), want %q (unix %d)", indexed[0].TS, indexed[0].TSUnix, tc.want, wantAt.Unix())
+			}
+		})
+	}
 }

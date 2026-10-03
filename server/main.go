@@ -475,10 +475,12 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "id must be a 26-char ULID")
 		return
 	}
-	if _, err := event.ParseTS(ts); err != nil {
+	at, err := event.ParseTS(ts)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "ts must be RFC3339 or canonical event layout")
 		return
 	}
+	p["ts"] = at.UTC().Format("2006-01-02T15:04:05.000000Z")
 	if !labelRe.MatchString(kind) || !labelRe.MatchString(scope) || !labelRe.MatchString(agent) {
 		writeErr(w, http.StatusBadRequest, "kind/scope/agent must match ^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 		return

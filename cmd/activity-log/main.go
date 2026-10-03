@@ -396,12 +396,7 @@ func queryCmd() *cobra.Command {
 				}
 				filtered = append(filtered, e)
 			}
-			sort.SliceStable(filtered, func(i, j int) bool {
-				if filtered[i].TS == filtered[j].TS {
-					return filtered[i].MonotonicSeq < filtered[j].MonotonicSeq
-				}
-				return filtered[i].TS < filtered[j].TS
-			})
+			sortOldestFirst(filtered)
 			if limit > 0 && len(filtered) > limit {
 				filtered = filtered[len(filtered)-limit:]
 			}
@@ -428,6 +423,30 @@ func parseDuration(s string) (time.Duration, error) {
 		return n * 24, nil
 	}
 	return time.ParseDuration(s)
+}
+
+func sortOldestFirst(events []event.Event) {
+	type stamped struct {
+		event.Event
+		at time.Time
+	}
+	s := make([]stamped, len(events))
+	for i, e := range events {
+		s[i].Event = e
+		s[i].at, _ = event.ParseTS(e.TS)
+	}
+	sort.SliceStable(s, func(i, j int) bool {
+		if !s[i].at.Equal(s[j].at) {
+			return s[i].at.Before(s[j].at)
+		}
+		if s[i].MonotonicSeq != s[j].MonotonicSeq {
+			return s[i].MonotonicSeq < s[j].MonotonicSeq
+		}
+		return s[i].ID < s[j].ID
+	})
+	for i := range s {
+		events[i] = s[i].Event
+	}
 }
 
 func readEvents(syncDir string) ([]event.Event, error) {
