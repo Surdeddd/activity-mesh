@@ -25,12 +25,16 @@ SESSION_ID="${JQ_OUT##*"${SEP}"}"
 [ -z "$SESSION_ID" ] && SESSION_ID="unknown"
 [ -z "$PROMPT" ] && exit 0
 
+SESSION_CAP=2000
+PER_FIRE_CAP=500
+MIN_FIRE=100
 TOKENS_FILE="$STATE_DIR/tokens-$SESSION_ID"
 /usr/bin/find "$STATE_DIR" -name 'tokens-*' -mtime +1 -delete 2>/dev/null || true
 TOKENS_USED=0
 [ -f "$TOKENS_FILE" ] && { read -r TOKENS_USED < "$TOKENS_FILE" || TOKENS_USED=0; }
 case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
-[ "$TOKENS_USED" -gt 2000 ] && { log "session=$SESSION_ID over budget, silent"; exit 0; }
+REMAINING=$(( SESSION_CAP - TOKENS_USED ))
+[ "$REMAINING" -lt "$MIN_FIRE" ] && { log "session=$SESSION_ID over budget ($TOKENS_USED/$SESSION_CAP), silent"; exit 0; }
 
 if command -v python3 >/dev/null 2>&1; then
     LOWER=$(printf '%s' "$PROMPT" | python3 -c 'import sys; sys.stdout.write(sys.stdin.read().lower())' 2>/dev/null)
@@ -105,9 +109,12 @@ esac
 RESULT=$("$BIN" "${ARGS[@]}" 2>/dev/null || true)
 [ -z "$RESULT" ] && { log "no events intent=$INTENT"; exit 0; }
 
-MAX_CHARS=2000
+FIRE_CAP=$PER_FIRE_CAP
+[ "$REMAINING" -lt "$FIRE_CAP" ] && FIRE_CAP=$REMAINING
+MAX_CHARS=$(( FIRE_CAP * 4 ))
+MARK="…[truncated]"
 [ "${#RESULT}" -gt "$MAX_CHARS" ] && RESULT=$(printf '%s\n' "$RESULT" | /usr/bin/head -n 8)
-[ "${#RESULT}" -gt "$MAX_CHARS" ] && RESULT="${RESULT:0:$MAX_CHARS}…[truncated]"
+[ "${#RESULT}" -gt "$MAX_CHARS" ] && RESULT="${RESULT:0:$(( MAX_CHARS - ${#MARK} ))}$MARK"
 
 FIRE_TOKENS=$(( ${#RESULT} / 4 ))
 NEW_TOKENS=$(( TOKENS_USED + FIRE_TOKENS ))

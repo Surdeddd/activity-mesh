@@ -234,6 +234,34 @@ run "$ROUTER" "$(pj 'статус по задачам' capped)" ACTIVITY_MESH_BI
 assert_rc0; assert_silent; assert_stub_not_called
 end_case
 
+LONG_LINE="$(printf 'x%.0s' $(seq 1 3000))"
+LONG_LINES="$(for _ in 1 2 3 4 5 6 7 8; do printf '%s\n' "$(printf 'y%.0s' $(seq 1 230))"; done)"
+
+begin_case "router: session near the cap -> injection trimmed to the remaining budget"
+mkdir -p "$HOMEDIR/.local/state/activity-mesh"
+printf '1900\n' > "$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-nearcap"
+run "$ROUTER" "$(pj 'что было сегодня' nearcap)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="$LONG_LINES"
+assert_rc0
+assert_emits "UserPromptSubmit" "[truncated]"
+cum=$(cat "$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-nearcap" 2>/dev/null)
+[ "${cum:-0}" -le 2000 ] || err "cumulative tokens $cum exceed the 2000 hard cap"
+end_case
+
+begin_case "router: one injection never exceeds 500 tokens, truncation marker included"
+run "$ROUTER" "$(pj 'что было сегодня' perfire)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="$LONG_LINE"
+assert_rc0
+assert_emits "UserPromptSubmit" "[truncated]"
+fire=$(tail -1 "$HOMEDIR/.local/state/activity-mesh/injections.log" 2>/dev/null | cut -d' ' -f3)
+[ "${fire:-999}" -le 500 ] || err "per-fire tokens $fire exceed the 500 cap"
+end_case
+
+begin_case "router: less than 100 tokens left -> silent, no query"
+mkdir -p "$HOMEDIR/.local/state/activity-mesh"
+printf '1950\n' > "$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-exhausted"
+run "$ROUTER" "$(pj 'что было сегодня' exhausted)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt"
+assert_rc0; assert_silent; assert_stub_not_called
+end_case
+
 begin_case "router: emitted injection appends per-fire telemetry line"
 run "$ROUTER" "$(pj 'статус по задачам' telem)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-telem"
 assert_rc0
