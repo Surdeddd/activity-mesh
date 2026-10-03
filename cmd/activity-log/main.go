@@ -450,15 +450,12 @@ func sortOldestFirst(events []event.Event) {
 }
 
 func readEvents(syncDir string) ([]event.Event, error) {
-	matches, err := filepath.Glob(filepath.Join(syncDir, "events-*.jsonl"))
+	shards, err := shard.List(syncDir)
 	if err != nil {
 		return nil, err
 	}
 	var events []event.Event
-	for _, p := range matches {
-		if !shard.IsShardName(filepath.Base(p)) {
-			continue
-		}
+	for _, p := range shards {
 		f, err := os.Open(p)
 		if err != nil {
 			return nil, err
@@ -515,15 +512,9 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			matches, err := filepath.Glob(filepath.Join(cfg.SyncDir, "events-*.jsonl"))
+			shards, err := shard.List(cfg.SyncDir)
 			if err != nil {
 				return err
-			}
-			var shards []string
-			for _, p := range matches {
-				if shard.IsShardName(filepath.Base(p)) {
-					shards = append(shards, p)
-				}
 			}
 			if len(shards) == 0 {
 				fmt.Println("no per-host shards yet")

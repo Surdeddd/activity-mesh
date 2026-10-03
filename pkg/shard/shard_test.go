@@ -3,6 +3,7 @@ package shard
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -56,6 +57,45 @@ func TestIsShardNameAcceptsEveryPathItBuilds(t *testing.T) {
 		}
 		if name := filepath.Base(p); !IsShardName(name) {
 			t.Errorf("IsShardName(%q) = false for the shard Path built for host %q", name, host)
+		}
+	}
+}
+
+func TestListReturnsTheLiveShardsSorted(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"events-zeta.jsonl",
+		"events-alpha.jsonl",
+		"events-mini.jsonl",
+		"events-alpha.sync-conflict-20261003-010203-ABCDEFG.jsonl",
+		"events-mini.jsonl.gz",
+		"scopes.yaml",
+		"notes.jsonl",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := List(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Join(dir, "events-alpha.jsonl"),
+		filepath.Join(dir, "events-mini.jsonl"),
+		filepath.Join(dir, "events-zeta.jsonl"),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("List = %v, want %v", got, want)
+	}
+}
+
+func TestListOfAnEmptyOrMissingDirIsEmpty(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{dir, filepath.Join(dir, "missing")} {
+		got, err := List(d)
+		if err != nil || len(got) != 0 {
+			t.Errorf("List(%q) = %v, %v; want no shards and no error", d, got, err)
 		}
 	}
 }

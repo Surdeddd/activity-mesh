@@ -484,17 +484,14 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	matches, err := filepath.Glob(filepath.Join(absDir, "events-*.jsonl"))
+	shards, err := shard.List(absDir)
 	if err != nil {
 		return 0, err
 	}
 	total := 0
 	known := map[string]bool{}
 	var errs []error
-	for _, m := range matches {
-		if !shard.IsShardName(filepath.Base(m)) {
-			continue
-		}
+	for _, m := range shards {
 		if abs, err := filepath.Abs(m); err == nil {
 			known[abs] = true
 		}
