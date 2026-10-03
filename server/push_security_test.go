@@ -287,29 +287,37 @@ func TestRoutesServeOnlyLocalhostAndIPLiteralHosts(t *testing.T) {
 	}
 }
 
-func TestHandlePushRejectsDeeplyNestedPayload(t *testing.T) {
+func TestHandlePushAcceptsOnlyPayloadsTheIndexCanReadBack(t *testing.T) {
 	d, _ := newTestDaemon(t)
+	nested := func(depth int) string { return strings.Repeat("[", depth) + strings.Repeat("]", depth) }
 	cases := []struct {
-		id    string
-		depth int
-		want  int
+		id   string
+		x    string
+		want int
 	}{
-		{"01HRX00000000000000000NP01", 1001, http.StatusBadRequest},
-		{"01HRX00000000000000000NP02", maxPushJSONDepth + 1, http.StatusBadRequest},
-		{"01HRX00000000000000000NP03", maxPushJSONDepth, http.StatusOK},
+		{"01HRX00000000000000000NP01", nested(1001), http.StatusBadRequest},
+		{"01HRX00000000000000000NP02", nested(maxPushJSONDepth + 1), http.StatusBadRequest},
+		{"01HRX00000000000000000NP03", "1e400", http.StatusBadRequest},
+		{"01HRX00000000000000000NP04", "[-1e400]", http.StatusBadRequest},
+		{"01HRX00000000000000000NP05", nested(maxPushJSONDepth), http.StatusOK},
+		{"01HRX00000000000000000NP06", "[1.5,-1.7976931348623157e308,1e-400]", http.StatusOK},
 	}
+	accepted := 0
 	for _, c := range cases {
-		nested := strings.Repeat("[", c.depth) + strings.Repeat("]", c.depth)
-		body := strings.Replace(pushBody(map[string]any{"id": c.id}), `{`, `{"x":`+nested+`,`, 1)
-		if w := doPush(t, d, body); w.Code != c.want {
-			t.Fatalf("payload nested %d levels deep: got %d %s, want %d", c.depth, w.Code, w.Body.String(), c.want)
+		body := strings.Replace(pushBody(map[string]any{"id": c.id}), `{`, `{"x":`+c.x+`,`, 1)
+		w := doPush(t, d, body)
+		if w.Code != c.want {
+			t.Fatalf("x=%.40s: got %d %s, want %d", c.x, w.Code, w.Body.String(), c.want)
+		}
+		if w.Code == http.StatusOK {
+			accepted++
 		}
 	}
-	if lines := rawShardLines(t, d); len(lines) != 1 {
-		t.Fatalf("shard holds %d lines, want only the accepted payload", len(lines))
+	if lines := rawShardLines(t, d); len(lines) != accepted {
+		t.Fatalf("shard holds %d lines, want the %d accepted payloads", len(lines), accepted)
 	}
-	if n := recentCount(t, d); n != 1 {
-		t.Fatalf("/recent shows %d events, want 1: every payload /push accepts must stay indexable", n)
+	if n := recentCount(t, d); n != accepted {
+		t.Fatalf("/recent shows %d events, want %d: every payload /push accepts must stay indexable", n, accepted)
 	}
 }
 

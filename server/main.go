@@ -443,6 +443,10 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("payload nested %d levels deep (max %d)", depth, maxPushJSONDepth))
 		return
 	}
+	if n, bad := outOfRangeNumber(p); bad {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("number %s is out of the float64 range the index can read", n))
+		return
+	}
 	if raw, present := p["v"]; present {
 		n, ok := raw.(json.Number)
 		v, err := n.Int64()
@@ -626,6 +630,28 @@ func badlyTypedFields(p map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func outOfRangeNumber(v any) (json.Number, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		if _, err := t.Float64(); err != nil {
+			return t, true
+		}
+	case map[string]any:
+		for _, c := range t {
+			if n, bad := outOfRangeNumber(c); bad {
+				return n, true
+			}
+		}
+	case []any:
+		for _, c := range t {
+			if n, bad := outOfRangeNumber(c); bad {
+				return n, true
+			}
+		}
+	}
+	return "", false
 }
 
 // alreadyIndexed reports whether this ULID is already in the index — the cheap
