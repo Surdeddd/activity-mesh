@@ -262,6 +262,17 @@ run "$ROUTER" "$(pj 'что было сегодня' exhausted)" ACTIVITY_MESH_B
 assert_rc0; assert_silent; assert_stub_not_called
 end_case
 
+begin_case "router: a zero-padded token file is read as decimal, never as octal"
+mkdir -p "$HOMEDIR/.local/state/activity-mesh"
+for pair in 0800:1300 00500:1000; do
+    printf '%s\n' "${pair%%:*}" > "$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-padded"
+    run "$ROUTER" "$(pj 'что было сегодня' padded)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="$LONG_LINE"
+    assert_rc0
+    cum=$(cat "$HOMEDIR/.local/state/activity-mesh/tokens-hooktest-$$-padded" 2>/dev/null)
+    [ "${cum:-0}" -eq "${pair##*:}" ] || err "tokens file ${pair%%:*}: cumulative [$cum], want ${pair##*:}"
+done
+end_case
+
 begin_case "router: emitted injection appends per-fire telemetry line"
 run "$ROUTER" "$(pj 'статус по задачам' telem)" ACTIVITY_MESH_BIN="$STUB" STUB_OUTPUT="evt-telem"
 assert_rc0

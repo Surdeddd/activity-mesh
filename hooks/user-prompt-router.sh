@@ -33,6 +33,7 @@ TOKENS_FILE="$STATE_DIR/tokens-$SESSION_ID"
 TOKENS_USED=0
 [ -f "$TOKENS_FILE" ] && { read -r TOKENS_USED < "$TOKENS_FILE" || TOKENS_USED=0; }
 case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
+TOKENS_USED=$(( 10#$TOKENS_USED ))
 REMAINING=$(( SESSION_CAP - TOKENS_USED ))
 [ "$REMAINING" -lt "$MIN_FIRE" ] && { log "session=$SESSION_ID over budget ($TOKENS_USED/$SESSION_CAP), silent"; exit 0; }
 
