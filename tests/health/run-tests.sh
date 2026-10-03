@@ -268,7 +268,7 @@ printf '%s s1 400\n%s s1 300\n%s s2 100\n' "$(isotime $((NOW - 3600)))" "$(isoti
 OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
     bash "$HEALTH/weekly-digest.sh" --dry-run 2>"$C/stderr")
 printf '%s' "$OUT" | grep -q 'алертов: 3' || err "expected 3 alerts in the last 7 days: $OUT"
-printf '%s' "$OUT" | grep -q '5/155' || err "only the 5 conclusive failures out of 155 canaries count: $OUT"
+printf '%s' "$OUT" | grep -q 'canary: 5/155' || err "only the 5 conclusive failures out of 155 canaries count: $OUT"
 printf '%s' "$OUT" | grep -q 'самолечений' && err "self-heal count has no producer and must go: $OUT"
 printf '%s' "$OUT" | grep -qE '/2000|/500 за' || err "token budget must be per fire and per session: $OUT"
 end_case
