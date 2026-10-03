@@ -10,9 +10,9 @@ WINDOW_S="${ACTIVITY_MESH_ADOPTION_WINDOW_S:-604800}"
 if [ ! -d "$SYNC" ]; then am_emit "$NAME" 2 warn "sync dir missing"; exit 0; fi
 
 cutoff=$(( $(date +%s) - WINDOW_S ))
-stats=$(awk 1 "$SYNC"/events-*.jsonl 2>/dev/null | "$AM_JQ" -nrR --argjson cutoff "$cutoff" '
+stats=$(awk 1 "$SYNC"/events-*.jsonl 2>/dev/null | "$AM_JQ" -nrR --argjson cutoff "$cutoff" "$AM_JQ_DEFS"'
     [inputs | fromjson? | select(type == "object")
-     | select(((.ts // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0) >= $cutoff)
+     | select(ev_ts >= $cutoff)
      | select((.agent // "") != "heartbeat" and (.kind // "") != "canary"
               and (.kind // "") != "heartbeat" and (.scope // "") != "activity-mesh")
      | (.agent // "unknown")]

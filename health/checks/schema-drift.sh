@@ -26,9 +26,9 @@ fi
 
 cutoff=$(( $(date +%s) - 86400 ))
 result=$(for f in "$SYNC"/events-*.jsonl; do [ -f "$f" ] && tail -n 2000 "$f"; echo; done 2>/dev/null \
-    | "$AM_JQ" -rR --argjson cutoff "$cutoff" '
+    | "$AM_JQ" -rR --argjson cutoff "$cutoff" "$AM_JQ_DEFS"'
         fromjson? | select(type == "object")
-        | select(((.ts // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0) >= $cutoff)
+        | select(ev_ts >= $cutoff)
         | "\(.kind // "")\t\(.scope // "")"' \
     | KNOWN_KINDS="$known_kinds" KNOWN_SCOPES="$known_scopes" awk -F'\t' -v hk="$have_kinds" -v hs="$have_scopes" '
         BEGIN {

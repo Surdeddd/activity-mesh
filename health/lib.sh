@@ -19,6 +19,25 @@ if [ -z "$AM_JQ" ]; then
     unset _am_c
 fi
 
+export AM_JQ_DEFS='def ev_ts:
+    (if type == "object" then .ts else null end)
+    | if type == "string" then
+        (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\\.[0-9]+)?(?<z>Z|[+-](?:[01][0-9]|2[0-3]):?[0-5][0-9])$") // null)
+        | if . == null then 0
+          else
+            . as $m
+            | (try (($m.d + "Z") | fromdateiso8601) catch null) as $t
+            | if $t == null then 0
+              elif $m.z == "Z" then $t
+              else
+                ($m.z | capture("^(?<s>[+-])(?<h>[0-9]{2}):?(?<m>[0-9]{2})$")) as $o
+                | (($o.h | tonumber) * 3600 + ($o.m | tonumber) * 60) as $off
+                | if $o.s == "+" then $t - $off else $t + $off end
+              end
+          end
+      else 0 end;
+'
+
 am_t() {
     case "$ACTIVITY_MESH_LANG" in
         en*) printf '%s' "$1" ;;
@@ -97,6 +116,22 @@ am_emit() {
 }
 
 am_start() { CHECK_START_MS=$(am_now_ms); export CHECK_START_MS; }
+
+am_scan_shards() {
+    local pat="$1" f h n hits=0 lines=0 sample=""
+    for f in "$ACTIVITY_MESH_SYNC"/events-*.jsonl; do
+        [ -f "$f" ] || continue
+        n=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+        lines=$(( lines + ${n:-0} ))
+        h=$(grep -cE "$pat" "$f" 2>/dev/null)
+        case "$h" in ''|*[!0-9]*) h=0 ;; esac
+        if [ "$h" -gt 0 ]; then
+            hits=$(( hits + h ))
+            [ -z "$sample" ] && sample="${f##*/}"
+        fi
+    done
+    printf '%d %d %s\n' "$hits" "$lines" "$sample"
+}
 
 am_human_bytes() {
     local b="$1"

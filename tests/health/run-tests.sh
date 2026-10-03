@@ -63,6 +63,11 @@ gotime() { "$JQ" -rn --argjson t "$1" '$t | strftime("%Y/%m/%d %H:%M:%S")'; }
 
 isotime() { "$JQ" -rn --argjson t "$1" '$t | todate'; }
 
+ev_at() {
+    "$JQ" -cn --arg id "$2" --arg ts "$3" --arg kind "$4" \
+        '{v: 1, id: $id, ts: $ts, host: "h", agent: "cli", kind: $kind, scope: "memory", summary: "x"}' >> "$1"
+}
+
 run_check() {
     local name="$1"
     shift
@@ -87,6 +92,15 @@ case "$wake" in
     ''|*[!0-9]*) err "am_last_wake printed [$wake]" ;;
     *) if [ "$wake" -le 0 ] || [ "$wake" -gt "$(date +%s)" ]; then err "am_last_wake=$wake is outside (0, now]"; fi ;;
 esac
+end_case
+
+begin_case "lib: the shared ts parser reads Z and offset stamps and gives 0 for everything else"
+ref=$("$JQ" -rn '"2026-10-03T19:19:20Z" | fromdateiso8601')
+got=$(env -i HOME="$C/home" PATH=/usr/bin:/bin ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_JQ="$JQ" \
+    /bin/bash -c '. "$1/lib.sh" && "$AM_JQ" -nc "$AM_JQ_DEFS$2"' am-lib "$HEALTH" \
+    '[{ts: "2026-10-03T19:19:20Z"}, {ts: "2026-10-03T19:19:20.123456Z"}, {ts: "2026-10-03T22:19:20+03:00"}, {ts: "2026-10-03T22:19:20.5+0300"}, {ts: "2026-10-03T13:49:20-05:30"}, {ts: 12345}, {ts: null}, {ts: ["x"]}, {}, {ts: "garbage"}, {ts: "2026-10-03T19:19:20+25:00"}, {ts: "2026-10-03T19:19:20"}, 5] | map(ev_ts)' 2>"$C/stderr")
+want="[$ref,$ref,$ref,$ref,$ref,0,0,0,0,0,0,0,0]"
+[ "$got" = "$want" ] || err "ev_ts gave ${got:-<nothing>}, want $want"
 end_case
 
 begin_case "adoption-ratio: heartbeat canaries are self-monitoring, not a writing agent"
@@ -125,6 +139,15 @@ gen "$SYNC/$LOCAL" 4 $((NOW - 3 * 3600 - 180)) 60 heartbeat canary activity-mesh
 LAST_WAKE=$((NOW - 1800))
 run_check canary
 expect '.tier <= 1' "an old canary must not fail while the machine woke less than the stale limit ago"
+end_case
+
+begin_case "canary: canary lines with a non-string ts do not blind the check"
+gen "$SYNC/$LOCAL" 5 $((NOW - 3600)) 600 heartbeat canary activity-mesh "hourly heartbeat ok=1" n
+printf '{"v":1,"id":"bad-num","ts":1791055160,"host":"h","agent":"heartbeat","kind":"canary","scope":"activity-mesh","summary":"hourly heartbeat ok=1"}\n' >> "$SYNC/$LOCAL"
+printf '{"v":1,"id":"bad-arr","ts":["2026-10-03T19:19:20Z"],"host":"h","agent":"heartbeat","kind":"canary","scope":"activity-mesh","summary":"hourly heartbeat ok=1"}\n' >> "$SYNC/$LOCAL"
+printf '{"v":1,"id":"bad-null","ts":null,"host":"h","agent":"heartbeat","kind":"canary","scope":"activity-mesh","summary":"hourly heartbeat ok=1"}\n' >> "$SYNC/$LOCAL"
+run_check canary
+expect '.tier == 1 and .status == "ok"' "valid canaries are still seen next to lines with a non-string ts"
 end_case
 
 begin_case "hook-health: clock-sync failures in heartbeat.log are not hook errors"
@@ -166,11 +189,23 @@ run_check redactor-coverage
 expect '.tier >= 2' "an email in a recent event must be reported"
 end_case
 
+begin_case "redactor-coverage: clean shards read as ok and report how many lines were scanned"
+gen "$SYNC/$LOCAL" 50 $((NOW - 7200)) 60 cli note memory "plain note" ok
+run_check redactor-coverage
+expect '.tier == 1 and .status == "ok" and (.message | test("^0 hits in 50 lines"))' "no PII means ok with the scanned line count"
+end_case
+
 begin_case "secrets-bypass: a secret written two hours ago is still a critical leak"
 SECRET="AKIA$(printf 'Q%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
 gen "$SYNC/$LOCAL" 1 $((NOW - 7200)) 60 cli note memory "key $SECRET" s
 run_check secrets-bypass
 expect '.tier == 4 and .status == "critical"' "a leak older than 30 minutes must be found"
+end_case
+
+begin_case "secrets-bypass: clean shards read as ok"
+gen "$SYNC/$LOCAL" 50 $((NOW - 7200)) 60 cli note memory "plain note" ok
+run_check secrets-bypass
+expect '.tier == 1 and .status == "ok"' "no secrets means ok"
 end_case
 
 begin_case "silence: right after wake, a stale remote shard is not judged yet"
@@ -219,6 +254,17 @@ printf 'scopes:\n  - name: memory\n' > "$SYNC/scopes.yaml"
 gen "$SYNC/$LOCAL" 2 $((NOW - 3600)) 60 cli bogus memory "bad kind" b
 run_check schema-drift
 expect '.tier == 2' "two unknown kinds warn"
+end_case
+
+begin_case "schema-drift: a +03:00 timestamp is converted to UTC before the 24h window is applied"
+printf 'kinds:\n  - name: note\n' > "$SYNC/kinds.yaml"
+printf 'scopes:\n  - name: memory\n' > "$SYNC/scopes.yaml"
+t_in=$(isotime $((NOW - 3600 + 10800)))
+t_out=$(isotime $((NOW - 90000 + 10800)))
+ev_at "$SYNC/$LOCAL" off-in "${t_in%Z}+03:00" zzz
+ev_at "$SYNC/$LOCAL" off-out "${t_out%Z}+03:00" zzz
+run_check schema-drift
+expect '.tier == 2 and (.message | test("^1 unknown values"))' "only the event that is one hour old in UTC counts, the one 25h old does not"
 end_case
 
 begin_case "ulid-collision: a duplicate far apart in the shard is found"

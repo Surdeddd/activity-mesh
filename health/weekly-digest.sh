@@ -30,12 +30,11 @@ done
 
 stats=$(for h in $hosts; do awk -v h="$h" '{ print h "\t" $0 }' "$SYNC/events-$h.jsonl" 2>/dev/null; done \
     | "$AM_JQ" -nR --argjson week "$week_ago" --argjson prev "$prev_week_ago" \
-        --arg hosts "$hosts" --arg off "$offline_hosts" '
-    def ts: (.ts // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0;
+        --arg hosts "$hosts" --arg off "$offline_hosts" "$AM_JQ_DEFS"'
     def top3(f): group_by(f) | map({k: (.[0] | f), n: length}) | sort_by(-.n) | .[:3];
     ($off | split(" ") | map(select(length > 0))) as $offl
     | [inputs | index("\t") as $i | {h: .[:$i], e: (.[$i + 1:] | fromjson? // null)}
-       | select(.e | type == "object") | .e + {_h: .h, _t: (.e | ts)}] as $all
+       | select(.e | type == "object") | .e + {_h: .h, _t: (.e | ev_ts)}] as $all
     | ($all | map(select(._t >= $week))) as $w
     | ($w | map(select(.kind == "canary")
                | select(._h | ascii_downcase as $hl | $offl | any(. as $o | $hl | contains($o)) | not))) as $c

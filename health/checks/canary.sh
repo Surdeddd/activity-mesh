@@ -15,9 +15,9 @@ fi
 
 now=$(date +%s)
 awake=$(( now - $(am_last_wake) ))
-stats=$(tail -n 2000 "$F" 2>/dev/null | "$AM_JQ" -nrR --argjson cutoff $(( now - 86400 )) '
+stats=$(tail -n 2000 "$F" 2>/dev/null | "$AM_JQ" -nrR --argjson cutoff $(( now - 86400 )) "$AM_JQ_DEFS"'
     [inputs | fromjson? | select(type == "object" and .kind == "canary")
-     | {t: ((.ts // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0),
+     | {t: ev_ts,
         ok: ((.summary // "") | test("ok=1"))}]
     | (map(select(.t >= $cutoff))) as $day
     | "\($day | length) \($day | map(select(.ok | not)) | length) \(map(.t) | max // 0)"')
