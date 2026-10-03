@@ -359,6 +359,8 @@ gen "$SYNC/events-otherhost.jsonl" 5 $((NOW - 3600)) 60 cli note memory "event" 
 cp "$SYNC/events-otherhost.jsonl" "$SYNC/$CONFLICT"
 run_check ulid-collision
 expect '.tier == 1 and .status == "ok" and (.message | test("^5 ulids"))' "the copy must not read as 5 duplicate ULIDs"
+run_check conflict
+expect '.tier == 4 and .status == "critical" and (.message | contains("sync-conflict-20261003-010203-ABCDEFG"))' "the conflict check is the signal that a copy exists"
 end_case
 
 begin_case "health scripts enumerate shards only through am_shards"
