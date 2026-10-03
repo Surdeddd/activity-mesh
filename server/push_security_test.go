@@ -42,6 +42,19 @@ func rawShardLines(t *testing.T, d *daemon) []string {
 	return strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
 }
 
+func recentCount(t *testing.T, d *daemon) int {
+	t.Helper()
+	w := httptest.NewRecorder()
+	d.handleRecent(w, httptest.NewRequest(http.MethodGet, "/recent?host=test-host&limit=100", nil))
+	var resp struct {
+		Count int `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("recent: %v (%s)", err, w.Body.String())
+	}
+	return resp.Count
+}
+
 func dbURLAtCapBoundary() (summary, password string) {
 	password = "S3cr3tPassw0rd"
 	head := "postgres://admin:" + password
@@ -270,5 +283,104 @@ func TestRoutesServeOnlyLocalhostAndIPLiteralHosts(t *testing.T) {
 		if w.Code != c.want {
 			t.Errorf("Host %q: got %d, want %d", c.host, w.Code, c.want)
 		}
+	}
+}
+
+func TestHandlePushRejectsDeeplyNestedPayload(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	cases := []struct {
+		id    string
+		depth int
+		want  int
+	}{
+		{"01HRX00000000000000000NP01", 1001, http.StatusBadRequest},
+		{"01HRX00000000000000000NP02", maxPushJSONDepth + 1, http.StatusBadRequest},
+		{"01HRX00000000000000000NP03", maxPushJSONDepth, http.StatusOK},
+	}
+	for _, c := range cases {
+		nested := strings.Repeat("[", c.depth) + strings.Repeat("]", c.depth)
+		body := strings.Replace(pushBody(map[string]any{"id": c.id}), `{`, `{"x":`+nested+`,`, 1)
+		if w := doPush(t, d, body); w.Code != c.want {
+			t.Fatalf("payload nested %d levels deep: got %d %s, want %d", c.depth, w.Code, w.Body.String(), c.want)
+		}
+	}
+	if lines := rawShardLines(t, d); len(lines) != 1 {
+		t.Fatalf("shard holds %d lines, want only the accepted payload", len(lines))
+	}
+	if n := recentCount(t, d); n != 1 {
+		t.Fatalf("/recent shows %d events, want 1: every payload /push accepts must stay indexable", n)
+	}
+}
+
+func TestHandlePushRejectsNonStringPriority(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	w := doPush(t, d, pushBody(map[string]any{"priority": 1}))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "priority") {
+		t.Fatalf("priority=1: got %d %s, want 400 naming the field — the shard line would no longer decode into event.Event", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlePushAcceptsOnlyIntegersInIntegerFields(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	for i, over := range []map[string]any{
+		{"exit_code": 1.5},
+		{"duration_ms": 2.5},
+		{"clock_offset_ms": 0.5},
+		{"exit_code": 1e20},
+	} {
+		over["id"] = ulidForIndex(i)
+		if w := doPush(t, d, pushBody(over)); w.Code != http.StatusBadRequest {
+			t.Errorf("%v: got %d %s, want 400 — the shard line would no longer decode into event.Event", over, w.Code, w.Body.String())
+		}
+	}
+	if w := doPush(t, d, pushBody(map[string]any{"exit_code": 2, "duration_ms": 1500, "clock_offset_ms": -12})); w.Code != http.StatusOK {
+		t.Fatalf("integer fields: got %d %s, want 200", w.Code, w.Body.String())
+	}
+	line := rawShardLines(t, d)[0]
+	var e event.Event
+	if err := json.Unmarshal([]byte(line), &e); err != nil {
+		t.Fatalf("accepted push does not decode into event.Event: %v (%s)", err, line)
+	}
+	if e.ExitCode == nil || *e.ExitCode != 2 || e.DurationMS != 1500 || e.ClockOffsetMS != -12 {
+		t.Fatalf("integer fields not stored exactly: %s", line)
+	}
+}
+
+func TestHandlePushKeepsLargeIntegersExact(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	body := strings.Replace(pushBody(nil), `{`, `{"ext_ts_ns":1759480000123456789,`, 1)
+	if w := doPush(t, d, body); w.Code != http.StatusOK {
+		t.Fatalf("push: %d %s", w.Code, w.Body.String())
+	}
+	if line := rawShardLines(t, d)[0]; !strings.Contains(line, `"ext_ts_ns":1759480000123456789`) {
+		t.Fatalf("pushed integer 1759480000123456789 was rewritten through float64: %s", line)
+	}
+}
+
+func TestHandlePushRejectsNonIntegerSchemaVersion(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	for i, v := range []any{"2", "1", 1.9} {
+		w := doPush(t, d, pushBody(map[string]any{"id": ulidForIndex(i), "v": v}))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("v=%#v: got %d, want 400 (only the integer 1 is supported)", v, w.Code)
+		}
+	}
+}
+
+func TestHandlePushRejectsNonObjectAndTrailingJSON(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	for _, body := range []string{
+		"null",
+		"[]",
+		`"event"`,
+		pushBody(nil) + `{"id":"01HRX0000000000000000000T2"}`,
+		pushBody(nil) + " trailing",
+	} {
+		if w := doPush(t, d, body); w.Code != http.StatusBadRequest {
+			t.Errorf("body %.60q: got %d %s, want 400", body, w.Code, w.Body.String())
+		}
+	}
+	if w := doPush(t, d, pushBody(nil)+"\n"); w.Code != http.StatusOK {
+		t.Fatalf("object with a trailing newline: got %d %s, want 200", w.Code, w.Body.String())
 	}
 }

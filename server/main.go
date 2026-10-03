@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -354,7 +355,10 @@ func (d *daemon) handleDigest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const maxPushBody = 64 * 1024
+const (
+	maxPushBody      = 64 * 1024
+	maxPushJSONDepth = 32
+)
 
 var labelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
@@ -413,13 +417,23 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p map[string]any
-	if err := json.Unmarshal(body, &p); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&p); err != nil || p == nil || dec.Decode(new(json.RawMessage)) != io.EOF {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if v, ok := p["v"].(float64); ok && int(v) != event.SchemaVersion {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unsupported schema version %v (this daemon writes v%d)", v, event.SchemaVersion))
+	if depth := index.JSONDepth(p); depth > maxPushJSONDepth {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("payload nested %d levels deep (max %d)", depth, maxPushJSONDepth))
 		return
+	}
+	if raw, present := p["v"]; present {
+		n, ok := raw.(json.Number)
+		v, err := n.Int64()
+		if !ok || err != nil || v != event.SchemaVersion {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("unsupported schema version %v (this daemon writes v%d)", raw, event.SchemaVersion))
+			return
+		}
 	}
 	p["v"] = event.SchemaVersion
 	str := func(k string) string { s, _ := p[k].(string); return s }
@@ -544,7 +558,14 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 // a typed struct field, so a mismatch makes the whole line undecodable.
 func badlyTypedFields(p map[string]any) string {
 	isString := func(v any) bool { _, ok := v.(string); return ok }
-	isNumber := func(v any) bool { _, ok := v.(float64); return ok }
+	isInt := func(v any) bool {
+		n, ok := v.(json.Number)
+		if !ok {
+			return false
+		}
+		_, err := n.Int64()
+		return err == nil
+	}
 	isBool := func(v any) bool { _, ok := v.(bool); return ok }
 	isStringSlice := func(v any) bool {
 		arr, ok := v.([]any)
@@ -563,18 +584,19 @@ func badlyTypedFields(p map[string]any) string {
 		ok   func(any) bool
 		want string
 	}{
-		{"ref", isString, "string"},
-		{"session_id", isString, "string"},
-		{"parent_id", isString, "string"},
-		{"caused_by", isString, "string"},
-		{"actor", isString, "string"},
-		{"originator", isString, "string"},
-		{"tags", isStringSlice, "array of strings"},
-		{"files", isStringSlice, "array of strings"},
-		{"duration_ms", isNumber, "number"},
-		{"exit_code", isNumber, "number"},
-		{"clock_offset_ms", isNumber, "number"},
-		{"truncated", isBool, "boolean"},
+		{"ref", isString, "a string"},
+		{"session_id", isString, "a string"},
+		{"parent_id", isString, "a string"},
+		{"caused_by", isString, "a string"},
+		{"actor", isString, "a string"},
+		{"originator", isString, "a string"},
+		{"priority", isString, "a string"},
+		{"tags", isStringSlice, "an array of strings"},
+		{"files", isStringSlice, "an array of strings"},
+		{"duration_ms", isInt, "an integer"},
+		{"exit_code", isInt, "an integer"},
+		{"clock_offset_ms", isInt, "an integer"},
+		{"truncated", isBool, "a boolean"},
 	}
 	for _, c := range checks {
 		v, present := p[c.key]
@@ -582,7 +604,7 @@ func badlyTypedFields(p map[string]any) string {
 			continue
 		}
 		if !c.ok(v) {
-			return fmt.Sprintf("field %q must be a %s", c.key, c.want)
+			return fmt.Sprintf("field %q must be %s", c.key, c.want)
 		}
 	}
 	return ""
