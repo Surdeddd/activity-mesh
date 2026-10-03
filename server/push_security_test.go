@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
@@ -382,5 +383,40 @@ func TestHandlePushRejectsNonObjectAndTrailingJSON(t *testing.T) {
 	}
 	if w := doPush(t, d, pushBody(nil)+"\n"); w.Code != http.StatusOK {
 		t.Fatalf("object with a trailing newline: got %d %s, want 200", w.Code, w.Body.String())
+	}
+}
+
+func TestHandlePushAppendsConcurrentRetriesOfOneULIDOnce(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	body := pushBody(map[string]any{"id": "01HRX00000000000000000D9P1"})
+	const retries = 8
+	recs := make([]*httptest.ResponseRecorder, retries)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range recs {
+		recs[i] = httptest.NewRecorder()
+		wg.Add(1)
+		go func(w *httptest.ResponseRecorder) {
+			defer wg.Done()
+			<-start
+			d.handlePush(w, httptest.NewRequest(http.MethodPost, "/push", strings.NewReader(body)))
+		}(recs[i])
+	}
+	close(start)
+	wg.Wait()
+	if lines := rawShardLines(t, d); len(lines) != 1 {
+		t.Fatalf("%d concurrent retries of one ULID appended %d shard lines (want 1) — `activity-log query` double-counts", retries, len(lines))
+	}
+	duplicates := 0
+	for _, w := range recs {
+		if w.Code != http.StatusOK {
+			t.Fatalf("retry answered %d %s, want 200", w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), `"duplicate":true`) {
+			duplicates++
+		}
+	}
+	if duplicates != retries-1 {
+		t.Fatalf("%d of %d retries flagged as duplicate, want %d", duplicates, retries, retries-1)
 	}
 }

@@ -54,6 +54,7 @@ type daemon struct {
 	host              string
 	port              int
 	m                 metrics
+	pushMu            sync.Mutex
 }
 
 func main() {
@@ -489,6 +490,8 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		delete(p, k)
 	}
 
+	d.pushMu.Lock()
+	defer d.pushMu.Unlock()
 	// Retries after a dropped response used to append a second line with the same
 	// ULID: the CLI (which reads the shard) then double-counts what the index
 	// (keyed by ULID) shows once.
