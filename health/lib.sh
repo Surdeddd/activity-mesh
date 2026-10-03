@@ -8,7 +8,23 @@ set -uo pipefail
 : "${ACTIVITY_MESH_STATE:=$HOME/.local/state/activity-mesh}"
 : "${ACTIVITY_MESH_HOME:=$HOME/.local/share/activity-mesh}"
 : "${ACTIVITY_MESH_LOG:=$HOME/.local/state/activity-mesh}"
+: "${ACTIVITY_MESH_LANG:=ru}"
 mkdir -p "$ACTIVITY_MESH_STATE" "$ACTIVITY_MESH_LOG" 2>/dev/null || true
+
+AM_JQ="${ACTIVITY_MESH_JQ:-}"
+if [ -z "$AM_JQ" ]; then
+    for _am_c in /usr/bin/jq /opt/homebrew/bin/jq /usr/local/bin/jq "$(command -v jq 2>/dev/null)"; do
+        if [ -n "$_am_c" ] && [ -x "$_am_c" ]; then AM_JQ="$_am_c"; break; fi
+    done
+    unset _am_c
+fi
+
+am_t() {
+    case "$ACTIVITY_MESH_LANG" in
+        en*) printf '%s' "$1" ;;
+        *)   printf '%s' "$2" ;;
+    esac
+}
 
 am_host() {
     case "$(uname -s)" in
@@ -21,30 +37,41 @@ am_host() {
 am_now_ms() {
     if command -v gdate >/dev/null 2>&1; then
         gdate +%s%3N
-    else
-        local probe; probe=$(date +%s%3N 2>/dev/null)
-        case "$probe" in
-            *N|*[!0-9]*) ;;
-            ?*)         echo "$probe"; return ;;
-        esac
-        if command -v python3 >/dev/null 2>&1; then
-            python3 -c 'import time;print(int(time.time()*1000))'
-        else
-            echo "$(date +%s)000"
-        fi
+        return
     fi
+    local probe; probe=$(date +%s%3N 2>/dev/null)
+    case "$probe" in
+        ''|*N|*[!0-9]*) ;;
+        *) echo "$probe"; return ;;
+    esac
+    if [ -n "$AM_JQ" ]; then
+        "$AM_JQ" -n 'now * 1000 | floor'
+    else
+        echo "$(date +%s)000"
+    fi
+}
+
+am_last_wake() {
+    if [ -n "${ACTIVITY_MESH_LAST_WAKE:-}" ]; then
+        echo "$ACTIVITY_MESH_LAST_WAKE"
+        return
+    fi
+    local boot="" wake=""
+    if [ "$(uname -s)" = Darwin ]; then
+        boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+        wake=$(sysctl -n kern.waketime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+    elif [ -r /proc/stat ]; then
+        boot=$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null)
+    fi
+    case "$boot" in ''|*[!0-9]*) boot=0 ;; esac
+    case "$wake" in ''|*[!0-9]*) wake=0 ;; esac
+    if [ "$wake" -gt "$boot" ]; then echo "$wake"; else echo "$boot"; fi
 }
 
 am_offline_hosts() {
     local state="${OFFLINE_HOSTS_JSON:-$HOME/.claude/channels/telegram/state/offline-hosts.json}"
     [ -r "$state" ] || return 0
-    /usr/bin/python3 -c '
-import json, sys
-try:
-    print(" ".join(json.load(open(sys.argv[1])).keys()))
-except Exception:
-    pass
-' "$state" 2>/dev/null || true
+    "$AM_JQ" -r 'if type == "object" then keys | join(" ") else empty end' "$state" 2>/dev/null || true
 }
 
 am_host_is_offline() {
@@ -63,10 +90,9 @@ am_emit() {
     end=$(am_now_ms)
     dur=$(( end - CHECK_START_MS ))
     [ "$dur" -lt 0 ] && dur=0
-    printf '{"name":"%s","tier":%d,"status":"%s","message":%s,"duration_ms":%d}\n' \
-        "$name" "$tier" "$status" \
-        "$(printf '%s' "$message" | python3 -c 'import sys,json;print(json.dumps(sys.stdin.read()))' 2>/dev/null || echo '""')" \
-        "$dur"
+    "$AM_JQ" -cn --arg name "$name" --argjson tier "$tier" --arg status "$status" \
+        --arg message "$message" --argjson dur "$dur" \
+        '{name: $name, tier: $tier, status: $status, message: $message, duration_ms: $dur}'
 }
 
 am_start() { CHECK_START_MS=$(am_now_ms); export CHECK_START_MS; }
@@ -78,6 +104,15 @@ am_human_bytes() {
     elif [ "$b" -gt 1024 ];       then printf '%.1fK' "$(echo "scale=1;$b/1024" | bc)"
     else printf '%dB' "$b"
     fi
+}
+
+am_record_alert() {
+    local source="$1" severity="$2" log="$ACTIVITY_MESH_STATE/alerts.log"
+    printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$source" "$severity" >> "$log" 2>/dev/null || return 0
+    if [ "$(wc -l < "$log" 2>/dev/null || echo 0)" -gt 2000 ]; then
+        tail -n 1000 "$log" > "$log.tmp" 2>/dev/null && mv -f "$log.tmp" "$log" 2>/dev/null
+    fi
+    return 0
 }
 
 am_notify_telegram() {

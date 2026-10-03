@@ -36,6 +36,16 @@ jobs:
       - name: run hook suite
         run: make test-hooks
 
+  health-tests:
+    name: health check regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: run health suite
+        run: make test-health
+
   mcp-tests:
     name: mcp server tests
     runs-on: ubuntu-latest
