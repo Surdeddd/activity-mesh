@@ -355,6 +355,33 @@ func TestSSHRemoteKeptWhileRealEmailsAreRedacted(t *testing.T) {
 	}
 }
 
+func TestSSHRemoteExemptionIsLimitedToGit(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+		hits           int
+	}{
+		{"git remote", "git@github.com:owner/repo.git", "git@github.com:owner/repo.git", 0},
+		{"git remote in upper case", "GIT@GitHub.com:Owner/Repo.git", "GIT@GitHub.com:Owner/Repo.git", 0},
+		{"person at a corporate host", "jane.doe@corp.example.com:docs/x", "[REDACTED:email:25]:docs/x", 1},
+		{"user at a lan host", "maxim@mac-mini.local:repo/x", "[REDACTED:email:20]:repo/x", 1},
+		{"local part only ends with git", "foogit@github.com:owner/repo.git", "[REDACTED:email:17]:owner/repo.git", 1},
+		{"local part ends with a dotted git", "x.git@github.com:owner/repo.git", "[REDACTED:email:16]:owner/repo.git", 1},
+		{"git user without a path", "git@example.com:thanks", "[REDACTED:email:15]:thanks", 1},
+		{"plain email, colon and text without a slash", "bob@example.com:thanks", "[REDACTED:email:15]:thanks", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, hits := Apply(tc.in)
+			if out != tc.want {
+				t.Errorf("Apply(%q)\n got: %q\nwant: %q", tc.in, out, tc.want)
+			}
+			if len(hits) != tc.hits {
+				t.Errorf("got %d hits, want %d: %+v", len(hits), tc.hits, hits)
+			}
+		})
+	}
+}
+
 func TestApplyJSONRedactsHexValueUnderSecretKey(t *testing.T) {
 	secret := "8f742231b10e8888abcd991234567851"
 	redacted := func(n int) string { return fmt.Sprintf("[REDACTED:hex_secret:%d]", n) }

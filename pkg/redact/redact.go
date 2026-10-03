@@ -267,10 +267,10 @@ func replaceEmails(s string, r *rule, hits *[]Hit) string {
 	var b strings.Builder
 	last := 0
 	for _, m := range locs {
-		if sshRemoteTail.MatchString(s[m[1]:]) {
+		match := s[m[0]:m[1]]
+		if strings.HasPrefix(strings.ToLower(match), "git@") && sshRemoteTail.MatchString(s[m[1]:]) {
 			continue
 		}
-		match := s[m[0]:m[1]]
 		*hits = append(*hits, mkHit(r.kind, r.name, match))
 		b.WriteString(s[last:m[0]])
 		fmt.Fprintf(&b, "[REDACTED:%s:%d]", r.repType, len(match))

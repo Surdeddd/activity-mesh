@@ -130,10 +130,12 @@ patterns:
   # ----- PII -----
   - name: email
     description: >-
-      Email addresses. A match immediately followed by `:<path>/` is an
-      scp-style SSH remote (git@github.com:owner/repo.git), not an address, and
-      is left alone; the regex flavour has no lookahead, so that check runs on
-      the text after the match.
+      Email addresses. Only git@ SSH remotes are exempt: a match whose local
+      part is `git` (case-insensitive) and that is immediately followed by
+      `:<path>/` is an scp-style remote (git@github.com:owner/repo.git), not an
+      address, and is left alone. Any other user@host:path/ is still an email.
+      The regex flavour has no lookahead, so that check runs on the text after
+      the match.
     kind: pii
     regex: '\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'
     replacement: '[REDACTED:email:{len}]'
