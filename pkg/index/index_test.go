@@ -299,7 +299,7 @@ func TestIngestSkipsOverNestedLine(t *testing.T) {
 	}
 }
 
-func TestIngestDirContinuesPastPoisonedShard(t *testing.T) {
+func TestIngestDirIndexesLaterShardAfterOverNestedLine(t *testing.T) {
 	idx, dir := setupIndex(t)
 	syncDir := filepath.Join(dir, "sync")
 	ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
@@ -320,7 +320,8 @@ func TestIngestDirContinuesPastPoisonedShard(t *testing.T) {
 	}
 }
 
-func TestIngestDirContinuesAfterShardError(t *testing.T) {
+func indexWithBrokenAndVanishedShards(t *testing.T) (*Index, string) {
+	t.Helper()
 	idx, dir := setupIndex(t)
 	syncDir := filepath.Join(dir, "sync")
 	ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
@@ -339,6 +340,11 @@ func TestIngestDirContinuesAfterShardError(t *testing.T) {
 	writeJSONL(t, syncDir, "ccc", []string{
 		buildLine(t, "01HRX00000000000000000SW02", ts, "ccc", "a", "s", "note", "", "healthy host event"),
 	})
+	return idx, syncDir
+}
+
+func TestIngestDirContinuesAfterShardError(t *testing.T) {
+	idx, syncDir := indexWithBrokenAndVanishedShards(t)
 
 	n, err := idx.IngestDir(syncDir)
 	if err == nil || !strings.Contains(err.Error(), "events-bbb.jsonl") {
@@ -360,5 +366,138 @@ func TestIngestDirContinuesAfterShardError(t *testing.T) {
 	}
 	if len(vanished) != 0 {
 		t.Errorf("vanished shard still holds %d rows: the sweep must run after a failing shard", len(vanished))
+	}
+}
+
+func TestIngestDirReportsShardAndSweepErrors(t *testing.T) {
+	idx, syncDir := indexWithBrokenAndVanishedShards(t)
+	if _, err := idx.db.Exec(`CREATE TRIGGER block_sweep BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'sweep blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := idx.IngestDir(syncDir)
+	if err == nil {
+		t.Fatal("IngestDir returned nil although a shard and the sweep both failed")
+	}
+	for _, want := range []string{"events-bbb.jsonl", "sweep: delete rows", "sweep blocked"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("IngestDir err = %q, want it to contain %q", err, want)
+		}
+	}
+	if n != 1 {
+		t.Errorf("IngestDir indexed %d events, want 1 from the healthy shard", n)
+	}
+}
+
+func TestJSONDepth(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"null", `null`, 0},
+		{"scalar", `"s"`, 0},
+		{"empty object", `{}`, 0},
+		{"flat object", `{"a":1}`, 1},
+		{"nested object", `{"a":{"b":1}}`, 2},
+		{"array in object", `{"x":[[]]}`, 2},
+		{"top-level arrays", `[[[]]]`, 2},
+		{"deepest sibling wins", `{"a":1,"b":{"c":{"d":1}}}`, 3},
+		{"512 nested arrays", `{"x":` + deepNested(512) + `}`, 512},
+		{"513 nested arrays", `{"x":` + deepNested(513) + `}`, 513},
+	}
+	for _, c := range cases {
+		var v any
+		if err := json.Unmarshal([]byte(c.in), &v); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := JSONDepth(v); got != c.want {
+			t.Errorf("%s: JSONDepth = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestIngestIndexesAtDepthLimitAndSkipsBeyondIt(t *testing.T) {
+	idx, dir := setupIndex(t)
+	syncDir := filepath.Join(dir, "sync")
+	ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
+	line := func(id string, depth int) string {
+		return fmt.Sprintf(`{"v":1,"id":%q,"ts":%q,"host":"h1","agent":"a","kind":"note","scope":"s","summary":"s","x":%s}`, id, ts, deepNested(depth))
+	}
+	path := writeJSONL(t, syncDir, "h1", []string{
+		line("01HRX00000000000000000DL01", 512),
+		line("01HRX00000000000000000DL02", 513),
+	})
+
+	n, err := idx.IngestJSONL(path)
+	got, qerr := idx.Query(QueryFilter{Limit: 10})
+	if qerr != nil {
+		t.Fatal(qerr)
+	}
+	if err != nil || n != 1 || len(got) != 1 || got[0].ULID != "01HRX00000000000000000DL01" {
+		t.Fatalf("512 levels must be indexed and 513 skipped: ingest n=%d err=%v, indexed=%d", n, err, len(got))
+	}
+	if idx.SkippedLines() != 1 {
+		t.Errorf("SkippedLines = %d, want 1", idx.SkippedLines())
+	}
+}
+
+func TestIngestUpsertFailureHandling(t *testing.T) {
+	const failID = "01HRX00000000000000000TG02"
+	cases := []struct {
+		name        string
+		abortMsg    string
+		wantErr     bool
+		wantIndexed int
+		wantSkipped uint64
+	}{
+		{"malformed JSON is skipped", "malformed JSON", false, 2, 1},
+		{"any other failure aborts the pass", "boom", true, 0, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			idx, dir := setupIndex(t)
+			syncDir := filepath.Join(dir, "sync")
+			ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
+			trigger := fmt.Sprintf(`CREATE TRIGGER reject_one BEFORE INSERT ON events WHEN new.ulid = '%s' BEGIN SELECT RAISE(ABORT, '%s'); END`, failID, c.abortMsg)
+			if _, err := idx.db.Exec(trigger); err != nil {
+				t.Fatal(err)
+			}
+			path := writeJSONL(t, syncDir, "h1", []string{
+				buildLine(t, "01HRX00000000000000000TG01", ts, "h1", "a", "s", "note", "", "first"),
+				buildLine(t, failID, ts, "h1", "a", "s", "note", "", "rejected"),
+				buildLine(t, "01HRX00000000000000000TG03", ts, "h1", "a", "s", "note", "", "third"),
+			})
+
+			_, err := idx.IngestJSONL(path)
+			got, qerr := idx.Query(QueryFilter{Limit: 10})
+			if qerr != nil {
+				t.Fatal(qerr)
+			}
+			if (err != nil) != c.wantErr {
+				t.Fatalf("IngestJSONL err = %v, wantErr %v", err, c.wantErr)
+			}
+			if c.wantErr && !strings.Contains(err.Error(), "upsert ulid="+failID) {
+				t.Errorf("IngestJSONL err = %q, want an upsert ulid=%s error", err, failID)
+			}
+			if len(got) != c.wantIndexed {
+				t.Errorf("indexed %d events, want %d", len(got), c.wantIndexed)
+			}
+			if idx.SkippedLines() != c.wantSkipped {
+				t.Errorf("SkippedLines = %d, want %d", idx.SkippedLines(), c.wantSkipped)
+			}
+		})
+	}
+}
+
+func TestSQLiteRejectsOverDeepJSONWithKnownMessage(t *testing.T) {
+	idx, _ := setupIndex(t)
+	var out string
+	if err := idx.db.QueryRow(`SELECT json(?)`, deepNested(1000)).Scan(&out); err != nil {
+		t.Fatalf("json() must accept 1000 levels: %v", err)
+	}
+	err := idx.db.QueryRow(`SELECT json(?)`, deepNested(1001)).Scan(&out)
+	if err == nil || !strings.Contains(err.Error(), "malformed JSON") {
+		t.Fatalf("json() on 1001 levels: err = %v, want one containing \"malformed JSON\"", err)
 	}
 }
