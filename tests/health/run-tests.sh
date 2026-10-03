@@ -72,7 +72,7 @@ run_check() {
     local name="$1"
     shift
     OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" \
-        ACTIVITY_MESH_HOME="$STORE" ACTIVITY_MESH_LAST_WAKE="$LAST_WAKE" \
+        ACTIVITY_MESH_HOME="$STORE" ACTIVITY_MESH_LAST_WAKE="$LAST_WAKE" ACTIVITY_MESH_LANG=ru \
         OFFLINE_HOSTS_JSON="$C/offline-hosts.json" "$@" \
         bash "$HEALTH/checks/$name.sh" 2>"$C/stderr")
 }
@@ -155,6 +155,28 @@ run_check canary
 expect '.tier == 1 and .status == "ok"' "valid canaries are still seen next to lines with a non-string ts"
 end_case
 
+begin_case "canary: no canary yet right after boot is not a failure"
+gen "$SYNC/$LOCAL" 5 $((NOW - 600)) 60 cli note memory "plain note" z
+LAST_WAKE=$((NOW - 600))
+run_check canary
+expect '.tier <= 1' "no canary can exist before the first heartbeat after boot"
+end_case
+
+begin_case "canary: no canary at all while awake for hours is a writer failure"
+gen "$SYNC/$LOCAL" 5 $((NOW - 600)) 60 cli note memory "plain note" z
+LAST_WAKE=$((NOW - 6 * 3600))
+run_check canary
+expect '.tier >= 3' "hours awake and not one canary must fail"
+end_case
+
+begin_case "canary: a burst of other events cannot push the canaries out of view"
+gen "$SYNC/$LOCAL" 3 $((NOW - 3000)) 600 heartbeat canary activity-mesh "hourly heartbeat ok=1" k
+gen "$SYNC/$LOCAL" 2500 $((NOW - 2500)) 1 cli note memory "burst" bu
+LAST_WAKE=$((NOW - 6 * 3600))
+run_check canary
+expect '.tier == 1 and .status == "ok"' "canaries older than the last 2000 lines are still found"
+end_case
+
 begin_case "hook-health: clock-sync failures in heartbeat.log are not hook errors"
 printf '[%s] clock-sync failed (offset cache stale)\n' "$(isotime $((NOW - 600)))" > "$STATE/heartbeat.log"
 printf '[%s] emitted intent=temporal session=s chars=10 fire_tokens=2 budget=2\n' "$(isotime $((NOW - 300)))" > "$STATE/user-prompt-router.log"
@@ -177,7 +199,7 @@ printf '%s emit queue full src="memory-entry": 3 events lost\n' "$(gotime $((NOW
 printf '%s ingested 1 events from %s\n' "$(gotime $((NOW - 60)))" "$LOCAL" > "$STATE/daemon.err"
 run_check ingester-error
 expect '.tier >= 2' "lost watcher events in the window must warn"
-expect '.message | test("7 watcher events lost")' "emit errors and rollup drops are summed in the message"
+expect '.message | test(", 7 watcher events lost$")' "emit errors and rollup drops are summed in the message"
 end_case
 
 begin_case "ingester-error: a clean daemon log is a real ok, not 'no ingest.log yet'"
@@ -219,6 +241,9 @@ TZ=UTC touch -t "$(stamp $((NOW - 13 * 3600)))" "$SYNC/events-otherhost.jsonl"
 LAST_WAKE=$((NOW - 300))
 run_check silence
 expect '.tier <= 1' "five minutes after wake Syncthing has not caught up yet"
+expect '.message | test("не оцениваю")' "the grace message is Russian by default"
+run_check silence ACTIVITY_MESH_LANG=en
+expect '.message | test("not judging yet")' "the grace message follows ACTIVITY_MESH_LANG"
 end_case
 
 begin_case "silence: a remote host silent for 13h while we were awake fails"
@@ -278,6 +303,19 @@ gen "$SYNC/$LOCAL" 2500 $((NOW - 9 * 86400)) 60 cli note memory "filler" f
 gen "$SYNC/$LOCAL" 1 $((NOW - 60)) 60 cli note memory "second" dup
 run_check ulid-collision
 expect '.tier == 4' "the duplicate ULID must be critical"
+end_case
+
+begin_case "decay-daemon and digest-freshness call jq through the resolved AM_JQ"
+printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$*" >> "$JQ_LOG"' "exec $JQ \"\$@\"" > "$C/jqwrap"
+chmod +x "$C/jqwrap"
+printf '{"last_run_ts": %d}\n' $((NOW - 86400)) > "$STATE/decay-state.json"
+printf '{"generated_at": %d}\n' $((NOW - 86400)) > "$STATE/last-digest.json"
+run_check decay-daemon ACTIVITY_MESH_JQ="$C/jqwrap" JQ_LOG="$C/jq.log"
+expect '.tier == 1 and .status == "ok"' "a recent compact run is ok"
+run_check digest-freshness ACTIVITY_MESH_JQ="$C/jqwrap" JQ_LOG="$C/jq.log"
+expect '.tier == 1 and .status == "ok"' "a fresh digest is ok"
+grep -q 'last_run_ts' "$C/jq.log" 2>/dev/null || err "decay-daemon bypassed the resolved jq"
+grep -q 'generated_at' "$C/jq.log" 2>/dev/null || err "digest-freshness bypassed the resolved jq"
 end_case
 
 begin_case "master: a hung check is cut off and reported, the run still completes"
@@ -367,11 +405,17 @@ gen "$SYNC/$LOCAL" 5 $((NOW - 86400)) 3600 heartbeat canary activity-mesh "hourl
 } > "$STATE/alerts.log"
 printf '%s s1 400\n%s s1 300\n%s s2 100\n' "$(isotime $((NOW - 3600)))" "$(isotime $((NOW - 3500)))" "$(isotime $((NOW - 3400)))" > "$STATE/injections.log"
 OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
-    bash "$HEALTH/weekly-digest.sh" --dry-run 2>"$C/stderr")
-printf '%s' "$OUT" | grep -q 'алертов: 3' || err "expected 3 alerts in the last 7 days: $OUT"
+    ACTIVITY_MESH_LANG=ru bash "$HEALTH/weekly-digest.sh" --dry-run 2>"$C/stderr")
+printf '%s' "$OUT" | grep -q '• алертов: 3$' || err "expected 3 alerts in the last 7 days: $OUT"
 printf '%s' "$OUT" | grep -q 'canary: 5/155' || err "only the 5 conclusive failures out of 155 canaries count: $OUT"
 printf '%s' "$OUT" | grep -q 'самолечений' && err "self-heal count has no producer and must go: $OUT"
-printf '%s' "$OUT" | grep -qE '/2000|/500 за' || err "token budget must be per fire and per session: $OUT"
+printf '%s' "$OUT" | grep -q '266/500 за инжект, максимум 700/2000 за сессию' || err "token budget must be per fire and per session: $OUT"
+OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
+    ACTIVITY_MESH_LANG=en bash "$HEALTH/weekly-digest.sh" --dry-run 2>"$C/stderr")
+printf '%s' "$OUT" | grep -q '• alerts: 3$' || err "English digest: expected 3 alerts: $OUT"
+printf '%s' "$OUT" | grep -q 'canary: 5/155 without an answer' || err "English digest: conclusive canary failures: $OUT"
+printf '%s' "$OUT" | grep -q 'avg 266/500 per fire, max 700/2000 per session' || err "English digest: token budget: $OUT"
+printf '%s' "$OUT" | grep -q 'weekly digest' || err "English digest: title: $OUT"
 end_case
 
 begin_case "heartbeat: the alert is plain text in one language"
@@ -379,12 +423,12 @@ mkdir -p "$C/bin"
 printf '#!/bin/bash\nexit 0\n' > "$C/bin/activity-log"
 chmod +x "$C/bin/activity-log"
 env HOME="$C/home" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_BIN="$C/bin/activity-log" \
-    ACTIVITY_MESH_HEALTH_URL="http://127.0.0.1:9/health" HEARTBEAT_THRESHOLD=1 CANARY_TIMEOUT=2 \
+    ACTIVITY_MESH_HEALTH_URL="http://127.0.0.1:9/health" HEARTBEAT_THRESHOLD=1 CANARY_TIMEOUT=2 ACTIVITY_MESH_LANG=ru \
     ACTIVITY_MESH_NOTIFY_CMD="tee $C/alert.txt" bash "$HEALTH/dead-man-heartbeat.sh" >/dev/null 2>&1
 if [ ! -s "$C/alert.txt" ]; then
     err "no alert was produced"
 else
-    grep -q '[`*━]' "$C/alert.txt" && err "markdown or separator in a plain-text alert: $(cat "$C/alert.txt")"
+    grep -qF -e '`' -e '*' -e '━' "$C/alert.txt" && err "markdown or separator in a plain-text alert: $(cat "$C/alert.txt")"
     grep -q 'Daemon not responding' "$C/alert.txt" && err "English copy glued into the Russian alert"
     grep -q 'Демон' "$C/alert.txt" || err "Russian alert expected by default"
 fi

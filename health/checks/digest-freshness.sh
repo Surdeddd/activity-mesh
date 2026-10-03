@@ -10,7 +10,7 @@ if [ ! -f "$F" ]; then
     am_emit "$NAME" 0 ok "no local digest (runs on the designated digest host)"; exit 0
 fi
 
-gen=$(/usr/bin/jq -r '.generated_at // 0' "$F" 2>/dev/null || echo 0)
+gen=$("$AM_JQ" -r '.generated_at // 0' "$F" 2>/dev/null || echo 0)
 case "$gen" in ''|*[!0-9]*) gen=0 ;; esac
 now=$(date +%s); drift=$(( now - gen ))
 

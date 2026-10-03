@@ -37,7 +37,8 @@ done
 if [ -n "$worst_host" ]; then
     am_emit "$NAME" 3 fail "host=$worst_host age=${worst_age}s threshold=${TH}s"
 elif [ -n "$pending" ]; then
-    am_emit "$NAME" 1 ok "woke ${since_wake}s ago, not judging yet:$pending"
+    am_emit "$NAME" 1 ok "$(am_t "woke ${since_wake}s ago, not judging yet:$pending" \
+        "проснулись ${since_wake} с назад, молчание пока не оцениваю:$pending")"
 elif [ -n "$offline_seen" ]; then
     am_emit "$NAME" 1 ok "$(am_t "owner-disabled hosts are silent:$offline_seen (re-enable: ben-engine online <host>)" \
         "молчат выключенные хосты:$offline_seen (вернуть — ben-engine online <хост>)")"

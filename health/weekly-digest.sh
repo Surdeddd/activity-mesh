@@ -34,7 +34,7 @@ stats=$(for h in $hosts; do awk -v h="$h" '{ print h "\t" $0 }' "$SYNC/events-$h
     def top3(f): group_by(f) | map({k: (.[0] | f), n: length}) | sort_by(-.n) | .[:3];
     ($off | split(" ") | map(select(length > 0))) as $offl
     | [inputs | index("\t") as $i | {h: .[:$i], e: (.[$i + 1:] | fromjson? // null)}
-       | select(.e | type == "object") | .e + {_h: .h, _t: (.e | ev_ts)}] as $all
+       | select(.e | type == "object") | .e + {_h: .h, _t: (.e | ev_ts)} | select(._t >= $prev)] as $all
     | ($all | map(select(._t >= $week))) as $w
     | ($w | map(select(.kind == "canary")
                | select(._h | ascii_downcase as $hl | $offl | any(. as $o | $hl | contains($o)) | not))) as $c
