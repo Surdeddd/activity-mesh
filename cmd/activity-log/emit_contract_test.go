@@ -1,12 +1,14 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/redact"
 )
 
 const contractScopesYAML = `schema_version: 1
@@ -26,6 +28,40 @@ core:
     description: "note"
     severity_default: P3
 `
+
+func sandboxEnv(t *testing.T) (syncDir, storeDir, home string) {
+	t.Helper()
+	root := t.TempDir()
+	syncDir = filepath.Join(root, "sync")
+	storeDir = filepath.Join(root, "state")
+	home = filepath.Join(root, "home")
+	for _, d := range []string{syncDir, storeDir, home} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("ACTIVITY_MESH_SYNC", syncDir)
+	t.Setenv("ACTIVITY_MESH_HOME", storeDir)
+	t.Setenv("ACTIVITY_MESH_STATE", filepath.Join(root, "xstate"))
+	configPath = ""
+	return
+}
+
+func captureStdout(t *testing.T, f func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+	runErr := f()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	return string(out), runErr
+}
 
 func TestEnforceRegistryLifecycle(t *testing.T) {
 	sync := t.TempDir()
@@ -83,6 +119,28 @@ func TestNormalizeSummaryHardCap(t *testing.T) {
 	s2, tr2 := event.NormalizeSummary("short")
 	if tr2 || s2 != "short" {
 		t.Fatalf("short summary must pass through: %q %v", s2, tr2)
+	}
+}
+
+func TestEmitTruncationBeforeRedactionLeaksPassword(t *testing.T) {
+	syncDir, _, _ := sandboxEnv(t)
+	password := "S3cr3tPassw0rd"
+	head := "postgres://admin:" + password
+	summary := strings.Repeat("word ", 200)[:event.MaxSummaryRunes-2-len(head)] + " " + head + "@db.internal:5432/app"
+	if red, _ := redact.Apply(summary); strings.Contains(red, password) {
+		t.Fatal("precondition: the untruncated summary must be redactable")
+	}
+	cmd := emitCmd()
+	cmd.SetArgs([]string{"--kind", "note", "--scope", "s", "--summary", summary})
+	if _, err := captureStdout(t, cmd.Execute); err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(syncDir, "events-"+event.HostName()+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), password) {
+		t.Fatalf("emit wrote the db password to the shard in plaintext (summary truncated before redaction):\n%s", raw)
 	}
 }
 

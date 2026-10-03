@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/redact"
 )
 
 func pushBody(over map[string]any) string {
@@ -28,6 +31,22 @@ func doPush(t *testing.T, d *daemon, body string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	d.handlePush(w, req)
 	return w
+}
+
+func rawShardLines(t *testing.T, d *daemon) []string {
+	t.Helper()
+	buf, err := os.ReadFile(filepath.Join(d.syncDir, "events-test-host.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
+}
+
+func dbURLAtCapBoundary() (summary, password string) {
+	password = "S3cr3tPassw0rd"
+	head := "postgres://admin:" + password
+	pad := strings.Repeat("word ", 200)[:event.MaxSummaryRunes-2-len(head)] + " "
+	return pad + head + "@db.internal:5432/app", password
 }
 
 func TestHandlePushRejectsTraversalHost(t *testing.T) {
@@ -130,6 +149,36 @@ func TestHandlePushTruncatesLongSummary(t *testing.T) {
 	}
 	if tr, _ := ev["truncated"].(bool); !tr {
 		t.Fatal("truncated flag not set")
+	}
+}
+
+func TestPushTruncationBeforeRedactionLeaksPassword(t *testing.T) {
+	summary, password := dbURLAtCapBoundary()
+	if red, _ := redact.Apply(summary); strings.Contains(red, password) {
+		t.Fatal("precondition: the untruncated summary must be redactable")
+	}
+	d, _ := newTestDaemon(t)
+	if w := doPush(t, d, pushBody(map[string]any{"summary": summary})); w.Code != http.StatusOK {
+		t.Fatalf("push: %d %s", w.Code, w.Body.String())
+	}
+	if line := rawShardLines(t, d)[0]; strings.Contains(line, password) {
+		t.Fatalf("db password written to the synced shard in plaintext: truncation cut the '@host' the db_url rule needs")
+	}
+}
+
+func TestPushRedactionInflatesSummaryPastCap(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	summary := strings.TrimSpace(strings.Repeat("10.0.0.1 ", 55))
+	if w := doPush(t, d, pushBody(map[string]any{"summary": summary})); w.Code != http.StatusOK {
+		t.Fatalf("push: %d %s", w.Code, w.Body.String())
+	}
+	var ev map[string]any
+	if err := json.Unmarshal([]byte(rawShardLines(t, d)[0]), &ev); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := ev["summary"].(string)
+	if n := len([]rune(stored)); n > event.MaxSummaryRunes {
+		t.Fatalf("stored summary is %d runes (cap %d, truncated=%v): redaction markers are added after the cap is applied", n, event.MaxSummaryRunes, ev["truncated"])
 	}
 }
 

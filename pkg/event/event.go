@@ -112,6 +112,9 @@ func (e *Event) Marshal() (line []byte, hits []RedactHit, err error) {
 		return nil, nil, err
 	}
 	cleaned, hits := redact.ApplyJSON(generic)
+	if m, ok := cleaned.(map[string]any); ok && CapSummary(m) {
+		e.Truncated = true
+	}
 	out, err := json.Marshal(cleaned)
 	if err != nil {
 		return nil, nil, err
@@ -206,6 +209,19 @@ func NormalizeSummary(s string) (string, bool) {
 		return s, false
 	}
 	return string(r[:MaxSummaryRunes-1]) + "…", true
+}
+
+func CapSummary(m map[string]any) bool {
+	s, ok := m["summary"].(string)
+	if !ok {
+		return false
+	}
+	norm, cut := NormalizeSummary(s)
+	if cut {
+		m["summary"] = norm
+		m["truncated"] = true
+	}
+	return cut
 }
 
 func ValidPriority(p string) bool {

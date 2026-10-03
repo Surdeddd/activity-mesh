@@ -449,11 +449,6 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, bad)
 		return
 	}
-	summary, truncated := event.NormalizeSummary(str("summary"))
-	p["summary"] = summary
-	if truncated {
-		p["truncated"] = true
-	}
 	// Ordering metadata belongs to this host's writer, not to the client: a
 	// pushed monotonic_seq of 999999 would sort ahead of every subsequent CLI
 	// emit forever.
@@ -489,6 +484,10 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	p["monotonic_seq"] = seq
 
 	cleaned, hits := redact.ApplyJSON(p)
+	truncated := false
+	if m, ok := cleaned.(map[string]any); ok {
+		truncated = event.CapSummary(m)
+	}
 	line, err := json.Marshal(cleaned)
 	if err != nil {
 		_ = lock.Release()
