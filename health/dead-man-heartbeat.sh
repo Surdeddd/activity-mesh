@@ -8,7 +8,7 @@ MISS_FILE="$STATE_DIR/heartbeat-misses"
 LAST_ALERT_FILE="$STATE_DIR/heartbeat-last-alert"
 LOG="$STATE_DIR/heartbeat.log"
 THRESHOLD="${HEARTBEAT_THRESHOLD:-3}"
-ALERT_COOLDOWN="${HEARTBEAT_COOLDOWN:-3600}"     # don't spam more than 1×/hour
+ALERT_COOLDOWN="${HEARTBEAT_COOLDOWN:-3600}"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG" 2>/dev/null || true; }
@@ -49,9 +49,6 @@ if [ "$ok" -eq 0 ] && { [ "$why" = "timeout" ] || [ "$why" = "empty-reply" ]; } 
     fi
 fi
 
-# $ACTIVITY_MESH_BIN first: bootstrap.sh honours --prefix, so a hardcoded list
-# starting at ~/.local/bin silently picks a stale binary (or none) whenever the
-# install went anywhere else — and then the canary never fires.
 find_activity_log() {
     local bin
     for bin in \
@@ -70,15 +67,18 @@ AL_BIN=$(find_activity_log) || AL_BIN=""
 
 emit_canary() {
     [ -n "$AL_BIN" ] || return 0
+    local summary
+    summary="hourly heartbeat $(date -u +%FT%TZ) ok=$ok"
+    [ "$ok" -eq 1 ] || summary="$summary why=${why:-unknown} busy=$inconclusive"
     "$AL_BIN" emit \
         --kind canary \
         --scope activity-mesh \
         --agent heartbeat \
-        --summary "hourly heartbeat $(date -u +%FT%TZ) ok=$1" \
+        --summary "$summary" \
         >/dev/null 2>&1
     return 0
 }
-emit_canary "$ok" || true
+emit_canary || true
 
 if [ -n "$AL_BIN" ]; then
     "$AL_BIN" clock-sync >/dev/null 2>&1 || log "clock-sync failed (offset cache stale)"
@@ -116,43 +116,42 @@ HERE_DMH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE_DMH/lib.sh"
 
 host=$(hostname -s 2>/dev/null || echo unknown)
-ts_iso=$(date -u +%FT%TZ)
-TEXT="🚨 *activity-mesh daemon down* · CRITICAL / КРИТИЧНО
+uid=$(id -u 2>/dev/null || echo 501)
+TEXT_EN="🚨 activity-mesh: the daemon is down
 
-Daemon not responding to /health for $misses consecutive checks — operational history is being lost.
+The daemon did not answer /health $misses times in a row: the index and the HTTP API (/search, /recent, /push) are unavailable. CLI writes to the shards are not affected.
 
-📊 Details:
+📊 Details
 • host: $host
 • url: $DAEMON_URL
-• misses: $misses in a row (threshold $THRESHOLD)
-• last failure: ${why:-?} (curl code ${code:-?}), load average $loadavg
+• misses in a row: $misses (threshold $THRESHOLD)
+• last cause: ${why:-?} (curl code ${code:-?}), load $loadavg
 • runbook: RB-6 launchd-stuck
 
-⚡ Action: revive daemon
-\`launchctl list | grep activity-mesh\`
-\`launchctl kickstart -k gui/\$UID/com.activity-mesh.daemon\`
-log: \`$LOG\`
+⚡ What to do
+• launchctl list | grep activity-mesh
+• launchctl kickstart -k gui/$uid/com.activity-mesh.daemon
+• log: $LOG"
+TEXT_RU="🚨 activity-mesh: демон не отвечает
 
-━━━━━━━━━━━━━━━━━
+Демон не ответил на /health $misses раз подряд: индекс и HTTP API (/search, /recent, /push) недоступны. Запись событий через CLI не затронута.
 
-🇷🇺 Демон не отвечает на /health подряд $misses раз — operational history теряется.
-
-📊 Детали:
-• host: $host
-• url: $DAEMON_URL
-• misses: $misses подряд (threshold $THRESHOLD)
+📊 Детали
+• хост: $host
+• адрес: $DAEMON_URL
+• промахов подряд: $misses (порог $THRESHOLD)
+• последняя причина: ${why:-?} (код curl ${code:-?}), нагрузка $loadavg
 • runbook: RB-6 launchd-stuck
 
-⚡ Действие: revive daemon
-\`launchctl list | grep activity-mesh\`
-\`launchctl kickstart -k gui/\$UID/com.activity-mesh.daemon\`
-log: \`$LOG\`
+⚡ Что сделать
+• launchctl list | grep activity-mesh
+• launchctl kickstart -k gui/$uid/com.activity-mesh.daemon
+• лог: $LOG"
 
-\`$ts_iso · $host\`"
-
-if am_notify "$TEXT" fail; then
+if am_notify "$(am_t "$TEXT_EN" "$TEXT_RU")" fail; then
     log "alert sent"
     echo "$now" > "$LAST_ALERT_FILE" 2>/dev/null
+    am_record_alert heartbeat fail
 else
     log "alert FAILED (no notify cmd / no telegram creds / curl missing)"
 fi
