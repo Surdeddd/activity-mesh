@@ -9,18 +9,18 @@ SYNC="$ACTIVITY_MESH_SYNC"
 if [ ! -d "$SYNC" ]; then am_emit "$NAME" 2 warn "sync dir missing"; exit 0; fi
 
 self_host=$(am_host)
-now=$(date +%s); worst_lag=0; worst_host=""
+now=$(date +%s); wake=$(am_last_wake); worst_lag=0; worst_host=""
 
 for f in "$SYNC"/events-*.jsonl; do
     [ -f "$f" ] || continue
-    base=$(basename "$f" .jsonl); host=${base#events-}
-    [ "$host" = "$self_host" ] && continue   # local host has no sync lag
-    # GNU `stat -f` prints the mount point and exits 0, so BSD form goes second.
+    base=${f##*/}; base=${base%.jsonl}; host=${base#events-}
+    [ "$host" = "$self_host" ] && continue
     mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo "$now")
     ctime=$(stat -c %Z "$f" 2>/dev/null || stat -f %c "$f" 2>/dev/null || echo "$mtime")
-    age=$(( now - mtime ))
-    [ "$age" -gt 86400 ] && continue          # not "live" host, skip
-    lag=$(( ctime - mtime ))
+    [ $(( now - mtime )) -gt 86400 ] && continue
+    start=$mtime
+    if [ "$wake" -gt "$mtime" ] && [ "$ctime" -ge "$wake" ]; then start=$wake; fi
+    lag=$(( ctime - start ))
     [ "$lag" -lt 0 ] && lag=0
     if [ "$lag" -gt "$worst_lag" ]; then worst_lag=$lag; worst_host=$host; fi
 done
