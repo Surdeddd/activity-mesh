@@ -20,6 +20,9 @@ done
 
 CHECKS_DIR="$HERE/checks"
 CHECK_TIMEOUT_S="${ACTIVITY_MESH_CHECK_TIMEOUT_S:-120}"
+case "$CHECK_TIMEOUT_S" in ''|*[!0-9]*) CHECK_TIMEOUT_S=120 ;; esac
+CHECK_TIMEOUT_S=$(( 10#$CHECK_TIMEOUT_S ))
+[ "$CHECK_TIMEOUT_S" -gt 0 ] || CHECK_TIMEOUT_S=120
 ALERT_REPEAT_S="${ACTIVITY_MESH_ALERT_REPEAT_S:-86400}"
 TMP_DIR=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -109,18 +112,24 @@ else
     exit 0
 fi
 
+SNAP_DIR="$ACTIVITY_MESH_STATE"
+mkdir -p "$SNAP_DIR" 2>/dev/null || true
+printf '%s\n' "$doc" > "$SNAP_DIR/last-health.json" 2>/dev/null || true
+
 LAST_ALERT="$ACTIVITY_MESH_STATE/health-last-alert"
 if [ "$DRY_RUN" -eq 0 ]; then
     if [ "$max_tier" -ge 2 ]; then
         failing=$(printf '%s' "$results_json" | "$AM_JQ" -r \
             '[.[] | select(.status != "ok") | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
+        sig=$(printf '%s' "$results_json" | "$AM_JQ" -r \
+            '[.[] | select((.tier // 3) >= 2) | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
         now=$(date +%s); prev_ts=0; prev_sig=""
         if [ -f "$LAST_ALERT" ]; then
             IFS=$'\t' read -r prev_ts prev_sig < "$LAST_ALERT" || true
             case "$prev_ts" in ''|*[!0-9]*) prev_ts=0 ;; esac
         fi
-        if [ "$failing" = "$prev_sig" ] && [ $(( now - prev_ts )) -lt "$ALERT_REPEAT_S" ]; then
-            printf 'info: repeat alert suppressed (%s, first sent %ss ago)\n' "$failing" $(( now - prev_ts )) >&2
+        if [ "$sig" = "$prev_sig" ] && [ $(( now - prev_ts )) -lt "$ALERT_REPEAT_S" ]; then
+            printf 'info: repeat alert suppressed (%s, first sent %ss ago)\n' "$sig" $(( now - prev_ts )) >&2
         else
             fmt=$(am_t 'activity-mesh: %d ok, %d warnings, %d failures, %d severe (tier %d, %s)\n%s' \
                 'activity-mesh: в норме %d, предупреждений %d, отказов %d, критичных %d (уровень %d, %s)\n%s')
@@ -129,7 +138,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
             severity=warn
             { [ "$fail" -gt 0 ] || [ "$critical" -gt 0 ]; } && severity=fail
             if am_notify "$msg" "$severity"; then
-                printf '%s\t%s\n' "$now" "$failing" > "$LAST_ALERT" 2>/dev/null || true
+                printf '%s\t%s\n' "$now" "$sig" > "$LAST_ALERT" 2>/dev/null || true
                 am_record_alert master "$severity"
             else
                 printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
@@ -139,9 +148,5 @@ if [ "$DRY_RUN" -eq 0 ]; then
         rm -f "$LAST_ALERT" 2>/dev/null || true
     fi
 fi
-
-SNAP_DIR="$ACTIVITY_MESH_STATE"
-mkdir -p "$SNAP_DIR" 2>/dev/null || true
-printf '%s\n' "$doc" > "$SNAP_DIR/last-health.json" 2>/dev/null || true
 
 exit 0

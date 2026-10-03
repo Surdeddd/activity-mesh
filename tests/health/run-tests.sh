@@ -83,6 +83,11 @@ expect() {
     fi
 }
 
+run_master() {
+    env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
+        ACTIVITY_MESH_NOTIFY_CMD="tee -a $C/notified" "$@" bash "$C/h/master.sh" >/dev/null 2>&1
+}
+
 LOCAL="events-$HOST.jsonl"
 
 begin_case "lib: the last wake time is found under the launchd PATH without an override"
@@ -278,7 +283,7 @@ end_case
 begin_case "master: a hung check is cut off and reported, the run still completes"
 mkdir -p "$C/h/checks"
 cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
-printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'sleep 60' 'am_emit hung 1 ok late' > "$C/h/checks/hung.sh"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'exec sleep 60' > "$C/h/checks/hung.sh"
 printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit quick 1 ok fine' > "$C/h/checks/quick.sh"
 t0=$(date +%s)
 OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
@@ -302,10 +307,6 @@ begin_case "master: the same alert is not repeated every run, a new one goes out
 mkdir -p "$C/h/checks"
 cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
 printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit flaky 2 warn "something off"' > "$C/h/checks/flaky.sh"
-run_master() {
-    env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
-        ACTIVITY_MESH_NOTIFY_CMD="tee -a $C/notified" bash "$C/h/master.sh" >/dev/null 2>&1
-}
 run_master
 run_master
 sent=$(grep -c 'flaky=warn' "$C/notified" 2>/dev/null || echo 0)
@@ -314,6 +315,44 @@ printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit other 3 fail "
 run_master
 grep -q 'other=fail' "$C/notified" 2>/dev/null || err "a new failing check was not alerted"
 [ "$(wc -l < "$STATE/alerts.log" 2>/dev/null | tr -d ' ')" = 2 ] || err "alerts.log should record the 2 alerts that went out"
+end_case
+
+begin_case "master: a tier-1 warn flipping between runs does not re-send a standing tier-2 alert"
+mkdir -p "$C/h/checks"
+cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit flaky 2 warn "something off"' > "$C/h/checks/flaky.sh"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'if [ -e "$ACTIVITY_MESH_STATE/info-on" ]; then am_emit info 1 warn informational; else am_emit info 1 ok fine; fi' > "$C/h/checks/info.sh"
+run_master
+: > "$STATE/info-on"
+run_master
+rm -f "$STATE/info-on"
+run_master
+sent=$(grep -c 'flaky=warn' "$C/notified" 2>/dev/null || echo 0)
+[ "$sent" = 1 ] || err "a tier-1 flip re-sent the standing alert: $sent sends in three runs, want 1"
+end_case
+
+begin_case "master: an invalid check timeout falls back to the default instead of timing every check out"
+mkdir -p "$C/h/checks"
+cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit quick 1 ok fine' > "$C/h/checks/quick.sh"
+for bad in abc 0 08 -5; do
+    OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
+        ACTIVITY_MESH_CHECK_TIMEOUT_S="$bad" bash "$C/h/master.sh" --dry-run 2>"$C/stderr")
+    expect '.checks | map(select(.name == "quick"))[0].status == "ok"' "timeout [$bad] must not cut a quick check"
+done
+end_case
+
+begin_case "master: the health snapshot is saved before the notifier runs"
+mkdir -p "$C/h/checks"
+cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit flaky 2 warn "something off"' > "$C/h/checks/flaky.sh"
+printf '%s\n' '#!/bin/bash' 'cat >/dev/null' 'until [ -e "$1" ]; do sleep 0.2; done' > "$C/notifier.sh"
+run_master ACTIVITY_MESH_NOTIFY_CMD="bash $C/notifier.sh $C/release" &
+mpid=$!
+for _ in $(seq 1 50); do [ -s "$STATE/last-health.json" ] && break; sleep 0.2; done
+[ -s "$STATE/last-health.json" ] || err "last-health.json is missing while the notifier is still running"
+: > "$C/release"
+wait "$mpid"
 end_case
 
 begin_case "weekly-digest: alerts are counted, load timeouts are not daemon failures, budget is per fire"
