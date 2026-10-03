@@ -13,44 +13,35 @@ if [ ! -f "$KINDS_FILE" ] && [ ! -f "$SCOPES_FILE" ]; then
     am_emit "$NAME" 0 ok "registry files absent (publish kinds.yaml/scopes.yaml to the sync dir)"; exit 0
 fi
 
-known_kinds=""
+known_kinds=""; have_kinds=0
 if [ -f "$KINDS_FILE" ]; then
-    core=$(grep -E '^[[:space:]]*-[[:space:]]+name:' "$KINDS_FILE" | sed -E 's/.*name:[[:space:]]*//; s/[[:space:]]*$//')
-    ext=$(grep -E '^[[:space:]]+[A-Za-z0-9_]+/[A-Za-z0-9_]+:' "$KINDS_FILE" | sed -E 's/:.*//; s/^[[:space:]]*//')
-    known_kinds=$(printf '%s\n%s\n' "$core" "$ext")
+    have_kinds=1
+    known_kinds=$(grep -E '^[[:space:]]*-[[:space:]]+name:' "$KINDS_FILE" | sed -E 's/.*name:[[:space:]]*//; s/[[:space:]]*$//')
 fi
-known_scopes=""
+known_scopes=""; have_scopes=0
 if [ -f "$SCOPES_FILE" ]; then
+    have_scopes=1
     known_scopes=$(grep -E '^[[:space:]]*-[[:space:]]+name:' "$SCOPES_FILE" | sed -E 's/.*name:[[:space:]]*//; s/[[:space:]]*$//')
 fi
-is_known() { printf '%s\n' "$2" | grep -qxF "$1"; }
-is_known_scope() {
-    is_known "$1" "$known_scopes" && return 0
-    case "$1" in *:*) is_known "${1%%:*}" "$known_scopes" && return 0 ;; esac
-    return 1
-}
 
-now=$(date +%s); cutoff=$(( now - 86400 ))
-unk=0; sample=""
-for f in "$SYNC"/events-*.jsonl; do
-    [ -f "$f" ] || continue
-    while IFS= read -r line; do
-        [ -z "$line" ] && continue
-        ts=$(printf '%s' "$line" | /usr/bin/jq -r '.ts // empty' 2>/dev/null) || continue
-        [ -z "$ts" ] && continue
-        ts_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "${ts%%.*}" +%s 2>/dev/null \
-                  || date -u -d "$ts" +%s 2>/dev/null || echo 0)
-        [ "$ts_epoch" -lt "$cutoff" ] && continue
-        kind=$(printf '%s' "$line" | /usr/bin/jq -r '.kind // empty' 2>/dev/null)
-        scope=$(printf '%s' "$line" | /usr/bin/jq -r '.scope // empty' 2>/dev/null)
-        if [ -f "$KINDS_FILE" ] && [ -n "$kind" ] && ! is_known "$kind" "$known_kinds"; then
-            unk=$((unk+1)); [ -z "$sample" ] && sample="kind=$kind"
-        fi
-        if [ -f "$SCOPES_FILE" ] && [ -n "$scope" ] && ! is_known_scope "$scope"; then
-            unk=$((unk+1)); [ -z "$sample" ] && sample="scope=$scope"
-        fi
-    done < <(tail -n 200 "$f" 2>/dev/null)
-done
+cutoff=$(( $(date +%s) - 86400 ))
+result=$(for f in "$SYNC"/events-*.jsonl; do [ -f "$f" ] && tail -n 2000 "$f"; echo; done 2>/dev/null \
+    | "$AM_JQ" -rR --argjson cutoff "$cutoff" '
+        fromjson? | select(type == "object")
+        | select(((.ts // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601? // 0) >= $cutoff)
+        | "\(.kind // "")\t\(.scope // "")"' \
+    | KNOWN_KINDS="$known_kinds" KNOWN_SCOPES="$known_scopes" awk -F'\t' -v hk="$have_kinds" -v hs="$have_scopes" '
+        BEGIN {
+            nk = split(ENVIRON["KNOWN_KINDS"], k, "\n"); for (i = 1; i <= nk; i++) K[k[i]] = 1
+            ns = split(ENVIRON["KNOWN_SCOPES"], s, "\n"); for (i = 1; i <= ns; i++) S[s[i]] = 1
+        }
+        {
+            if (hk && $1 != "" && !($1 in K) && index($1, "/") == 0) { u++; if (sample == "") sample = "kind=" $1 }
+            sc = $2; root = sc; sub(/:.*/, "", root)
+            if (hs && sc != "" && !(sc in S) && !(root in S)) { u++; if (sample == "") sample = "scope=" sc }
+        }
+        END { printf "%d %s\n", u + 0, sample }')
+read -r unk sample <<< "${result:-0}"
 
 if [ "$unk" -eq 0 ]; then am_emit "$NAME" 1 ok "no drift"
 elif [ "$unk" -lt 5 ]; then am_emit "$NAME" 2 warn "$unk unknown values (e.g. $sample)"
