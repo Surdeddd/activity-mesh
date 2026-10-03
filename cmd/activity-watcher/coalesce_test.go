@@ -109,23 +109,52 @@ func TestRunEmitRollupReplacesPerFileSummary(t *testing.T) {
 	}
 }
 
+func writeShimScript(t *testing.T, body string) string {
+	t.Helper()
+	shim := filepath.Join(t.TempDir(), "emit.sh")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return shim
+}
+
+func runEmitWith(shim string) error {
+	src := Source{Name: "emit", Path: "/x", Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "x"}}
+	req := emitReq{ev: fsnotify.Event{Name: "/x/f.md", Op: fsnotify.Write}}
+	return runEmit(context.Background(), shim, src, req)
+}
+
 func TestRunEmitCountsAPrintedULIDAsWritten(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("integration uses POSIX shell shim")
 	}
-	dir := t.TempDir()
-	shim := filepath.Join(dir, "late-emit.sh")
-	body := "#!/bin/sh\nprintf '01ARZ3NDEKTSV4RRFFQ69G5FAV\\n'\nexec sleep 5\n"
-	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	shim := writeShimScript(t, "printf '01ARZ3NDEKTSV4RRFFQ69G5FAV\\n'\nexec sleep 10\n")
 	old := emitTimeout
-	emitTimeout = 300 * time.Millisecond
+	emitTimeout = 2 * time.Second
 	t.Cleanup(func() { emitTimeout = old })
-	src := Source{Name: "late", Path: dir, Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "x"}}
-	req := emitReq{ev: fsnotify.Event{Name: filepath.Join(dir, "f.md"), Op: fsnotify.Write}}
-	if err := runEmit(context.Background(), shim, src, req); err != nil {
+	if err := runEmitWith(shim); err != nil {
 		t.Fatalf("emit printed its ULID, so the event is in the shard; got error %v", err)
+	}
+}
+
+func TestRunEmitFailsWhenNoULIDWasPrinted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shim := writeShimScript(t, "printf 'boom\\n'\nexit 1\n")
+	err := runEmitWith(shim)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("an emit that failed without printing a ULID wrote nothing and must report an error with its output, got %v", err)
+	}
+}
+
+func TestRunEmitReadsTheULIDFromTheLastLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shim := writeShimScript(t, "printf 'warn: x\\n01ARZ3NDEKTSV4RRFFQ69G5FAV\\n'\nexit 1\n")
+	if err := runEmitWith(shim); err != nil {
+		t.Fatalf("a ULID on the last line counts as written even after a warning line, got %v", err)
 	}
 }
 
