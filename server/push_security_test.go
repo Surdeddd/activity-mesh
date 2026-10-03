@@ -428,3 +428,37 @@ func TestHandlePushAppendsConcurrentRetriesOfOneULIDOnce(t *testing.T) {
 		t.Fatalf("%d of %d retries flagged as duplicate, want %d", duplicates, retries, retries-1)
 	}
 }
+
+func TestHandlePushRetryAfterCrashBeforeIngestAppendsOnce(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	id := "01HRX00000000000000000CR01"
+	seedJSONL(t, d.syncDir, "test-host", []map[string]any{
+		{"v": 1, "id": id, "ts": tsNow(0), "host": "test-host", "agent": "pusher", "kind": "note", "scope": "s", "summary": "x"},
+	})
+	w := doPush(t, d, pushBody(map[string]any{"id": id}))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"duplicate":true`) {
+		t.Fatalf("retry of a ULID already in the shard but not yet indexed: got %d %s, want 200 with duplicate", w.Code, w.Body.String())
+	}
+	if lines := rawShardLines(t, d); len(lines) != 1 {
+		t.Fatalf("retry appended a second copy: %d shard lines", len(lines))
+	}
+	if got := d.m.ingested.Load(); got != 1 {
+		t.Fatalf("ingested_events_total=%d after indexing one event, want 1", got)
+	}
+	if w := doPush(t, d, pushBody(map[string]any{"id": "01HRX00000000000000000CR02"})); w.Code != http.StatusOK {
+		t.Fatalf("next push: %d %s", w.Code, w.Body.String())
+	}
+	if got := d.m.ingested.Load(); got != 2 {
+		t.Fatalf("ingested_events_total=%d after indexing two events, want 2: the pre- and post-push ingests must not count one event twice", got)
+	}
+}
+
+func TestHandlePushIntoAHostWithoutAShardCountsNoError(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	if w := doPush(t, d, pushBody(nil)); w.Code != http.StatusOK {
+		t.Fatalf("push: %d %s", w.Code, w.Body.String())
+	}
+	if n := d.m.errors.Load(); n != 0 {
+		t.Fatalf("first push into a host without a shard counted %d errors: a missing shard is not an ingest failure", n)
+	}
+}

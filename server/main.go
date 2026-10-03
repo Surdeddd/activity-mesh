@@ -511,6 +511,15 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	d.pushMu.Lock()
 	defer d.pushMu.Unlock()
+	shardPath := filepath.Join(d.syncDir, "events-"+host+".jsonl")
+	if n, err := d.idx.IngestJSONL(shardPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			d.m.errors.Add(1)
+			log.Printf("pre-push ingest: %v", err)
+		}
+	} else {
+		d.m.ingested.Add(uint64(n))
+	}
 	// Retries after a dropped response used to append a second line with the same
 	// ULID: the CLI (which reads the shard) then double-counts what the index
 	// (keyed by ULID) shows once.
@@ -561,7 +570,7 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	if err := event.AppendAudit(d.stateDir, id, hits); err != nil {
 		log.Printf("push audit append: %v", err)
 	}
-	if n, err := d.idx.IngestJSONL(filepath.Join(d.syncDir, "events-"+host+".jsonl")); err != nil {
+	if n, err := d.idx.IngestJSONL(shardPath); err != nil {
 		d.m.errors.Add(1)
 		log.Printf("post-push ingest: %v", err)
 	} else {
