@@ -80,6 +80,15 @@ expect() {
 
 LOCAL="events-$HOST.jsonl"
 
+begin_case "lib: the last wake time is found under the launchd PATH without an override"
+wake=$(env -i HOME="$C/home" PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin ACTIVITY_MESH_STATE="$STATE" \
+    /bin/bash -c '. "$1/lib.sh" && am_last_wake' am-lib "$HEALTH" 2>"$C/stderr")
+case "$wake" in
+    ''|*[!0-9]*) err "am_last_wake printed [$wake]" ;;
+    *) if [ "$wake" -le 0 ] || [ "$wake" -gt "$(date +%s)" ]; then err "am_last_wake=$wake is outside (0, now]"; fi ;;
+esac
+end_case
+
 begin_case "adoption-ratio: heartbeat canaries are self-monitoring, not a writing agent"
 gen "$SYNC/$LOCAL" 120 $((NOW - 5 * 86400)) 3600 heartbeat canary activity-mesh "hourly heartbeat ok=1" hb
 gen "$SYNC/$LOCAL" 20 $((NOW - 4 * 86400)) 7200 cli note memory "memory entry changed" cli
@@ -109,6 +118,13 @@ gen "$SYNC/$LOCAL" 20 $((NOW - 86400 + 60)) 3600 heartbeat canary activity-mesh 
 LAST_WAKE=$((NOW - 6 * 3600))
 run_check canary
 expect '.tier >= 3' "no canary for ~4h while awake must fail"
+end_case
+
+begin_case "canary: a canary three hours old right after waking is fine, only the wake guard can tell"
+gen "$SYNC/$LOCAL" 4 $((NOW - 3 * 3600 - 180)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" g
+LAST_WAKE=$((NOW - 1800))
+run_check canary
+expect '.tier <= 1' "an old canary must not fail while the machine woke less than the stale limit ago"
 end_case
 
 begin_case "hook-health: clock-sync failures in heartbeat.log are not hook errors"

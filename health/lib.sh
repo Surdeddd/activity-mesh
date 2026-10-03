@@ -56,10 +56,11 @@ am_last_wake() {
         echo "$ACTIVITY_MESH_LAST_WAKE"
         return
     fi
-    local boot="" wake=""
-    if [ "$(uname -s)" = Darwin ]; then
-        boot=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
-        wake=$(sysctl -n kern.waketime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+    local boot="" wake="" sc=/usr/sbin/sysctl
+    [ -x "$sc" ] || sc=$(command -v sysctl 2>/dev/null || true)
+    if [ "$(uname -s)" = Darwin ] && [ -n "$sc" ]; then
+        boot=$("$sc" -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
+        wake=$("$sc" -n kern.waketime 2>/dev/null | sed -n 's/^{ sec = \([0-9][0-9]*\),.*/\1/p')
     elif [ -r /proc/stat ]; then
         boot=$(awk '/^btime /{print $2}' /proc/stat 2>/dev/null)
     fi
