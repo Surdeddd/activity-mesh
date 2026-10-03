@@ -15,7 +15,7 @@ fi
 
 now=$(date +%s)
 awake=$(( now - $(am_last_wake) ))
-stats=$(grep -E '"kind"[[:space:]]*:[[:space:]]*"canary"' "$F" 2>/dev/null | tail -n 2000 | "$AM_JQ" -nrR --argjson cutoff $(( now - 86400 )) "$AM_JQ_DEFS"'
+stats=$(grep -aE '"kind"[[:space:]]*:[[:space:]]*"canary"' "$F" 2>/dev/null | tail -n 2000 | "$AM_JQ" -nrR --argjson cutoff $(( now - 86400 )) "$AM_JQ_DEFS"'
     [inputs | fromjson? | select(type == "object" and .kind == "canary")
      | {t: ev_ts,
         ok: ((.summary // "") | test("ok=1"))}]

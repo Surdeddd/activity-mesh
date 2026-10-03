@@ -169,6 +169,15 @@ run_check canary
 expect '.tier >= 3' "hours awake and not one canary must fail"
 end_case
 
+begin_case "canary: a corrupted line with NUL bytes does not hide the canaries"
+gen "$SYNC/$LOCAL" 3 $((NOW - 3000)) 600 heartbeat canary activity-mesh "hourly heartbeat ok=1" nb
+printf 'garbage\0\0\0 with nul bytes\n' >> "$SYNC/$LOCAL"
+gen "$SYNC/$LOCAL" 1 $((NOW - 30)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" nc
+LAST_WAKE=$((NOW - 6 * 3600))
+run_check canary
+expect '.tier == 1 and .status == "ok"' "a NUL byte in the shard must not blind the canary check"
+end_case
+
 begin_case "canary: a burst of other events cannot push the canaries out of view"
 gen "$SYNC/$LOCAL" 3 $((NOW - 3000)) 600 heartbeat canary activity-mesh "hourly heartbeat ok=1" k
 gen "$SYNC/$LOCAL" 2500 $((NOW - 2500)) 1 cli note memory "burst" bu
