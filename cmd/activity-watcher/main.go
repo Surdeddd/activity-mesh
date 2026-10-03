@@ -19,12 +19,15 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/oklog/ulid/v2"
 )
 
 const (
 	defaultDebounceWindow = 5 * time.Second
 	defaultActivityLog    = "activity-log"
 )
+
+var emitTimeout = 10 * time.Minute
 
 type Source struct {
 	Name            string `yaml:"name"`
@@ -292,14 +295,23 @@ func runEmit(ctx context.Context, bin string, src Source, req emitReq) error {
 	}
 	args = append(args, "--ref", "file://"+ev.Name)
 
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, emitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, bin, args...)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("activity-log emit failed (%v): %s", err, strings.TrimSpace(string(out)))
+	text := strings.TrimSpace(string(out))
+	id := text
+	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+		id = strings.TrimSpace(text[i+1:])
 	}
-	log.Printf("emit ok src=%q kind=%s scope=%s id=%s", src.Name, kind, scope, strings.TrimSpace(string(out)))
+	if err != nil {
+		if _, perr := ulid.ParseStrict(id); perr == nil {
+			log.Printf("emit ok src=%q kind=%s scope=%s id=%s (late exit: %v)", src.Name, kind, scope, id, err)
+			return nil
+		}
+		return fmt.Errorf("activity-log emit failed (%v): %s", err, text)
+	}
+	log.Printf("emit ok src=%q kind=%s scope=%s id=%s", src.Name, kind, scope, id)
 	return nil
 }
 

@@ -108,3 +108,29 @@ func TestRunEmitRollupReplacesPerFileSummary(t *testing.T) {
 		t.Errorf("rollup summary missing: %q", string(data))
 	}
 }
+
+func TestRunEmitCountsAPrintedULIDAsWritten(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "late-emit.sh")
+	body := "#!/bin/sh\nprintf '01ARZ3NDEKTSV4RRFFQ69G5FAV\\n'\nexec sleep 5\n"
+	if err := os.WriteFile(shim, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := emitTimeout
+	emitTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { emitTimeout = old })
+	src := Source{Name: "late", Path: dir, Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "x"}}
+	req := emitReq{ev: fsnotify.Event{Name: filepath.Join(dir, "f.md"), Op: fsnotify.Write}}
+	if err := runEmit(context.Background(), shim, src, req); err != nil {
+		t.Fatalf("emit printed its ULID, so the event is in the shard; got error %v", err)
+	}
+}
+
+func TestEmitTimeoutOutlastsALoadedMachine(t *testing.T) {
+	if emitTimeout < 5*time.Minute {
+		t.Fatalf("emitTimeout=%s: under load emit took 78s and 4.7min in production; a short timeout kills writes that would succeed", emitTimeout)
+	}
+}
