@@ -234,6 +234,14 @@ run_check redactor-coverage
 expect '.tier == 1 and .status == "ok" and (.message | test("^0 hits in 50 lines"))' "no PII means ok with the scanned line count"
 end_case
 
+begin_case "redactor-coverage: PII that exists only in a Syncthing conflict copy is reported"
+gen "$SYNC/events-otherhost.jsonl" 50 $((NOW - 7200)) 60 cli note memory "plain note" ok otherhost
+gen "$SYNC/$CONFLICT" 1 $((NOW - 3600)) 60 cli note memory "mail me at someone@example.com" q otherhost
+run_check redactor-coverage
+expect '.tier == 2 and (.message | startswith("1/51 lines with possible PII"))' "the copy is synced to every host like a live shard, so its lines are scanned"
+expect '.message | contains("sync-conflict-20261003-010203-ABCDEFG")' "the message names the copy so the operator knows where to look"
+end_case
+
 begin_case "secrets-bypass: a secret written two hours ago is still a critical leak"
 SECRET="AKIA$(printf 'Q%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
 gen "$SYNC/$LOCAL" 1 $((NOW - 7200)) 60 cli note memory "key $SECRET" s
@@ -245,6 +253,15 @@ begin_case "secrets-bypass: clean shards read as ok"
 gen "$SYNC/$LOCAL" 50 $((NOW - 7200)) 60 cli note memory "plain note" ok
 run_check secrets-bypass
 expect '.tier == 1 and .status == "ok"' "no secrets means ok"
+end_case
+
+begin_case "secrets-bypass: a secret that exists only in a Syncthing conflict copy is still a critical leak"
+SECRET="AKIA$(printf 'Q%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
+gen "$SYNC/events-otherhost.jsonl" 50 $((NOW - 7200)) 60 cli note memory "plain note" ok otherhost
+gen "$SYNC/$CONFLICT" 1 $((NOW - 7200)) 60 cli note memory "key $SECRET" s otherhost
+run_check secrets-bypass
+expect '.tier == 4 and .status == "critical"' "a leak in a copy is synced to every host like one in a live shard"
+expect '.message | contains("sync-conflict-20261003-010203-ABCDEFG")' "the message names the copy so the operator knows where to look"
 end_case
 
 begin_case "silence: right after wake, a stale remote shard is not judged yet"

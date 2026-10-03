@@ -14,6 +14,6 @@ PATS='sk-ant-[A-Za-z0-9_-]{32,}|sk-[A-Za-z0-9]{40,}|ghp_[A-Za-z0-9]{30,}|xox[abp
 
 read -r hits _ sample <<< "$(am_scan_shards "$PATS")"
 
-if [ "$hits" -eq 0 ]; then am_emit "$NAME" 1 ok "no secrets in live shards"
+if [ "$hits" -eq 0 ]; then am_emit "$NAME" 1 ok "no secrets in shard files"
 else am_emit "$NAME" 4 critical "$hits lines with potential secrets in $sample (run RB-2 immediately)"; fi
 exit 0

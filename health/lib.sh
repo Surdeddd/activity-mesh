@@ -121,7 +121,7 @@ am_shards() {
     local f
     for f in "$ACTIVITY_MESH_SYNC"/events-*.jsonl; do
         [ -f "$f" ] || continue
-        case "${f##*/}" in *.sync-conflict-*) continue ;; esac
+        case "${f##*/}" in *.sync-conflict-*) [ "${1:-}" = all ] || continue ;; esac
         printf '%s\n' "$f"
     done
 }
@@ -137,7 +137,7 @@ am_scan_shards() {
             hits=$(( hits + h ))
             [ -z "$sample" ] && sample="${f##*/}"
         fi
-    done < <(am_shards)
+    done < <(am_shards all)
     printf '%d %d %s\n' "$hits" "$lines" "$sample"
 }
 
