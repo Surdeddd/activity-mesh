@@ -101,6 +101,16 @@ fi
 grep -rq "$PREFIX_DIR" "$UNITS_DIR" || fail "units do not reference the installed binaries"
 pass "units rendered from versioned assets/prefix, no checkout references"
 
+if [ "$OS" = "darwin" ]; then
+    for unit in health heartbeat; do
+        plist="$UNITS_DIR/com.activity-mesh.$unit.plist"
+        [ -f "$plist" ] || fail "rendered $unit unit missing: $plist"
+        grep -A1 '<key>RunAtLoad</key>' "$plist" | grep '<false/>' >/dev/null \
+            || fail "$unit unit must wait for its calendar slot (RunAtLoad must be false)"
+    done
+    pass "health and heartbeat units wait for their calendar slot"
+fi
+
 for reg in kinds scopes agents redaction; do
     [ -f "$FAKE_HOME/Sync/activity/$reg.yaml" ] || fail "registry not seeded: $reg.yaml"
 done
