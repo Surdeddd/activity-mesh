@@ -129,10 +129,11 @@ begin_case "ingester-error: watcher emit failures are lost events and are report
 for i in 1 2 3 4; do
     printf '%s emit error src="memory-entry" path="/x/%d.md": activity-log emit failed (signal: killed): \n' "$(gotime $((NOW - 600 * i)))" "$i" >> "$STATE/watcher.err"
 done
+printf '%s emit queue full src="memory-entry": 3 events lost\n' "$(gotime $((NOW - 300)))" >> "$STATE/watcher.err"
 printf '%s ingested 1 events from %s\n' "$(gotime $((NOW - 60)))" "$LOCAL" > "$STATE/daemon.err"
 run_check ingester-error
-expect '.tier >= 2' "four lost watcher events in the window must warn"
-expect '.message | test("4")' "the count of lost events is in the message"
+expect '.tier >= 2' "lost watcher events in the window must warn"
+expect '.message | test("7 watcher events lost")' "emit errors and rollup drops are summed in the message"
 end_case
 
 begin_case "ingester-error: a clean daemon log is a real ok, not 'no ingest.log yet'"
