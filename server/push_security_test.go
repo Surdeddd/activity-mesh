@@ -216,3 +216,59 @@ func TestHandlePushRedactsAndAudits(t *testing.T) {
 		t.Fatal("audit log must never contain the original secret")
 	}
 }
+
+func TestRoutesRejectDNSRebindingWrite(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	req := httptest.NewRequest(http.MethodPost, "http://rebind.attacker.example:7459/push", strings.NewReader(pushBody(nil)))
+	req.Header.Set("Origin", "http://rebind.attacker.example:7459")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	d.routes().ServeHTTP(w, req)
+	if w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("browser write from a DNS-rebound origin (Host %q) got %d, want 421", req.Host, w.Code)
+	}
+	if _, err := os.Stat(filepath.Join(d.syncDir, "events-test-host.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("write from a DNS-rebound origin reached the shard (stat err=%v)", err)
+	}
+}
+
+func TestRoutesRejectDNSRebindingRead(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	if w := doPush(t, d, pushBody(map[string]any{"summary": "private work item"})); w.Code != http.StatusOK {
+		t.Fatalf("seed push: %d", w.Code)
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://rebind.attacker.example:7459/recent?hours=24", nil)
+	req.Header.Set("Origin", "http://rebind.attacker.example:7459")
+	w := httptest.NewRecorder()
+	d.routes().ServeHTTP(w, req)
+	if w.Code != http.StatusMisdirectedRequest || strings.Contains(w.Body.String(), "private work item") {
+		t.Fatalf("activity log served to a non-loopback Host %q: %d %s", req.Host, w.Code, w.Body.String())
+	}
+}
+
+func TestRoutesServeOnlyLocalhostAndIPLiteralHosts(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	cases := []struct {
+		host string
+		want int
+	}{
+		{"127.0.0.1:7459", http.StatusOK},
+		{"localhost:7459", http.StatusOK},
+		{"LocalHost", http.StatusOK},
+		{"[::1]:7459", http.StatusOK},
+		{"192.168.1.20:7459", http.StatusOK},
+		{"127.0.0.1.nip.io:7459", http.StatusMisdirectedRequest},
+		{"localhost.attacker.example", http.StatusMisdirectedRequest},
+		{"rebind.attacker.example:7459", http.StatusMisdirectedRequest},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.Host = c.host
+		w := httptest.NewRecorder()
+		d.routes().ServeHTTP(w, req)
+		if w.Code != c.want {
+			t.Errorf("Host %q: got %d, want %d", c.host, w.Code, c.want)
+		}
+	}
+}

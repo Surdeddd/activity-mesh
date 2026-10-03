@@ -110,15 +110,8 @@ func main() {
 	wg.Add(2)
 	go func() { defer wg.Done(); d.watchSync(ctx) }()
 	go func() { defer wg.Done(); d.periodicRebuild(ctx, defaultRebuild) }()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", d.handleHealth)
-	mux.HandleFunc("/recent", d.handleRecent)
-	mux.HandleFunc("/search", d.handleSearch)
-	mux.HandleFunc("/digest", d.handleDigest)
-	mux.HandleFunc("/push", d.handlePush)
-	mux.HandleFunc("/metrics", d.handleMetrics)
 	srv := &http.Server{
-		Addr: net.JoinHostPort(bindAddr, strconv.Itoa(*port)), Handler: mux,
+		Addr: net.JoinHostPort(bindAddr, strconv.Itoa(*port)), Handler: d.routes(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
@@ -145,6 +138,32 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
 	log.Printf("daemon exited cleanly")
+}
+
+func (d *daemon) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", d.handleHealth)
+	mux.HandleFunc("/recent", d.handleRecent)
+	mux.HandleFunc("/search", d.handleSearch)
+	mux.HandleFunc("/digest", d.handleDigest)
+	mux.HandleFunc("/push", d.handlePush)
+	mux.HandleFunc("/metrics", d.handleMetrics)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackOrIPHost(r.Host) {
+			writeErr(w, http.StatusMisdirectedRequest, "host header must be localhost or an IP literal")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func loopbackOrIPHost(hostport string) bool {
+	h := hostport
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		h = host
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	return strings.EqualFold(h, "localhost") || net.ParseIP(h) != nil
 }
 
 func (d *daemon) watchSync(ctx context.Context) {
