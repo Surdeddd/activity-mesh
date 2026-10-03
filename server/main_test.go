@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -316,4 +317,80 @@ func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 	if got.Count != 100 {
 		t.Errorf("expected 100 recent events, got %d", got.Count)
 	}
+}
+
+func TestDaemonAnswersHealthWhileInitialIngestRuns(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	release := make(chan struct{})
+	d.ingestDir = func(string) (int, error) { <-release; return 0, nil }
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: d.routes()}
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := d.start(ctx, cancel, ln, srv)
+	defer func() {
+		close(release)
+		cancel()
+		_ = srv.Shutdown(context.Background())
+		wg.Wait()
+	}()
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get("http://" + ln.Addr().String() + "/health")
+	if err != nil {
+		t.Fatalf("/health must answer while the initial ingest is still running: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/health status %d during the initial ingest", resp.StatusCode)
+	}
+}
+
+func seedHealthyAndBrokenShards(t *testing.T, d *daemon) {
+	t.Helper()
+	seedJSONL(t, d.syncDir, "macbook", []map[string]any{
+		{"v": 1, "id": "01HRX0000000000000000000B1", "ts": tsNow(-time.Minute), "host": "macbook", "agent": "cli", "scope": "s", "kind": "note", "summary": "healthy"},
+	})
+	if err := os.Mkdir(filepath.Join(d.syncDir, "events-broken.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForIngestMetrics(t *testing.T, d *daemon, wantIngested uint64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for d.m.ingested.Load() != wantIngested || d.m.errors.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("ingested=%d errors=%d, want ingested=%d and errors>0: one failing shard must not erase the events indexed from the healthy ones", d.m.ingested.Load(), d.m.errors.Load(), wantIngested)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestDaemonStartCountsHealthyShardsWhenAnotherFails(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	seedHealthyAndBrokenShards(t, d)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: d.routes()}
+	ctx, cancel := context.WithCancel(context.Background())
+	wg := d.start(ctx, cancel, ln, srv)
+	defer func() {
+		cancel()
+		_ = srv.Shutdown(context.Background())
+		wg.Wait()
+	}()
+	waitForIngestMetrics(t, d, 1)
+}
+
+func TestPeriodicRebuildCountsHealthyShardsWhenAnotherFails(t *testing.T) {
+	d, _ := newTestDaemon(t)
+	seedHealthyAndBrokenShards(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); d.periodicRebuild(ctx, 10*time.Millisecond) }()
+	defer func() { cancel(); <-done }()
+	waitForIngestMetrics(t, d, 1)
 }

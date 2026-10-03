@@ -55,6 +55,7 @@ type daemon struct {
 	port              int
 	m                 metrics
 	pushMu            sync.Mutex
+	ingestDir         func(string) (int, error)
 }
 
 func main() {
@@ -99,40 +100,18 @@ func main() {
 	defer idx.Close()
 	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir, host: event.HostName(), port: *port}
 	d.m.startedAt = time.Now().UTC()
-	if n, err := d.idx.IngestDir(syncDir); err != nil {
-		d.m.errors.Add(1)
-		log.Printf("initial ingest failed: %v", err)
-	} else if n > 0 {
-		d.m.ingested.Add(uint64(n))
-		log.Printf("initial ingest: %d events", n)
-	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() { defer wg.Done(); d.watchSync(ctx) }()
-	go func() { defer wg.Done(); d.periodicRebuild(ctx, defaultRebuild) }()
 	srv := &http.Server{
 		Addr: net.JoinHostPort(bindAddr, strconv.Itoa(*port)), Handler: d.routes(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
-	// Bind before announcing: ListenAndServe's failure used to be logged and
-	// swallowed, leaving a live process with no listener that no supervisor
-	// would ever restart (port already held by a stale daemon is the common one).
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", srv.Addr, err)
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, ln.Addr(), syncDir, stateDir)
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("server error: %v", err)
-			cancel() // a dead listener must take the process down, not run headless
-		}
-	}()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	wg := d.start(ctx, cancel, ln, srv)
 	<-ctx.Done()
 	log.Printf("shutdown received, draining...")
 	shutdownCtx, sc := context.WithTimeout(context.Background(), 10*time.Second)
@@ -140,6 +119,41 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
 	log.Printf("daemon exited cleanly")
+}
+
+func (d *daemon) start(ctx context.Context, cancel context.CancelFunc, ln net.Listener, srv *http.Server) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, ln.Addr(), d.syncDir, d.stateDir)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("server error: %v", err)
+			cancel()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ingest := d.ingestDir
+		if ingest == nil {
+			ingest = d.idx.IngestDir
+		}
+		n, err := ingest(d.syncDir)
+		if n > 0 {
+			d.m.ingested.Add(uint64(n))
+			log.Printf("initial ingest: %d events", n)
+		}
+		if err != nil {
+			d.m.errors.Add(1)
+			log.Printf("initial ingest failed: %v", err)
+		}
+		var bg sync.WaitGroup
+		bg.Add(2)
+		go func() { defer bg.Done(); d.watchSync(ctx) }()
+		go func() { defer bg.Done(); d.periodicRebuild(ctx, defaultRebuild) }()
+		bg.Wait()
+	}()
+	return &wg
 }
 
 func (d *daemon) routes() http.Handler {
@@ -229,11 +243,12 @@ func (d *daemon) periodicRebuild(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 			n, err := d.idx.IngestDir(d.syncDir)
+			if n > 0 {
+				d.m.ingested.Add(uint64(n))
+			}
 			if err != nil {
 				log.Printf("periodic ingest: %v", err)
 				d.m.errors.Add(1)
-			} else if n > 0 {
-				d.m.ingested.Add(uint64(n))
 			}
 		}
 	}
