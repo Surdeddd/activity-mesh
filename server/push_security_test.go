@@ -264,25 +264,30 @@ func TestRoutesRejectDNSRebindingRead(t *testing.T) {
 func TestRoutesServeOnlyLocalhostAndIPLiteralHosts(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	cases := []struct {
+		path string
 		host string
 		want int
 	}{
-		{"127.0.0.1:7459", http.StatusOK},
-		{"localhost:7459", http.StatusOK},
-		{"LocalHost", http.StatusOK},
-		{"[::1]:7459", http.StatusOK},
-		{"192.168.1.20:7459", http.StatusOK},
-		{"127.0.0.1.nip.io:7459", http.StatusMisdirectedRequest},
-		{"localhost.attacker.example", http.StatusMisdirectedRequest},
-		{"rebind.attacker.example:7459", http.StatusMisdirectedRequest},
+		{"/health", "127.0.0.1:7459", http.StatusOK},
+		{"/health", "localhost:7459", http.StatusOK},
+		{"/health", "LocalHost", http.StatusOK},
+		{"/health", "[::1]:7459", http.StatusOK},
+		{"/health", "[::1]", http.StatusOK},
+		{"/health", "192.168.1.20:7459", http.StatusOK},
+		{"/metrics", "127.0.0.1:7459", http.StatusOK},
+		{"/health", "", http.StatusMisdirectedRequest},
+		{"/health", "127.0.0.1.nip.io:7459", http.StatusMisdirectedRequest},
+		{"/health", "localhost.attacker.example", http.StatusMisdirectedRequest},
+		{"/health", "rebind.attacker.example:7459", http.StatusMisdirectedRequest},
+		{"/metrics", "rebind.attacker.example:7459", http.StatusMisdirectedRequest},
 	}
 	for _, c := range cases {
-		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
 		req.Host = c.host
 		w := httptest.NewRecorder()
 		d.routes().ServeHTTP(w, req)
 		if w.Code != c.want {
-			t.Errorf("Host %q: got %d, want %d", c.host, w.Code, c.want)
+			t.Errorf("GET %s with Host %q: got %d, want %d", c.path, c.host, w.Code, c.want)
 		}
 	}
 }
