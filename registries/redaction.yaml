@@ -133,7 +133,8 @@ patterns:
       Email addresses. Only git@ SSH remotes are exempt: a match whose local
       part is `git` (case-insensitive) and that is immediately followed by
       `:<path>/` is an scp-style remote (git@github.com:owner/repo.git), not an
-      address, and is left alone. Any other user@host:path/ is still an email.
+      address, and is left alone. Any other user@host:path/ is still an email,
+      and so is a `git` that ends a longer local part such as `-git` or `.git`.
       The regex flavour has no lookahead, so that check runs on the text after
       the match.
     kind: pii
@@ -145,12 +146,15 @@ patterns:
     description: >-
       Home-directory prefix. Built DYNAMICALLY at runtime from the current
       user's home plus $ACTIVITY_MESH_REDACT_HOMES (colon-separated extra
-      prefixes) — no hardcoded usernames in code or config. The home is capture
-      group 1 and must be followed by end of text or a character that is not a
-      Unicode letter, digit or underscore, so a longer name is never cut; that
-      boundary character stays in place.
+      prefixes) — no hardcoded usernames in code or config. The prefixes form
+      one alternation, longest first. A match is kept only if the character
+      after it does not continue the home's last character: after an ASCII
+      letter, digit or underscore only an ASCII letter, digit or underscore
+      continues it; after a non-ASCII letter or number any Unicode letter,
+      number or underscore does; end of text always counts as a boundary. The
+      check runs on the text after the match, so adjacent homes are all
+      redacted.
     kind: env
-    group: 1
     regex: '<dynamic: $HOME + $ACTIVITY_MESH_REDACT_HOMES>'
     replacement: '[REDACTED:user_path:{len}]'
 

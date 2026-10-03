@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type Hit struct {
@@ -27,7 +29,10 @@ type rule struct {
 	// in place — used by context rules like `AUTH_TOKEN=<hex>`, where the name
 	// is the useful part and only the value is the secret.
 	group int
+	skip  func(s string, lo, hi int) bool
 }
+
+const secretNames = `secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?`
 
 var rules = []*rule{
 	{
@@ -130,7 +135,7 @@ var rules = []*rule{
 		name:    "hex_secret",
 		kind:    "credential",
 		repType: "hex_secret",
-		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?)["']?\s*[:=]\s*["']?([0-9a-fA-F]{32,})\b`),
+		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:` + secretNames + `)["']?\s*[:=]\s*["']?([0-9a-fA-F]{32,})\b`),
 		group:   1,
 	},
 	{
@@ -150,13 +155,14 @@ var rules = []*rule{
 		kind:    "pii",
 		repType: "email",
 		re:      regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`),
+		skip:    isGitRemote,
 	},
 	{
 		name:    "user_path",
 		kind:    "env",
 		repType: "user_path",
 		re:      userPathRe(),
-		group:   1,
+		skip:    continuesHome,
 	},
 	{
 		name:    "lan_ip",
@@ -177,13 +183,30 @@ func userPathRe() *regexp.Regexp {
 		}
 	}
 	if len(homes) == 0 {
-		return regexp.MustCompile(`(\bactivity-mesh-no-home-configured\b)`)
+		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
 	}
 	quoted := make([]string, len(homes))
 	for i, h := range homes {
 		quoted[i] = regexp.QuoteMeta(strings.TrimRight(h, "/\\"))
 	}
-	return regexp.MustCompile(`(` + strings.Join(quoted, "|") + `)(?:[^\p{L}\p{N}_]|$)`)
+	sort.SliceStable(quoted, func(i, j int) bool { return len(quoted[i]) > len(quoted[j]) })
+	return regexp.MustCompile(`(?:` + strings.Join(quoted, "|") + `)`)
+}
+
+func continuesHome(s string, lo, hi int) bool {
+	last, _ := utf8.DecodeLastRuneInString(s[lo:hi])
+	next, _ := utf8.DecodeRuneInString(s[hi:])
+	switch {
+	case isASCIIWord(last):
+		return isASCIIWord(next)
+	case unicode.IsLetter(last) || unicode.IsNumber(last):
+		return unicode.IsLetter(next) || unicode.IsNumber(next) || next == '_'
+	}
+	return false
+}
+
+func isASCIIWord(r rune) bool {
+	return r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }
 
 var (
@@ -204,18 +227,7 @@ func Apply(input string) (string, []Hit) {
 	var hits []Hit
 
 	for _, r := range rules {
-		if r.group > 0 {
-			out = replaceGroup(out, r, &hits)
-			continue
-		}
-		if r.name == "email" {
-			out = replaceEmails(out, r, &hits)
-			continue
-		}
-		out = r.re.ReplaceAllStringFunc(out, func(match string) string {
-			hits = append(hits, mkHit(r.kind, r.name, match))
-			return fmt.Sprintf("[REDACTED:%s:%d]", r.repType, len(match))
-		})
+		out = replaceSpans(out, r, &hits)
 	}
 
 	out = base64Re.ReplaceAllStringFunc(out, func(match string) string {
@@ -233,9 +245,7 @@ func Apply(input string) (string, []Hit) {
 	return out, hits
 }
 
-// replaceGroup redacts only rule.group of every match, keeping the surrounding
-// context (the variable name) intact.
-func replaceGroup(s string, r *rule, hits *[]Hit) string {
+func replaceSpans(s string, r *rule, hits *[]Hit) string {
 	locs := r.re.FindAllStringSubmatchIndex(s, -1)
 	if len(locs) == 0 {
 		return s
@@ -244,40 +254,32 @@ func replaceGroup(s string, r *rule, hits *[]Hit) string {
 	last := 0
 	for _, m := range locs {
 		lo, hi := m[2*r.group], m[2*r.group+1]
-		if lo < 0 || lo < last {
+		if hi <= lo || (r.skip != nil && r.skip(s, lo, hi)) {
 			continue
 		}
-		secret := s[lo:hi]
-		*hits = append(*hits, mkHit(r.kind, r.name, secret))
 		b.WriteString(s[last:lo])
-		fmt.Fprintf(&b, "[REDACTED:%s:%d]", r.repType, len(secret))
+		b.WriteString(r.redact(s[lo:hi], hits))
 		last = hi
 	}
 	b.WriteString(s[last:])
 	return b.String()
 }
 
+func (r *rule) redact(secret string, hits *[]Hit) string {
+	*hits = append(*hits, mkHit(r.kind, r.name, secret))
+	return fmt.Sprintf("[REDACTED:%s:%d]", r.repType, len(secret))
+}
+
 var sshRemoteTail = regexp.MustCompile(`^:[A-Za-z0-9_.\-]+/`)
 
-func replaceEmails(s string, r *rule, hits *[]Hit) string {
-	locs := r.re.FindAllStringIndex(s, -1)
-	if len(locs) == 0 {
-		return s
+func isGitRemote(s string, lo, hi int) bool {
+	if !strings.HasPrefix(strings.ToLower(s[lo:hi]), "git@") {
+		return false
 	}
-	var b strings.Builder
-	last := 0
-	for _, m := range locs {
-		match := s[m[0]:m[1]]
-		if strings.HasPrefix(strings.ToLower(match), "git@") && sshRemoteTail.MatchString(s[m[1]:]) {
-			continue
-		}
-		*hits = append(*hits, mkHit(r.kind, r.name, match))
-		b.WriteString(s[last:m[0]])
-		fmt.Fprintf(&b, "[REDACTED:%s:%d]", r.repType, len(match))
-		last = m[1]
+	if lo > 0 && strings.IndexByte("._%+-", s[lo-1]) >= 0 {
+		return false
 	}
-	b.WriteString(s[last:])
-	return b.String()
+	return sshRemoteTail.MatchString(s[hi:])
 }
 
 func ApplyJSON(v any) (any, []Hit) {
@@ -286,9 +288,20 @@ func ApplyJSON(v any) (any, []Hit) {
 	return out, hits
 }
 
-var secretKeyRe = regexp.MustCompile(`(?i)(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?)$`)
+var secretKeyRe = regexp.MustCompile(`(?i)(?:` + secretNames + `)$`)
 
 var hexValueRe = regexp.MustCompile(`^[0-9a-fA-F]{32,}$`)
+
+var hexSecretRule = ruleNamed("hex_secret")
+
+func ruleNamed(name string) *rule {
+	for _, r := range rules {
+		if r.name == name {
+			return r
+		}
+	}
+	return nil
+}
 
 func walk(v any, hits *[]Hit) any {
 	switch t := v.(type) {
@@ -304,8 +317,7 @@ func walk(v any, hits *[]Hit) any {
 		for k, child := range t {
 			cleaned := walk(child, hits)
 			if s, ok := cleaned.(string); ok && secretKeyRe.MatchString(k) && hexValueRe.MatchString(s) {
-				*hits = append(*hits, mkHit("credential", "hex_secret", s))
-				cleaned = fmt.Sprintf("[REDACTED:hex_secret:%d]", len(s))
+				cleaned = hexSecretRule.redact(s, hits)
 			}
 			key, keyHits := Apply(k)
 			if key != k {

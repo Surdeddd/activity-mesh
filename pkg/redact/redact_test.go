@@ -204,7 +204,7 @@ func TestShannonEntropyMath(t *testing.T) {
 	}
 }
 
-func TestUserPathMissesNonASCIIHome(t *testing.T) {
+func TestUserPathRedactsNonASCIIHome(t *testing.T) {
 	for _, home := range []string{`/home/максим`, `C:\Users\Максим`, `/Users/josé`} {
 		t.Run(home, func(t *testing.T) {
 			t.Setenv("ACTIVITY_MESH_REDACT_HOMES", home)
@@ -221,7 +221,7 @@ func TestUserPathMissesNonASCIIHome(t *testing.T) {
 	}
 }
 
-func TestHexSecretWithQuotedKeySurvives(t *testing.T) {
+func TestHexSecretBehindQuotedKeyIsRedacted(t *testing.T) {
 	secret := "8f742231b10e8888abcd991234567851"
 	for _, in := range []string{
 		`config {"SLACK_SIGNING_SECRET": "` + secret + `"}`,
@@ -238,14 +238,14 @@ func TestHexSecretWithQuotedKeySurvives(t *testing.T) {
 	}
 }
 
-func TestGitRemoteRedactedAsEmail(t *testing.T) {
+func TestGitRemoteIsNotRedactedAsEmail(t *testing.T) {
 	in := "pushed to git@github.com:Surdeddd/activity-mesh.git"
 	if out, hits := Apply(in); out != in {
 		t.Errorf("git remote mangled as PII: %q -> %q (hits=%v)", in, out, hits)
 	}
 }
 
-func TestHexSecretLongerThan64Survives(t *testing.T) {
+func TestHexSecretLongerThan64IsRedacted(t *testing.T) {
 	secret := "9f2c4e7a1b3d5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8" +
 		"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
 	for _, in := range []string{
@@ -273,38 +273,63 @@ func useHomes(t *testing.T, homes string) {
 }
 
 func TestUserPathRedactsOnlyTheHome(t *testing.T) {
-	const jose, maxim = "/Users/josé", "/home/максим"
+	const (
+		jose    = "/Users/josé"
+		maxim   = "/home/максим"
+		bob     = "/home/bob"
+		bobby   = "/home/bobby"
+		maxHome = "/Users/max"
+		extHome = "/Volumes/ext"
+	)
 	red := func(home string) string { return fmt.Sprintf("[REDACTED:user_path:%d]", len(home)) }
-	cases := []struct{ name, home, in, want string }{
-		{"slash after", jose, "opened " + jose + "/notes.md", "opened " + red(jose) + "/notes.md"},
-		{"end of text", jose, "cwd=" + jose, "cwd=" + red(jose)},
-		{"punctuation after", maxim, "ls " + maxim + ", then quit", "ls " + red(maxim) + ", then quit"},
-		{"two homes in a path list", jose, "PATH=" + jose + "/bin:" + jose + "/.local/bin", "PATH=" + red(jose) + "/bin:" + red(jose) + "/.local/bin"},
-		{"longer name, non-ASCII letter", jose, "see " + jose + "ñ/x", "see " + jose + "ñ/x"},
-		{"longer name, ASCII letter", jose, "see " + jose + "a/x", "see " + jose + "a/x"},
-		{"longer name, digit", jose, "see " + jose + "2/x", "see " + jose + "2/x"},
-		{"longer name, underscore", jose, "see " + jose + "_old/x", "see " + jose + "_old/x"},
+	cases := []struct {
+		name, homes, in, want string
+		hits                  int
+	}{
+		{"slash after", jose, "opened " + jose + "/notes.md", "opened " + red(jose) + "/notes.md", 1},
+		{"end of text", jose, "cwd=" + jose, "cwd=" + red(jose), 1},
+		{"punctuation after", maxim, "ls " + maxim + ", then quit", "ls " + red(maxim) + ", then quit", 1},
+		{"two homes in a path list", jose, "PATH=" + jose + "/bin:" + jose + "/.local/bin", "PATH=" + red(jose) + "/bin:" + red(jose) + "/.local/bin", 2},
+		{"longer name, non-ASCII letter", jose, "see " + jose + "ñ/x", "see " + jose + "ñ/x", 0},
+		{"longer name, ASCII letter", jose, "see " + jose + "a/x", "see " + jose + "a/x", 0},
+		{"longer name, digit", jose, "see " + jose + "2/x", "see " + jose + "2/x", 0},
+		{"longer name, underscore", jose, "see " + jose + "_old/x", "see " + jose + "_old/x", 0},
+		{"CJK glued after an ASCII home", bob, "文件在" + bob + "中", "文件在" + red(bob) + "中", 1},
+		{"Cyrillic glued after an ASCII home", bob, "лежит в " + bob + "папке", "лежит в " + red(bob) + "папке", 1},
+		{"Japanese glued after an ASCII home", maxHome, "ファイルは" + maxHome + "にあります", "ファイルは" + red(maxHome) + "にあります", 1},
+		{"fullwidth digit glued after an ASCII home", bob, "x " + bob + "３個", "x " + red(bob) + "３個", 1},
+		{"longer ASCII name when only the shorter home is configured", bob, "see " + bobby + "/x", "see " + bobby + "/x", 0},
+		{"longest configured home wins", bob + ":" + bobby, "see " + bobby + "/x", "see " + red(bobby) + "/x", 1},
+		{"the same home twice in a row", bob, "stat " + bob + bob + "/.config", "stat " + red(bob) + red(bob) + "/.config", 2},
+		{"two different homes in a row", maxHome + ":" + extHome, maxHome + extHome + "/f", red(maxHome) + red(extHome) + "/f", 2},
+		{"home that trims to nothing", "//", "plain text /tmp/x", "plain text /tmp/x", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			useHomes(t, tc.home)
-			if got, _ := Apply(tc.in); got != tc.want {
+			useHomes(t, tc.homes)
+			got, hits := Apply(tc.in)
+			if got != tc.want {
 				t.Errorf("Apply(%q)\n got: %q\nwant: %q", tc.in, got, tc.want)
+			}
+			if len(hits) != tc.hits {
+				t.Errorf("got %d hits, want %d: %+v", len(hits), tc.hits, hits)
 			}
 		})
 	}
 }
 
-func TestUserPathRegexpKeepsOneCaptureGroup(t *testing.T) {
-	t.Setenv("HOME", "")
-	t.Setenv("USERPROFILE", "")
-	t.Setenv("ACTIVITY_MESH_REDACT_HOMES", "")
-	if n := userPathRe().NumSubexp(); n != 1 {
-		t.Errorf("no-home fallback has %d capture groups, replaceGroup needs exactly 1", n)
+func TestUserPathRedactsWindowsStyleHomeFromTheEnvironment(t *testing.T) {
+	const home = `C:\Users\Максим`
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	useHomes(t, "")
+	got, hits := Apply(`wrote ` + home + `\notes.md`)
+	want := fmt.Sprintf(`wrote [REDACTED:user_path:%d]\notes.md`, len(home))
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
-	t.Setenv("ACTIVITY_MESH_REDACT_HOMES", "/Users/josé:/home/максим")
-	if n := userPathRe().NumSubexp(); n != 1 {
-		t.Errorf("multi-home regexp has %d capture groups, replaceGroup needs exactly 1", n)
+	if len(hits) != 1 {
+		t.Errorf("got %d hits, want 1: %+v", len(hits), hits)
 	}
 }
 
@@ -366,6 +391,8 @@ func TestSSHRemoteExemptionIsLimitedToGit(t *testing.T) {
 		{"user at a lan host", "maxim@mac-mini.local:repo/x", "[REDACTED:email:20]:repo/x", 1},
 		{"local part only ends with git", "foogit@github.com:owner/repo.git", "[REDACTED:email:17]:owner/repo.git", 1},
 		{"local part ends with a dotted git", "x.git@github.com:owner/repo.git", "[REDACTED:email:16]:owner/repo.git", 1},
+		{"git after a dash is a longer local part", "-git@corp.example.com:docs/x", "-[REDACTED:email:20]:docs/x", 1},
+		{"git after a dot is a longer local part", ".git@corp.example.com:docs/x", ".[REDACTED:email:20]:docs/x", 1},
 		{"git user without a path", "git@example.com:thanks", "[REDACTED:email:15]:thanks", 1},
 		{"plain email, colon and text without a slash", "bob@example.com:thanks", "[REDACTED:email:15]:thanks", 1},
 	}
