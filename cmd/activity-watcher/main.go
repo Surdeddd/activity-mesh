@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -28,6 +29,8 @@ const (
 )
 
 var emitTimeout = 10 * time.Minute
+
+var rootPoll = time.Second
 
 type Source struct {
 	Name            string `yaml:"name"`
@@ -380,14 +383,14 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	if err != nil {
 		return fmt.Errorf("new watcher: %w", err)
 	}
-	defer w.Close()
+	defer func() { w.Close() }()
 
 	info, err := os.Stat(src.Path)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", src.Path, err)
 	}
 
-	addRoot := src.Path
+	addRoot := filepath.Clean(src.Path)
 	effectivePattern := src.Pattern
 	if !info.IsDir() {
 		// A file path means "watch its directory"; without a pattern that would
@@ -398,9 +401,10 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 		}
 	}
 	src.Pattern = effectivePattern
+	recursive := src.Recursive && info.IsDir()
 
 	added, failed := 0, 0
-	if src.Recursive && info.IsDir() {
+	if recursive {
 		added, failed = addTree(w, addRoot, src.Name)
 	} else if err := w.Add(addRoot); err != nil {
 		return fmt.Errorf("watch %q: %w", addRoot, err)
@@ -436,6 +440,49 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	rollup := time.NewTicker(deb.window)
 	defer rollup.Stop()
 
+	handle := func(ev fsnotify.Event) {
+		if !matchOp(src.Op, ev) || !matchPattern(src.Pattern, ev.Name) {
+			return
+		}
+		key := hashKey(src.Name, ev.Name)
+		now := time.Now()
+		if !deb.hit(key, now) {
+			return
+		}
+		if !budget.take(now) {
+			coalesced++
+			return
+		}
+		select {
+		case emitCh <- emitReq{ev: ev}:
+		default:
+			coalesced++
+		}
+	}
+	announce := func(dir string) {
+		_ = filepath.WalkDir(dir, func(p string, de fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if de.IsDir() {
+				if p != dir && (!recursive || skipWatchDir(de.Name())) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if de.Type()&fs.ModeSymlink != 0 {
+				if fi, serr := os.Stat(p); serr == nil && fi.IsDir() {
+					return nil
+				}
+			}
+			handle(fsnotify.Event{Name: p, Op: fsnotify.Create})
+			return nil
+		})
+	}
+	rootGone := false
+	reattach := time.NewTicker(rootPoll)
+	defer reattach.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -444,41 +491,51 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 			if !ok {
 				return nil
 			}
-			// Re-watch BEFORE the filters: a new subdirectory never matches a file
-			// pattern like "*.md", so filtering first made every recursive source
-			// blind to any directory created after startup.
-			isDir := false
+			if rootGone {
+				continue
+			}
+			if ev.Name == addRoot && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				rootGone = true
+				log.Printf("source=%q root %q went away, waiting for it to return", src.Name, addRoot)
+				continue
+			}
 			if ev.Op&fsnotify.Create != 0 {
 				if fi, serr := os.Stat(ev.Name); serr == nil && fi.IsDir() {
-					isDir = true
-					if src.Recursive {
+					if recursive {
 						addTree(w, ev.Name, src.Name)
+						announce(ev.Name)
 					}
+					continue
 				}
 			}
-			if isDir {
-				continue // directories are watch targets, never events themselves
-			}
-			if !matchOp(src.Op, ev) {
+			handle(ev)
+		case <-reattach.C:
+			if !rootGone {
 				continue
 			}
-			if !matchPattern(src.Pattern, ev.Name) {
+			if fi, serr := os.Stat(addRoot); serr != nil || !fi.IsDir() {
 				continue
 			}
-			key := hashKey(src.Name, ev.Name)
-			now := time.Now()
-			if !deb.hit(key, now) {
+			fresh, err := fsnotify.NewWatcher()
+			if err != nil {
+				log.Printf("source=%q re-attach %q failed: %v", src.Name, addRoot, err)
 				continue
 			}
-			if !budget.take(now) {
-				coalesced++
+			if recursive {
+				if n, _ := addTree(fresh, addRoot, src.Name); n == 0 {
+					fresh.Close()
+					continue
+				}
+			} else if err := fresh.Add(addRoot); err != nil {
+				fresh.Close()
+				log.Printf("source=%q re-attach %q failed: %v", src.Name, addRoot, err)
 				continue
 			}
-			select {
-			case emitCh <- emitReq{ev: ev}:
-			default:
-				coalesced++
-			}
+			w.Close()
+			w = fresh
+			rootGone = false
+			announce(addRoot)
+			log.Printf("source=%q root %q re-attached", src.Name, addRoot)
 		case <-rollup.C:
 			if coalesced == 0 {
 				continue
