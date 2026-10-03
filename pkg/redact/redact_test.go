@@ -207,15 +207,14 @@ func TestShannonEntropyMath(t *testing.T) {
 func TestUserPathRedactsNonASCIIHome(t *testing.T) {
 	for _, home := range []string{`/home/максим`, `C:\Users\Максим`, `/Users/josé`} {
 		t.Run(home, func(t *testing.T) {
-			t.Setenv("ACTIVITY_MESH_REDACT_HOMES", home)
-			re := userPathRe()
+			useHomes(t, home)
 			sep := "/"
 			if strings.HasPrefix(home, "C:") {
 				sep = `\`
 			}
 			in := "wrote " + home + sep + "notes.md"
-			if !re.MatchString(in) {
-				t.Fatalf("user_path rule built for home %q does not match %q", home, in)
+			if out, hits := Apply(in); len(hits) == 0 {
+				t.Fatalf("no user_path hit for home %q in %q (out=%q)", home, in, out)
 			}
 		})
 	}
@@ -261,15 +260,18 @@ func TestHexSecretLongerThan64IsRedacted(t *testing.T) {
 
 func useHomes(t *testing.T, homes string) {
 	t.Helper()
+	useHome(t, t.TempDir(), homes)
+}
+
+func useHome(t *testing.T, home, homes string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("ACTIVITY_MESH_REDACT_HOMES", homes)
-	for _, r := range rules {
-		if r.name != "user_path" {
-			continue
-		}
-		prev := r.re
-		r.re = userPathRe()
-		t.Cleanup(func() { r.re = prev })
-	}
+	r := ruleNamed("user_path")
+	prev := r.find
+	r.find = homeSpans(userHomes())
+	t.Cleanup(func() { r.find = prev })
 }
 
 func TestUserPathRedactsOnlyTheHome(t *testing.T) {
@@ -306,6 +308,17 @@ func TestUserPathRedactsOnlyTheHome(t *testing.T) {
 		{"nested home wins as a whole path component", maxHome + ":" + maxHome + "/work", maxHome + "/work/x", red(maxHome+"/work") + "/x", 1},
 		{"nested home extended by a hyphen does not shadow the shorter one", bob + ":" + bob + "-work", "see " + bob + "-worksee", "see " + red(bob) + "-worksee", 1},
 		{"nested home extended by a hyphen wins as a whole name", bob + ":" + bob + "-work", "see " + bob + "-work/x", "see " + red(bob+"-work") + "/x", 1},
+		{"primary home survives a rejected nested home ending in a Cyrillic letter", maxHome + ":" + maxHome + "/проект", maxHome + "/проекты/notes.md", red(maxHome) + "/проекты/notes.md", 1},
+		{"primary home survives a rejected nested home followed by a digit", maxHome + ":" + maxHome + "/проект", maxHome + "/проект2/x", red(maxHome) + "/проект2/x", 1},
+		{"primary home survives a rejected nested home followed by an underscore", maxHome + ":" + maxHome + "/проект", maxHome + "/проект_old/x", red(maxHome) + "/проект_old/x", 1},
+		{"primary non-ASCII home survives a rejected nested home", jose + ":" + jose + "/Проекты", jose + "/Проектыx/f", red(jose) + "/Проектыx/f", 1},
+		{"primary Cyrillic home survives a rejected nested home", maxim + ":" + maxim + "/проект", maxim + "/проекты/x", red(maxim) + "/проекты/x", 1},
+		{"inner home survives a rejected longer home that contains it", bob + ":/mnt/home/bob/жж", "/mnt/home/bob/жжa/x", "/mnt" + red(bob) + "/жжa/x", 1},
+		{"overlapping homes merge into one span", maxHome + ":" + maxHome + "/work:/work/acme", maxHome + "/work/acme/x", red(maxHome+"/work/acme") + "/x", 1},
+		{"a chain of overlapping homes is one span", "/a/b:/b/c:/c/d", "/a/b/c/d/x", "[REDACTED:user_path:8]/x", 1},
+		{"invalid UTF-8 after an ASCII home", bob, bob + "\xff/x", red(bob) + "\xff/x", 1},
+		{"invalid UTF-8 after a non-ASCII home", jose, jose + "\xff/x", red(jose) + "\xff/x", 1},
+		{"invalid UTF-8 inside a configured home", "/home/b\xffb", "see /home/b\xffb/x", "see " + red("/home/b\xffb") + "/x", 1},
 		{"home that trims to nothing", "//", "plain text /tmp/x", "plain text /tmp/x", 0},
 	}
 	for _, tc := range cases {
@@ -324,11 +337,21 @@ func TestUserPathRedactsOnlyTheHome(t *testing.T) {
 
 func TestUserPathRedactsWindowsStyleHomeFromTheEnvironment(t *testing.T) {
 	const home = `C:\Users\Максим`
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	useHomes(t, "")
+	useHome(t, home, "")
 	got, hits := Apply(`wrote ` + home + `\notes.md`)
 	want := fmt.Sprintf(`wrote [REDACTED:user_path:%d]\notes.md`, len(home))
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if len(hits) != 1 {
+		t.Errorf("got %d hits, want 1: %+v", len(hits), hits)
+	}
+}
+
+func TestUserPathUnionOfPrimaryAndExtraHomes(t *testing.T) {
+	useHome(t, "/Users/max", "/Users/max/work:/work/acme")
+	got, hits := Apply("/Users/max/work/acme/x")
+	want := "[REDACTED:user_path:20]/x"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}

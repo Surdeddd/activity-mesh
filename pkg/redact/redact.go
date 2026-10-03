@@ -30,7 +30,10 @@ type rule struct {
 	// is the useful part and only the value is the secret.
 	group int
 	skip  func(s string, lo, hi int) bool
+	find  func(s string) []span
 }
+
+type span struct{ lo, hi int }
 
 const secretNames = `secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?`
 
@@ -161,8 +164,7 @@ var rules = []*rule{
 		name:    "user_path",
 		kind:    "env",
 		repType: "user_path",
-		re:      userPathRe(),
-		skip:    continuesHome,
+		find:    homeSpans(userHomes()),
 	},
 	{
 		name:    "lan_ip",
@@ -172,7 +174,7 @@ var rules = []*rule{
 	},
 }
 
-func userPathRe() *regexp.Regexp {
+func userHomes() []string {
 	var homes []string
 	if h, err := os.UserHomeDir(); err == nil && len(h) > 1 {
 		homes = append(homes, h)
@@ -182,30 +184,60 @@ func userPathRe() *regexp.Regexp {
 			homes = append(homes, h)
 		}
 	}
-	if len(homes) == 0 {
-		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
-	}
-	for i, h := range homes {
-		homes[i] = strings.TrimRight(h, "/\\")
-	}
-	sort.SliceStable(homes, func(i, j int) bool { return len(homes[i]) > len(homes[j]) })
-	alternatives := make([]string, len(homes))
-	for i, h := range homes {
-		alternatives[i] = regexp.QuoteMeta(h)
-		if last, _ := utf8.DecodeLastRuneInString(h); isASCIIWord(last) {
-			alternatives[i] += `\b`
+	var out []string
+	for _, h := range homes {
+		if h = strings.TrimRight(h, "/\\"); h != "" {
+			out = append(out, h)
 		}
 	}
-	return regexp.MustCompile(`(?:` + strings.Join(alternatives, "|") + `)`)
+	return out
+}
+
+func homeSpans(homes []string) func(s string) []span {
+	return func(s string) []span {
+		var found []span
+		for _, h := range homes {
+			for from := 0; ; {
+				k := strings.Index(s[from:], h)
+				if k < 0 {
+					break
+				}
+				lo, hi := from+k, from+k+len(h)
+				if !continuesHome(s, lo, hi) {
+					found = append(found, span{lo, hi})
+				}
+				from = lo + 1
+			}
+		}
+		return mergeOverlapping(found)
+	}
+}
+
+func mergeOverlapping(spans []span) []span {
+	sort.Slice(spans, func(i, j int) bool { return spans[i].lo < spans[j].lo })
+	var merged []span
+	for _, sp := range spans {
+		if n := len(merged); n > 0 && sp.lo < merged[n-1].hi {
+			if sp.hi > merged[n-1].hi {
+				merged[n-1].hi = sp.hi
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	return merged
 }
 
 func continuesHome(s string, lo, hi int) bool {
 	last, _ := utf8.DecodeLastRuneInString(s[lo:hi])
-	if last < utf8.RuneSelf || !isLetterOrNumber(last) {
-		return false
-	}
 	next, _ := utf8.DecodeRuneInString(s[hi:])
-	return isLetterOrNumber(next) || next == '_'
+	switch {
+	case isASCIIWord(last):
+		return isASCIIWord(next)
+	case isLetterOrNumber(last):
+		return isLetterOrNumber(next) || next == '_'
+	}
+	return false
 }
 
 func isLetterOrNumber(r rune) bool {
@@ -253,23 +285,34 @@ func Apply(input string) (string, []Hit) {
 }
 
 func replaceSpans(s string, r *rule, hits *[]Hit) string {
-	locs := r.re.FindAllStringSubmatchIndex(s, -1)
-	if len(locs) == 0 {
+	spans := r.spans(s)
+	if len(spans) == 0 {
 		return s
 	}
 	var b strings.Builder
 	last := 0
-	for _, m := range locs {
+	for _, sp := range spans {
+		b.WriteString(s[last:sp.lo])
+		b.WriteString(r.redact(s[sp.lo:sp.hi], hits))
+		last = sp.hi
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func (r *rule) spans(s string) []span {
+	if r.find != nil {
+		return r.find(s)
+	}
+	var found []span
+	for _, m := range r.re.FindAllStringSubmatchIndex(s, -1) {
 		lo, hi := m[2*r.group], m[2*r.group+1]
 		if hi <= lo || (r.skip != nil && r.skip(s, lo, hi)) {
 			continue
 		}
-		b.WriteString(s[last:lo])
-		b.WriteString(r.redact(s[lo:hi], hits))
-		last = hi
+		found = append(found, span{lo, hi})
 	}
-	b.WriteString(s[last:])
-	return b.String()
+	return found
 }
 
 func (r *rule) redact(secret string, hits *[]Hit) string {
