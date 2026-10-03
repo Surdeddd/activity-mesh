@@ -207,9 +207,11 @@ for i in 1 2 3 4; do
 done
 printf '%s emit queue full src="memory-entry": 3 events lost\n' "$(gotime $((NOW - 300)))" >> "$STATE/watcher.err"
 printf '%s ingested 1 events from %s\n' "$(gotime $((NOW - 60)))" "$LOCAL" > "$STATE/daemon.err"
+printf '%s pre-push ingest: open /x/%s: permission denied\n' "$(gotime $((NOW - 120)))" "$LOCAL" >> "$STATE/daemon.err"
 run_check ingester-error
 expect '.tier >= 2' "lost watcher events in the window must warn"
 expect '.message | test(", 7 watcher events lost$")' "emit errors and rollup drops are summed in the message"
+expect '.message | test("^6h: 1 daemon ingest errors, ")' "a pre-push ingest line is a daemon ingest error"
 end_case
 
 begin_case "ingester-error: a clean daemon log is a real ok, not 'no ingest.log yet'"

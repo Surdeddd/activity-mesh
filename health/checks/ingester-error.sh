@@ -31,7 +31,7 @@ lost_events() {
         END { print n + 0 }'
 }
 
-ingest=$(count_since "$DAEMON_LOG" 'ingest failed|periodic ingest:|post-push ingest:| ingest /|server error:|watcher error:|fsnotify:')
+ingest=$(count_since "$DAEMON_LOG" 'ingest failed|periodic ingest:|pre-push ingest:|post-push ingest:| ingest /|server error:|watcher error:|fsnotify:')
 lost=$(lost_events "$WATCHER_LOG")
 
 hours=$(( WINDOW_S / 3600 ))
