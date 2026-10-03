@@ -256,3 +256,109 @@ func TestQueryLatencyP95_10K(t *testing.T) {
 		t.Errorf("p95 %s exceeded 50ms target", p95)
 	}
 }
+
+func deepNested(depth int) string {
+	return strings.Repeat("[", depth) + strings.Repeat("]", depth)
+}
+
+func TestIngestSkipsOverNestedLine(t *testing.T) {
+	idx, dir := setupIndex(t)
+	syncDir := filepath.Join(dir, "sync")
+	ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
+
+	overNested := fmt.Sprintf(`{"v":1,"id":"01HRX00000000000000000PZ02","ts":%q,"host":"h1","agent":"a","kind":"note","scope":"s","summary":"nested","x":%s}`,
+		ts, deepNested(1500))
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(overNested), &probe); err != nil {
+		t.Fatalf("precondition: Go's decoder must accept the line: %v", err)
+	}
+	path := writeJSONL(t, syncDir, "h1", []string{
+		buildLine(t, "01HRX00000000000000000PZ01", ts, "h1", "a", "s", "note", "", "before nested"),
+		overNested,
+		buildLine(t, "01HRX00000000000000000PZ03", ts, "h1", "a", "s", "note", "", "after nested"),
+	})
+
+	n, err := idx.IngestJSONL(path)
+	got, qerr := idx.Query(QueryFilter{Limit: 10})
+	if qerr != nil {
+		t.Fatal(qerr)
+	}
+	if err != nil || n != 2 || len(got) != 2 {
+		t.Fatalf("an over-nested line must be skipped without failing the shard: ingest n=%d err=%v, indexed=%d (want 2, nil, 2)", n, err, len(got))
+	}
+	for _, e := range got {
+		if e.ULID == "01HRX00000000000000000PZ02" {
+			t.Errorf("over-nested event %s was indexed", e.ULID)
+		}
+	}
+	if idx.SkippedLines() != 1 {
+		t.Errorf("SkippedLines = %d, want 1", idx.SkippedLines())
+	}
+	if n2, err := idx.IngestJSONL(path); err != nil || n2 != 0 || idx.SkippedLines() != 1 {
+		t.Errorf("second pass: n=%d err=%v skipped=%d, want 0, nil, 1 (cursor must move past the skipped line)", n2, err, idx.SkippedLines())
+	}
+}
+
+func TestIngestDirContinuesPastPoisonedShard(t *testing.T) {
+	idx, dir := setupIndex(t)
+	syncDir := filepath.Join(dir, "sync")
+	ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
+	writeJSONL(t, syncDir, "alpha", []string{
+		fmt.Sprintf(`{"v":1,"id":"01HRX00000000000000000PZA1","ts":%q,"host":"alpha","agent":"a","kind":"note","scope":"s","summary":"p","x":%s}`, ts, deepNested(1500)),
+	})
+	writeJSONL(t, syncDir, "beta", []string{
+		buildLine(t, "01HRX00000000000000000PZB1", ts, "beta", "a", "s", "note", "", "healthy host event"),
+	})
+
+	_, err := idx.IngestDir(syncDir)
+	got, qerr := idx.Query(QueryFilter{Host: "beta", Limit: 10})
+	if qerr != nil {
+		t.Fatal(qerr)
+	}
+	if err != nil || len(got) != 1 {
+		t.Fatalf("host alpha's over-nested line must not hide host beta: IngestDir err=%v, beta indexed=%d (want nil, 1)", err, len(got))
+	}
+}
+
+func TestIngestDirContinuesAfterShardError(t *testing.T) {
+	idx, dir := setupIndex(t)
+	syncDir := filepath.Join(dir, "sync")
+	ts := time.Now().UTC().Add(-time.Minute).Format("2006-01-02T15:04:05.000000Z")
+	gone := writeJSONL(t, syncDir, "aaa", []string{
+		buildLine(t, "01HRX00000000000000000SW01", ts, "aaa", "a", "s", "note", "", "shard about to vanish"),
+	})
+	if _, err := idx.IngestDir(syncDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(syncDir, "events-bbb.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONL(t, syncDir, "ccc", []string{
+		buildLine(t, "01HRX00000000000000000SW02", ts, "ccc", "a", "s", "note", "", "healthy host event"),
+	})
+
+	n, err := idx.IngestDir(syncDir)
+	if err == nil || !strings.Contains(err.Error(), "events-bbb.jsonl") {
+		t.Errorf("IngestDir err = %v, want an error naming events-bbb.jsonl", err)
+	}
+	if n != 1 {
+		t.Errorf("IngestDir indexed %d events, want 1 from the healthy shard", n)
+	}
+	healthy, qerr := idx.Query(QueryFilter{Host: "ccc", Limit: 10})
+	if qerr != nil {
+		t.Fatal(qerr)
+	}
+	if len(healthy) != 1 {
+		t.Errorf("host ccc indexed %d events behind the failing shard, want 1", len(healthy))
+	}
+	vanished, qerr := idx.Query(QueryFilter{Host: "aaa", Limit: 10})
+	if qerr != nil {
+		t.Fatal(qerr)
+	}
+	if len(vanished) != 0 {
+		t.Errorf("vanished shard still holds %d rows: the sweep must run after a failing shard", len(vanished))
+	}
+}

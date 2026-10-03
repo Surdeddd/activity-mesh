@@ -315,6 +315,29 @@ WHERE events.payload != excluded.payload
    OR events.raw_byte_offset != excluded.raw_byte_offset
    OR events.raw_jsonl_path != excluded.raw_jsonl_path`
 
+const maxIndexJSONDepth = 512
+
+func JSONDepth(v any) int { return jsonDepth(v, 0) }
+
+func jsonDepth(v any, d int) int {
+	max := d
+	switch t := v.(type) {
+	case map[string]any:
+		for _, c := range t {
+			if n := jsonDepth(c, d+1); n > max {
+				max = n
+			}
+		}
+	case []any:
+		for _, c := range t {
+			if n := jsonDepth(c, d+1); n > max {
+				max = n
+			}
+		}
+	}
+	return max
+}
+
 func (i *Index) IngestJSONL(path string) (int, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -396,6 +419,10 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 		if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 			continue
 		}
+		if JSONDepth(raw) > maxIndexJSONDepth {
+			skipped++
+			continue
+		}
 		ulid, _ := raw["id"].(string)
 		ts, _ := raw["ts"].(string)
 		host, _ := raw["host"].(string)
@@ -415,6 +442,10 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 		priority, _ := raw["priority"].(string)
 		res, err := stmt.Exec(ulid, ts, tsUnix, host, agent, scope, kind, priority, abs, lineOffset, trimmed)
 		if err != nil {
+			if strings.Contains(err.Error(), "malformed JSON") {
+				skipped++
+				continue
+			}
 			return count, fmt.Errorf("upsert ulid=%s: %w", ulid, err)
 		}
 		if fullScan {
@@ -457,13 +488,15 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	}
 	total := 0
 	known := map[string]bool{}
+	var errs []error
 	for _, m := range matches {
 		if abs, err := filepath.Abs(m); err == nil {
 			known[abs] = true
 		}
 		n, err := i.IngestJSONL(m)
 		if err != nil {
-			return total, fmt.Errorf("ingest %s: %w", m, err)
+			errs = append(errs, fmt.Errorf("ingest %s: %w", m, err))
+			continue
 		}
 		total += n
 	}
@@ -515,7 +548,7 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 			return total, fmt.Errorf("sweep: save cursors: %w", err)
 		}
 	}
-	return total, nil
+	return total, errors.Join(errs...)
 }
 
 func fileExists(path string) bool {
