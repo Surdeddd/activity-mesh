@@ -89,6 +89,7 @@ run_master() {
 }
 
 LOCAL="events-$HOST.jsonl"
+CONFLICT="events-otherhost.sync-conflict-20261003-010203-ABCDEFG.jsonl"
 
 begin_case "lib: the last wake time is found under the launchd PATH without an override"
 wake=$(env -i HOME="$C/home" PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin ACTIVITY_MESH_STATE="$STATE" \
@@ -263,6 +264,16 @@ run_check silence
 expect '.tier == 3' "13h of silence after 3h awake is a failure"
 end_case
 
+begin_case "silence: a stale Syncthing conflict copy is not a silent host"
+gen "$SYNC/events-otherhost.jsonl" 1 $((NOW - 600)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" o otherhost
+gen "$SYNC/$CONFLICT" 1 $((NOW - 30 * 3600)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" o otherhost
+TZ=UTC touch -t "$(stamp $((NOW - 600)))" "$SYNC/events-otherhost.jsonl"
+TZ=UTC touch -t "$(stamp $((NOW - 30 * 3600)))" "$SYNC/$CONFLICT"
+LAST_WAKE=$((NOW - 3 * 3600))
+run_check silence
+expect '.tier == 1 and (.message | test("all hosts fresh"))' "only the live shard counts as a host"
+end_case
+
 begin_case "silence: an owner-disabled host stays quiet"
 gen "$SYNC/events-otherhost.jsonl" 1 $((NOW - 30 * 3600)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" o otherhost
 TZ=UTC touch -t "$(stamp $((NOW - 30 * 3600)))" "$SYNC/events-otherhost.jsonl"
@@ -277,6 +288,16 @@ TZ=UTC touch -t "$(stamp $((NOW - 7200)))" "$SYNC/events-otherhost.jsonl"
 LAST_WAKE=$((NOW - 30))
 run_check sync-lag
 expect '.tier <= 1' "lag is measured from wake, not from the remote append"
+end_case
+
+begin_case "sync-lag: a Syncthing conflict copy is not a lagging host"
+gen "$SYNC/events-otherhost.jsonl" 1 $((NOW - 30)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" l otherhost
+gen "$SYNC/$CONFLICT" 1 $((NOW - 7200)) 60 heartbeat canary activity-mesh "hourly heartbeat ok=1" l otherhost
+TZ=UTC touch -t "$(stamp $((NOW - 30)))" "$SYNC/events-otherhost.jsonl"
+TZ=UTC touch -t "$(stamp $((NOW - 7200)))" "$SYNC/$CONFLICT"
+LAST_WAKE=$((NOW - 3600))
+run_check sync-lag
+expect '.tier <= 1' "a copy delivered after wake is not delivery lag of a host"
 end_case
 
 begin_case "schema-drift: namespaced org/name kinds are allowed, as emit allows them"
@@ -312,6 +333,19 @@ gen "$SYNC/$LOCAL" 2500 $((NOW - 9 * 86400)) 60 cli note memory "filler" f
 gen "$SYNC/$LOCAL" 1 $((NOW - 60)) 60 cli note memory "second" dup
 run_check ulid-collision
 expect '.tier == 4' "the duplicate ULID must be critical"
+end_case
+
+begin_case "ulid-collision: a Syncthing conflict copy repeats ULIDs without being a collision"
+gen "$SYNC/events-otherhost.jsonl" 5 $((NOW - 3600)) 60 cli note memory "event" cc otherhost
+cp "$SYNC/events-otherhost.jsonl" "$SYNC/$CONFLICT"
+run_check ulid-collision
+expect '.tier == 1 and .status == "ok" and (.message | test("^5 ulids"))' "the copy must not read as 5 duplicate ULIDs"
+end_case
+
+begin_case "health scripts enumerate shards only through am_shards"
+bare=$(grep -n 'events-\*\.jsonl' "$HEALTH"/*.sh "$HEALTH"/checks/*.sh | grep -v '/lib\.sh:')
+[ -z "$bare" ] || err "bare shard glob outside lib.sh: $bare"
+[ "$(grep -c 'events-\*\.jsonl' "$HEALTH/lib.sh")" = 1 ] || err "lib.sh must hold exactly one shard glob, inside am_shards"
 end_case
 
 begin_case "decay-daemon and digest-freshness call jq through the resolved AM_JQ"

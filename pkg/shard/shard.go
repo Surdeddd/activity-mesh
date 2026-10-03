@@ -6,11 +6,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 var hostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 var ErrBadHost = errors.New("invalid host label")
+
+func IsShardName(name string) bool {
+	return strings.HasPrefix(name, "events-") && strings.HasSuffix(name, ".jsonl") && !strings.Contains(name, ".sync-conflict-")
+}
 
 func ValidHost(host string) bool {
 	return hostRe.MatchString(host) && !containsDotDot(host)

@@ -117,10 +117,18 @@ am_emit() {
 
 am_start() { CHECK_START_MS=$(am_now_ms); export CHECK_START_MS; }
 
-am_scan_shards() {
-    local pat="$1" f h n hits=0 lines=0 sample=""
+am_shards() {
+    local f
     for f in "$ACTIVITY_MESH_SYNC"/events-*.jsonl; do
         [ -f "$f" ] || continue
+        case "${f##*/}" in *.sync-conflict-*) continue ;; esac
+        printf '%s\n' "$f"
+    done
+}
+
+am_scan_shards() {
+    local pat="$1" f h n hits=0 lines=0 sample=""
+    while IFS= read -r f; do
         n=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
         lines=$(( lines + ${n:-0} ))
         h=$(grep -cE "$pat" "$f" 2>/dev/null)
@@ -129,7 +137,7 @@ am_scan_shards() {
             hits=$(( hits + h ))
             [ -z "$sample" ] && sample="${f##*/}"
         fi
-    done
+    done < <(am_shards)
     printf '%d %d %s\n' "$hits" "$lines" "$sample"
 }
 

@@ -11,8 +11,7 @@ if [ ! -d "$SYNC" ]; then am_emit "$NAME" 2 warn "sync dir missing"; exit 0; fi
 self_host=$(am_host)
 now=$(date +%s); wake=$(am_last_wake); worst_lag=0; worst_host=""
 
-for f in "$SYNC"/events-*.jsonl; do
-    [ -f "$f" ] || continue
+while IFS= read -r f; do
     base=${f##*/}; base=${base%.jsonl}; host=${base#events-}
     [ "$host" = "$self_host" ] && continue
     mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo "$now")
@@ -23,7 +22,7 @@ for f in "$SYNC"/events-*.jsonl; do
     lag=$(( ctime - start ))
     [ "$lag" -lt 0 ] && lag=0
     if [ "$lag" -gt "$worst_lag" ]; then worst_lag=$lag; worst_host=$host; fi
-done
+done < <(am_shards)
 
 if   [ "$worst_lag" -gt 600 ]; then am_emit "$NAME" 3 fail "host=$worst_host delivery lag=${worst_lag}s (>10min)"
 elif [ "$worst_lag" -gt 300 ]; then am_emit "$NAME" 2 warn "host=$worst_host delivery lag=${worst_lag}s (>5min)"

@@ -23,10 +23,9 @@ iso_week=$(date -u +'%G-W%V' 2>/dev/null || echo unknown)
 offline_hosts="$(am_offline_hosts)"
 
 hosts=""
-for f in "$SYNC"/events-*.jsonl; do
-    [ -f "$f" ] || continue
+while IFS= read -r f; do
     h=${f##*/}; h=${h%.jsonl}; hosts="$hosts ${h#events-}"
-done
+done < <(am_shards)
 
 stats=$(for h in $hosts; do awk -v h="$h" '{ print h "\t" $0 }' "$SYNC/events-$h.jsonl" 2>/dev/null; done \
     | "$AM_JQ" -nR --argjson week "$week_ago" --argjson prev "$prev_week_ago" \

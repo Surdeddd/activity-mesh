@@ -319,6 +319,77 @@ func TestIntegration_FsnotifyToHTTP(t *testing.T) {
 	}
 }
 
+func TestWatcherIgnoresSyncthingConflictCopies(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipped in -short")
+	}
+	d, _ := newTestDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); d.watchSync(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	const conflictHost = "macbook.sync-conflict-20261003-010203-ABCDEFG"
+	live := filepath.Join(d.syncDir, "events-macbook.jsonl")
+	conflict := filepath.Join(d.syncDir, "events-"+conflictHost+".jsonl")
+	ulid := func(n string) string { return "01HRX0000000000000000000" + n }
+	ev := func(n string) []map[string]any {
+		return []map[string]any{{"v": 1, "id": ulid(n), "ts": tsNow(-time.Minute), "host": "macbook", "agent": "cli", "scope": "s", "kind": "note", "summary": n}}
+	}
+	indexed := func(n string) bool {
+		got, err := d.idx.Query(index.QueryFilter{ULID: ulid(n), Limit: 1})
+		return err == nil && len(got) == 1
+	}
+	waitIndexed := func(n string, retouch ...string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		nextTouch := time.Now().Add(time.Second)
+		for !indexed(n) {
+			now := time.Now()
+			if now.After(deadline) {
+				t.Fatalf("watcher did not index %s", n)
+			}
+			if now.After(nextTouch) {
+				for _, p := range retouch {
+					f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, _ = f.WriteString("\n")
+					_ = f.Close()
+				}
+				nextTouch = now.Add(time.Second)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	seedJSONL(t, d.syncDir, "macbook", ev("W0"))
+	waitIndexed("W0", live)
+	seedJSONL(t, d.syncDir, conflictHost, append(ev("W0"), ev("W9")...))
+	for _, n := range []string{"W1", "W2"} {
+		seedJSONL(t, d.syncDir, "macbook", ev(n))
+		waitIndexed(n, live, conflict)
+	}
+
+	if indexed("W9") {
+		t.Error("the watcher indexed an event that exists only in a Syncthing conflict copy")
+	}
+	got, err := d.idx.Query(index.QueryFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Errorf("index holds %d events, want the 3 of the live shard", len(got))
+	}
+	for _, e := range got {
+		if e.Path != live {
+			t.Errorf("event %s points at %s, want the live shard %s", e.ULID, e.Path, live)
+		}
+	}
+}
+
 func TestDaemonAnswersHealthWhileInitialIngestRuns(t *testing.T) {
 	d, _ := newTestDaemon(t)
 	release := make(chan struct{})

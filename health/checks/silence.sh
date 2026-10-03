@@ -19,8 +19,7 @@ worst_age=0; worst_host=""
 offline_hosts="$(am_offline_hosts)"
 offline_seen=""; pending=""
 
-for f in "$SYNC"/events-*.jsonl; do
-    [ -f "$f" ] || continue
+while IFS= read -r f; do
     base=${f##*/}; base=${base%.jsonl}; host=${base#events-}
     mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo "$now")
     age=$(( now - mtime ))
@@ -32,7 +31,7 @@ for f in "$SYNC"/events-*.jsonl; do
     elif [ "$age" -gt "$worst_age" ]; then
         worst_age=$age; worst_host=$host
     fi
-done
+done < <(am_shards)
 
 if [ -n "$worst_host" ]; then
     am_emit "$NAME" 3 fail "host=$worst_host age=${worst_age}s threshold=${TH}s"

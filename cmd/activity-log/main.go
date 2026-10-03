@@ -456,6 +456,9 @@ func readEvents(syncDir string) ([]event.Event, error) {
 	}
 	var events []event.Event
 	for _, p := range matches {
+		if !shard.IsShardName(filepath.Base(p)) {
+			continue
+		}
 		f, err := os.Open(p)
 		if err != nil {
 			return nil, err
@@ -516,12 +519,18 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(matches) == 0 {
+			var shards []string
+			for _, p := range matches {
+				if shard.IsShardName(filepath.Base(p)) {
+					shards = append(shards, p)
+				}
+			}
+			if len(shards) == 0 {
 				fmt.Println("no per-host shards yet")
 				return nil
 			}
 			now := time.Now().UTC()
-			for _, p := range matches {
+			for _, p := range shards {
 				host := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "events-"), ".jsonl")
 				last, count, err := lastEvent(p)
 				if err != nil {

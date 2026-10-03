@@ -25,7 +25,7 @@ if [ -f "$SCOPES_FILE" ]; then
 fi
 
 cutoff=$(( $(date +%s) - 86400 ))
-result=$(for f in "$SYNC"/events-*.jsonl; do [ -f "$f" ] && tail -n 2000 "$f"; echo; done 2>/dev/null \
+result=$(am_shards | while IFS= read -r f; do tail -n 2000 "$f"; echo; done 2>/dev/null \
     | "$AM_JQ" -rR --argjson cutoff "$cutoff" "$AM_JQ_DEFS"'
         fromjson? | select(type == "object")
         | select(ev_ts >= $cutoff)

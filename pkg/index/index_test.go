@@ -148,6 +148,37 @@ func TestIngestIncremental(t *testing.T) {
 	}
 }
 
+func TestIngestDirIgnoresSyncthingConflictCopies(t *testing.T) {
+	idx, dir := setupIndex(t)
+	syncDir := filepath.Join(dir, "sync")
+	now := time.Now().UTC()
+	at := func(ago time.Duration) string { return now.Add(-ago).Format("2006-01-02T15:04:05.000000Z") }
+	shared := []string{
+		buildLine(t, "01HRX0000000000000000000G1", at(2*time.Hour), "macbook", "cli", "scope:test", "note", "", "kept"),
+		buildLine(t, "01HRX0000000000000000000G2", at(time.Hour), "macbook", "cli", "scope:test", "note", "", "kept too"),
+	}
+	live := writeJSONL(t, syncDir, "macbook", shared)
+	copyOnly := buildLine(t, "01HRX0000000000000000000G3", at(time.Minute), "macbook", "cli", "scope:test", "note", "", "only in the copy")
+	writeJSONL(t, syncDir, "macbook.sync-conflict-20261003-010203-ABCDEFG", append(append([]string{}, shared...), copyOnly))
+
+	n, err := idx.IngestDir(syncDir)
+	if err != nil || n != 2 {
+		t.Fatalf("IngestDir: n=%d err=%v, want the 2 events of the live shard", n, err)
+	}
+	got, err := idx.Query(QueryFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("index holds %d events, want 2 (the conflict copy must not add or move any)", len(got))
+	}
+	for _, e := range got {
+		if e.Path != live {
+			t.Errorf("event %s points at %s, want the live shard %s", e.ULID, e.Path, live)
+		}
+	}
+}
+
 func TestSearchFTS5(t *testing.T) {
 	idx, dir := setupIndex(t)
 	syncDir := filepath.Join(dir, "sync")

@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
 type Event struct {
@@ -491,6 +492,9 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	known := map[string]bool{}
 	var errs []error
 	for _, m := range matches {
+		if !shard.IsShardName(filepath.Base(m)) {
+			continue
+		}
 		if abs, err := filepath.Abs(m); err == nil {
 			known[abs] = true
 		}

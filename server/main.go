@@ -204,8 +204,7 @@ func (d *daemon) watchSync(ctx context.Context) {
 			if !ok {
 				return
 			}
-			base := filepath.Base(ev.Name)
-			if !strings.HasPrefix(base, "events-") || !strings.HasSuffix(base, ".jsonl") {
+			if !shard.IsShardName(filepath.Base(ev.Name)) {
 				continue
 			}
 			if ev.Op&(fsnotify.Write|fsnotify.Create) != 0 {

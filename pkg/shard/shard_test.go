@@ -22,6 +22,44 @@ func TestValidHost(t *testing.T) {
 	}
 }
 
+func TestIsShardName(t *testing.T) {
+	live := []string{"events-mini.jsonl", "events-MacBook-Pro-Maksim.local.jsonl", "events-host_1.jsonl", "events-a.b-c.jsonl"}
+	for _, n := range live {
+		if !IsShardName(n) {
+			t.Errorf("IsShardName(%q) = false, want true", n)
+		}
+	}
+	notShards := []string{
+		"events-mini.sync-conflict-20261003-010203-ABCDEFG.jsonl",
+		"events-MacBook-Pro-Maksim.local.sync-conflict-20261003-010203-ABCDEFG.jsonl",
+		"events-mini.jsonl.gz",
+		"events-mini.jsonl.tmp",
+		"events-mini.json",
+		"events-mini",
+		"mini.jsonl",
+		"scopes.yaml",
+		".syncthing.events-mini.jsonl.tmp",
+		"",
+	}
+	for _, n := range notShards {
+		if IsShardName(n) {
+			t.Errorf("IsShardName(%q) = true, want false", n)
+		}
+	}
+}
+
+func TestIsShardNameAcceptsEveryPathItBuilds(t *testing.T) {
+	for _, host := range []string{"MacBook-Pro-Maksim.local", "mini", "host_1", "a.b-c"} {
+		p, err := Path("/sync", host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name := filepath.Base(p); !IsShardName(name) {
+			t.Errorf("IsShardName(%q) = false for the shard Path built for host %q", name, host)
+		}
+	}
+}
+
 func TestPathRejectsTraversal(t *testing.T) {
 	if _, err := Path("/sync", "../../etc/cron.d/evil"); err == nil {
 		t.Fatal("expected error for traversal host")

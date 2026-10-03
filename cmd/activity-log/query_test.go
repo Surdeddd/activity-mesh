@@ -16,11 +16,16 @@ func queryLine(id, ts string, seq int, summary string) string {
 	return fmt.Sprintf(`{"v":1,"id":%q,"ts":%q,"host":"h","agent":"a","kind":"note","scope":"s","summary":%q,"monotonic_seq":%d}`, id, ts, summary, seq)
 }
 
-func writeQueryShard(t *testing.T, syncDir string, lines ...string) {
+func writeShardFile(t *testing.T, path string, lines ...string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(syncDir, "events-h.jsonl"), []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeQueryShard(t *testing.T, syncDir string, lines ...string) {
+	t.Helper()
+	writeShardFile(t, filepath.Join(syncDir, "events-h.jsonl"), lines...)
 }
 
 func queryEvents(t *testing.T, args ...string) []event.Event {
@@ -102,5 +107,50 @@ func TestQueryTreatsUnparseableTimestampsAsOldest(t *testing.T) {
 	want := "[garbled earlier latest]"
 	if got := summariesOf(queryEvents(t, "--since", "", "--limit", "0")); fmt.Sprint(got) != want {
 		t.Fatalf("query --limit 0 returned %v, want %s", got, want)
+	}
+}
+
+const conflictCopyShard = "events-h.sync-conflict-20261003-010203-ABCDEFG.jsonl"
+
+func writeShardWithConflictCopy(t *testing.T, syncDir string) {
+	t.Helper()
+	now := time.Now().UTC()
+	lines := []string{
+		queryLine("01HRX0000000000000000000K1", now.Add(-2*time.Hour).Format("2006-01-02T15:04:05.000000Z"), 1, "first"),
+		queryLine("01HRX0000000000000000000K2", now.Add(-1*time.Hour).Format("2006-01-02T15:04:05.000000Z"), 2, "second"),
+	}
+	writeQueryShard(t, syncDir, lines...)
+	writeShardFile(t, filepath.Join(syncDir, conflictCopyShard), lines...)
+}
+
+func TestQueryIgnoresSyncthingConflictCopies(t *testing.T) {
+	syncDir, _, _ := sandboxEnv(t)
+	writeShardWithConflictCopy(t, syncDir)
+	if got := summariesOf(queryEvents(t, "--limit", "0")); fmt.Sprint(got) != "[first second]" {
+		t.Fatalf("query counted the Syncthing conflict copy as a shard: %v, want [first second]", got)
+	}
+}
+
+func TestStatusListsOnlyLiveShards(t *testing.T) {
+	syncDir, _, _ := sandboxEnv(t)
+	writeShardWithConflictCopy(t, syncDir)
+	run := func() string {
+		t.Helper()
+		cmd := statusCmd()
+		cmd.SetArgs([]string{})
+		out, err := captureStdout(t, cmd.Execute)
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		return strings.TrimSpace(out)
+	}
+	if out := run(); strings.Count(out, "\n") != 0 || !strings.HasPrefix(out, "h: 2 events") {
+		t.Fatalf("status = %q, want exactly one line for host h with 2 events", out)
+	}
+	if err := os.Remove(filepath.Join(syncDir, "events-h.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if out := run(); out != "no per-host shards yet" {
+		t.Fatalf("status with only a conflict copy = %q, want %q", out, "no per-host shards yet")
 	}
 }
