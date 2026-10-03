@@ -102,13 +102,17 @@ patterns:
 
   - name: hex_secret
     description: >-
-      Hex-encoded secret bound to a secret-ish variable name (signing secrets,
-      auth tokens). Hex maxes out at 4 bits/char so it can never reach the
-      tier-2 entropy floor; only capture group 1 (the value) is redacted, so
-      the variable name stays readable and bare hashes are untouched.
+      Hex-encoded secret of 32 or more digits (no upper bound) bound to a
+      secret-ish variable name (signing secrets, auth tokens, SECRET_KEY_BASE).
+      The name may be quoted, as in JSON and dict dumps. Hex maxes out at 4
+      bits/char so it can never reach the tier-2 entropy floor; only capture
+      group 1 (the value) is redacted, so the variable name stays readable and
+      bare hashes are untouched. Structured fields follow the same rule: a
+      string value under a key that ends in one of these words is redacted when
+      it is all hex digits.
     kind: credential
     group: 1
-    regex: '(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key)\s*[:=]\s*["'']?([0-9a-fA-F]{32,64})\b'
+    regex: '(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?)["'']?\s*[:=]\s*["'']?([0-9a-fA-F]{32,})\b'
     replacement: '[REDACTED:hex_secret:{len}]'
 
   - name: eth_private_key
@@ -125,7 +129,11 @@ patterns:
 
   # ----- PII -----
   - name: email
-    description: "Email addresses"
+    description: >-
+      Email addresses. A match immediately followed by `:<path>/` is an
+      scp-style SSH remote (git@github.com:owner/repo.git), not an address, and
+      is left alone; the regex flavour has no lookahead, so that check runs on
+      the text after the match.
     kind: pii
     regex: '\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b'
     replacement: '[REDACTED:email:{len}]'
@@ -135,8 +143,12 @@ patterns:
     description: >-
       Home-directory prefix. Built DYNAMICALLY at runtime from the current
       user's home plus $ACTIVITY_MESH_REDACT_HOMES (colon-separated extra
-      prefixes) — no hardcoded usernames in code or config.
+      prefixes) — no hardcoded usernames in code or config. The home is capture
+      group 1 and must be followed by end of text or a character that is not a
+      Unicode letter, digit or underscore, so a longer name is never cut; that
+      boundary character stays in place.
     kind: env
+    group: 1
     regex: '<dynamic: $HOME + $ACTIVITY_MESH_REDACT_HOMES>'
     replacement: '[REDACTED:user_path:{len}]'
 

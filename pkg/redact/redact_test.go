@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -200,5 +201,196 @@ func TestShannonEntropyMath(t *testing.T) {
 	got := shannon("abababab")
 	if got < 0.99 || got > 1.01 {
 		t.Errorf("expected ≈1 bit/char, got %f", got)
+	}
+}
+
+func TestUserPathMissesNonASCIIHome(t *testing.T) {
+	for _, home := range []string{`/home/максим`, `C:\Users\Максим`, `/Users/josé`} {
+		t.Run(home, func(t *testing.T) {
+			t.Setenv("ACTIVITY_MESH_REDACT_HOMES", home)
+			re := userPathRe()
+			sep := "/"
+			if strings.HasPrefix(home, "C:") {
+				sep = `\`
+			}
+			in := "wrote " + home + sep + "notes.md"
+			if !re.MatchString(in) {
+				t.Fatalf("user_path rule built for home %q does not match %q", home, in)
+			}
+		})
+	}
+}
+
+func TestHexSecretWithQuotedKeySurvives(t *testing.T) {
+	secret := "8f742231b10e8888abcd991234567851"
+	for _, in := range []string{
+		`config {"SLACK_SIGNING_SECRET": "` + secret + `"}`,
+		`env {'auth_token': '` + secret + `'}`,
+	} {
+		out, hits := Apply(in)
+		if strings.Contains(out, secret) {
+			t.Errorf("hex secret behind a quoted key survived: %q (hits=%v)", out, hits)
+		}
+	}
+	cleaned, _ := ApplyJSON(map[string]any{"env": map[string]any{"SLACK_SIGNING_SECRET": secret}})
+	if v := cleaned.(map[string]any)["env"].(map[string]any)["SLACK_SIGNING_SECRET"]; v == secret {
+		t.Errorf("hex secret as a structured /push field survived: SLACK_SIGNING_SECRET=%v", v)
+	}
+}
+
+func TestGitRemoteRedactedAsEmail(t *testing.T) {
+	in := "pushed to git@github.com:Surdeddd/activity-mesh.git"
+	if out, hits := Apply(in); out != in {
+		t.Errorf("git remote mangled as PII: %q -> %q (hits=%v)", in, out, hits)
+	}
+}
+
+func TestHexSecretLongerThan64Survives(t *testing.T) {
+	secret := "9f2c4e7a1b3d5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8" +
+		"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	for _, in := range []string{
+		"SECRET_KEY_BASE=" + secret,
+		"API_KEY=" + secret[:65],
+	} {
+		out, hits := Apply(in)
+		if strings.Contains(out, secret[:65]) {
+			t.Errorf("hex secret bound to a secret-ish name survived: %q (hits=%v)", out, hits)
+		}
+	}
+}
+
+func useHomes(t *testing.T, homes string) {
+	t.Helper()
+	t.Setenv("ACTIVITY_MESH_REDACT_HOMES", homes)
+	for _, r := range rules {
+		if r.name != "user_path" {
+			continue
+		}
+		prev := r.re
+		r.re = userPathRe()
+		t.Cleanup(func() { r.re = prev })
+	}
+}
+
+func TestUserPathRedactsOnlyTheHome(t *testing.T) {
+	const jose, maxim = "/Users/josé", "/home/максим"
+	red := func(home string) string { return fmt.Sprintf("[REDACTED:user_path:%d]", len(home)) }
+	cases := []struct{ name, home, in, want string }{
+		{"slash after", jose, "opened " + jose + "/notes.md", "opened " + red(jose) + "/notes.md"},
+		{"end of text", jose, "cwd=" + jose, "cwd=" + red(jose)},
+		{"punctuation after", maxim, "ls " + maxim + ", then quit", "ls " + red(maxim) + ", then quit"},
+		{"two homes in a path list", jose, "PATH=" + jose + "/bin:" + jose + "/.local/bin", "PATH=" + red(jose) + "/bin:" + red(jose) + "/.local/bin"},
+		{"longer name, non-ASCII letter", jose, "see " + jose + "ñ/x", "see " + jose + "ñ/x"},
+		{"longer name, ASCII letter", jose, "see " + jose + "a/x", "see " + jose + "a/x"},
+		{"longer name, digit", jose, "see " + jose + "2/x", "see " + jose + "2/x"},
+		{"longer name, underscore", jose, "see " + jose + "_old/x", "see " + jose + "_old/x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useHomes(t, tc.home)
+			if got, _ := Apply(tc.in); got != tc.want {
+				t.Errorf("Apply(%q)\n got: %q\nwant: %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUserPathRegexpKeepsOneCaptureGroup(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("ACTIVITY_MESH_REDACT_HOMES", "")
+	if n := userPathRe().NumSubexp(); n != 1 {
+		t.Errorf("no-home fallback has %d capture groups, replaceGroup needs exactly 1", n)
+	}
+	t.Setenv("ACTIVITY_MESH_REDACT_HOMES", "/Users/josé:/home/максим")
+	if n := userPathRe().NumSubexp(); n != 1 {
+		t.Errorf("multi-home regexp has %d capture groups, replaceGroup needs exactly 1", n)
+	}
+}
+
+func TestHexSecretKeepsNameQuotesAndTail(t *testing.T) {
+	secret := "8f742231b10e8888abcd991234567851"
+	long := strings.Repeat("0f1e2d3c4b5a6978", 8)
+	cases := []struct{ name, in, want string }{
+		{"json double quotes", `{"SLACK_SIGNING_SECRET": "` + secret + `"}`, `{"SLACK_SIGNING_SECRET": "[REDACTED:hex_secret:32]"}`},
+		{"dict single quotes", `env {'auth_token': '` + secret + `'}`, `env {'auth_token': '[REDACTED:hex_secret:32]'}`},
+		{"space before colon", `"api_key" : "` + secret + `"`, `"api_key" : "[REDACTED:hex_secret:32]"`},
+		{"key base suffix", "SECRET_KEY_BASE=" + secret + " end", "SECRET_KEY_BASE=[REDACTED:hex_secret:32] end"},
+		{"128 hex digits", "API_KEY=" + long, "API_KEY=[REDACTED:hex_secret:128]"},
+		{"name is not secret-ish", `{"request_id": "` + secret + `"}`, `{"request_id": "` + secret + `"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _ := Apply(tc.in)
+			if out != tc.want {
+				t.Errorf("Apply(%q)\n got: %q\nwant: %q", tc.in, out, tc.want)
+			}
+			if again, _ := Apply(out); again != out {
+				t.Errorf("not idempotent:\n1st: %q\n2nd: %q", out, again)
+			}
+		})
+	}
+}
+
+func TestSSHRemoteKeptWhileRealEmailsAreRedacted(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+		hits           int
+	}{
+		{"remote then email", "pushed to git@github.com:owner/repo.git, cc alice@example.com", "pushed to git@github.com:owner/repo.git, cc [REDACTED:email:17]", 1},
+		{"email then remote", "alice@example.com cloned git@gitlab.example.org:team/sub-group/repo.git", "[REDACTED:email:17] cloned git@gitlab.example.org:team/sub-group/repo.git", 1},
+		{"only remotes", "origin git@github.com:a/b.git, upstream git@github.com:c/d.git", "origin git@github.com:a/b.git, upstream git@github.com:c/d.git", 0},
+		{"colon without a path", "ping bob@example.com: are you there", "ping [REDACTED:email:15]: are you there", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, hits := Apply(tc.in)
+			if out != tc.want {
+				t.Errorf("Apply(%q)\n got: %q\nwant: %q", tc.in, out, tc.want)
+			}
+			if len(hits) != tc.hits {
+				t.Errorf("got %d hits, want %d: %+v", len(hits), tc.hits, hits)
+			}
+		})
+	}
+}
+
+func TestApplyJSONRedactsHexValueUnderSecretKey(t *testing.T) {
+	secret := "8f742231b10e8888abcd991234567851"
+	redacted := func(n int) string { return fmt.Sprintf("[REDACTED:hex_secret:%d]", n) }
+	cases := []struct {
+		name  string
+		key   string
+		value any
+		want  any
+		hits  int
+	}{
+		{"signing secret", "SLACK_SIGNING_SECRET", secret, redacted(32), 1},
+		{"hyphenated api key", "x-api-key", secret, redacted(32), 1},
+		{"key base suffix", "SECRET_KEY_BASE", secret, redacted(32), 1},
+		{"upper-case hex", "Password", strings.ToUpper(secret), redacted(32), 1},
+		{"hex longer than 64", "auth_token", strings.Repeat(secret, 3), redacted(96), 1},
+		{"key is not secret-ish", "request_id", secret, secret, 0},
+		{"keyword is not the last word", "token_count", secret, secret, 0},
+		{"hex shorter than 32", "api_key", secret[:31], secret[:31], 0},
+		{"value is not hex", "api_key", "changeme", "changeme", 0},
+		{"value is not a string", "api_key", float64(42), float64(42), 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cleaned, hits := ApplyJSON(map[string]any{"env": map[string]any{tc.key: tc.value}})
+			got := cleaned.(map[string]any)["env"].(map[string]any)[tc.key]
+			if got != tc.want {
+				t.Errorf("%s = %v, want %v", tc.key, got, tc.want)
+			}
+			if len(hits) != tc.hits {
+				t.Fatalf("got %d hits, want %d: %+v", len(hits), tc.hits, hits)
+			}
+			for _, h := range hits {
+				if h.PatternName != "hex_secret" || h.Kind != "credential" || h.LenRedacted != len(tc.value.(string)) {
+					t.Errorf("unexpected hit %+v", h)
+				}
+			}
+		})
 	}
 }

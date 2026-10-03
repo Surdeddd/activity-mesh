@@ -130,7 +130,7 @@ var rules = []*rule{
 		name:    "hex_secret",
 		kind:    "credential",
 		repType: "hex_secret",
-		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key)\s*[:=]\s*["']?([0-9a-fA-F]{32,64})\b`),
+		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?)["']?\s*[:=]\s*["']?([0-9a-fA-F]{32,})\b`),
 		group:   1,
 	},
 	{
@@ -156,6 +156,7 @@ var rules = []*rule{
 		kind:    "env",
 		repType: "user_path",
 		re:      userPathRe(),
+		group:   1,
 	},
 	{
 		name:    "lan_ip",
@@ -176,13 +177,13 @@ func userPathRe() *regexp.Regexp {
 		}
 	}
 	if len(homes) == 0 {
-		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
+		return regexp.MustCompile(`(\bactivity-mesh-no-home-configured\b)`)
 	}
 	quoted := make([]string, len(homes))
 	for i, h := range homes {
 		quoted[i] = regexp.QuoteMeta(strings.TrimRight(h, "/\\"))
 	}
-	return regexp.MustCompile(`(?:` + strings.Join(quoted, "|") + `)\b`)
+	return regexp.MustCompile(`(` + strings.Join(quoted, "|") + `)(?:[^\p{L}\p{N}_]|$)`)
 }
 
 var (
@@ -205,6 +206,10 @@ func Apply(input string) (string, []Hit) {
 	for _, r := range rules {
 		if r.group > 0 {
 			out = replaceGroup(out, r, &hits)
+			continue
+		}
+		if r.name == "email" {
+			out = replaceEmails(out, r, &hits)
 			continue
 		}
 		out = r.re.ReplaceAllStringFunc(out, func(match string) string {
@@ -252,11 +257,38 @@ func replaceGroup(s string, r *rule, hits *[]Hit) string {
 	return b.String()
 }
 
+var sshRemoteTail = regexp.MustCompile(`^:[A-Za-z0-9_.\-]+/`)
+
+func replaceEmails(s string, r *rule, hits *[]Hit) string {
+	locs := r.re.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range locs {
+		if sshRemoteTail.MatchString(s[m[1]:]) {
+			continue
+		}
+		match := s[m[0]:m[1]]
+		*hits = append(*hits, mkHit(r.kind, r.name, match))
+		b.WriteString(s[last:m[0]])
+		fmt.Fprintf(&b, "[REDACTED:%s:%d]", r.repType, len(match))
+		last = m[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
 func ApplyJSON(v any) (any, []Hit) {
 	var hits []Hit
 	out := walk(v, &hits)
 	return out, hits
 }
+
+var secretKeyRe = regexp.MustCompile(`(?i)(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?)$`)
+
+var hexValueRe = regexp.MustCompile(`^[0-9a-fA-F]{32,}$`)
 
 func walk(v any, hits *[]Hit) any {
 	switch t := v.(type) {
@@ -271,6 +303,10 @@ func walk(v any, hits *[]Hit) any {
 		out := make(map[string]any, len(t))
 		for k, child := range t {
 			cleaned := walk(child, hits)
+			if s, ok := cleaned.(string); ok && secretKeyRe.MatchString(k) && hexValueRe.MatchString(s) {
+				*hits = append(*hits, mkHit("credential", "hex_secret", s))
+				cleaned = fmt.Sprintf("[REDACTED:hex_secret:%d]", len(s))
+			}
 			key, keyHits := Apply(k)
 			if key != k {
 				*hits = append(*hits, keyHits...)
