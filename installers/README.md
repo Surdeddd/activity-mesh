@@ -118,15 +118,42 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   `~/.local/state/activity-mesh`). Each value must be an absolute path without a
   newline. It is resolved to the name the filesystem stores (symlinks, `.` and
   `..`, trailing slashes and, on macOS, the case spelling and the `/private`
-  and `/System/Volumes/Data` aliases; a `.` or `..` below something that does
-  not exist cannot be resolved and is refused) and then compared by device and
-  inode as well, so no spelling gets around the check. It is refused, before
-  anything is planned or removed, when it is `/`, your home directory or one of
-  its parents, a sync dir or one of its parents, or a directory that holds the
-  default `activity-mesh` store, state or config dirs (`~/.local/share`,
-  `~/.config`, ...). What is removed is the resolved path plus the symlink you
-  named it by, so a purge leaves no dangling link behind; registrations are
-  matched under both the spelling you gave and the resolved one.
+  alias; a `.` or `..` below something that does not exist cannot be resolved
+  and is refused). Everything is checked before anything is planned or removed,
+  and nothing is removed unless the resolved directory positively looks like
+  activity-mesh's own:
+  - it is not `/`, a mount point (its device differs from its parent's) or, on
+    macOS, `/System`, `/System/Volumes` or a volume root such as
+    `/System/Volumes/Data`;
+  - its subdirectories are only the ones activity-mesh makes: `audit` and `dist`
+    in the store, none in the state and config dirs (files are not examined);
+  - it holds at least one file activity-mesh writes: `config.json`,
+    `cursors.json`, `index.db`, `seq-*` or `dist/current` in the store; `*.log`,
+    `*.err`, `last-health.json`, `last-digest.json`, `decay-state.json`,
+    `heartbeat-misses`, `heartbeat-last-alert`, `clock-offset-ms` or `tokens-*`
+    in the state dir; `watcher.yaml`, `scopes-cache`, `agents-cache` or
+    `telegram.env` in the config dir. An empty directory has none, so it has to
+    be removed by hand.
+
+  Without `--purge` only `<store>/dist` is held to this: it may hold only
+  version dirs (`0.4.0`, `v0.4.0-rc.7`, `dev-local`) and `current`. A directory
+  that fails is refused with up to five of the entries that are in the way, and
+  nothing is changed.
+
+  Besides that, as a second line of defence, a value is refused when it is `/`,
+  your home directory or one of its parents, a sync dir or one of its parents,
+  or a directory that holds the default `activity-mesh` store, state or config
+  dirs (`~/.local/share`, `~/.config`, ...). Those are compared by resolved name
+  and by device and inode (on macOS also through the `/System/Volumes/Data`
+  spelling of each protected path and its parents), and the uninstall stops when
+  it cannot read an identity (no `stat`, a HOME that does not exist, a name that
+  resolves to another directory than the one it names, no `/bin/pwd` on macOS).
+
+  What is removed is the resolved path. A symlink you named it by is removed as
+  well, and so is every link of a chain (`link1 -> link2 -> dir`) that led to
+  it, so a purge leaves no dangling link behind; a link that only leads to the
+  parent of the dir stays. Registrations are matched under both the spelling you
+  gave and the resolved one.
 - **The sync dir** is never removed, and every candidate is protected:
   `ACTIVITY_MESH_SYNC`, the `sync_dir` in `<store>/config.json` (of the store
   you name and of the default store, read the way bootstrap reads it) and

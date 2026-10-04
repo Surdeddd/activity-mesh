@@ -33,10 +33,12 @@ SELF="${BASH_SOURCE[0]}"
 hops=0
 while [[ -L "$SELF" && $hops -lt 20 ]]; do
     link="$(readlink "$SELF")"
-    case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname "$SELF")/$link" ;; esac
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$link" ;; esac
     hops=$((hops + 1))
 done
 HERE="$(cd "$(dirname "$SELF")" && pwd)"
+HERE_P="$(cd -P "$(dirname "$SELF")" && pwd)"
+if [[ "$(cd -P "$HERE" && pwd)" != "$HERE_P" ]]; then HERE="$HERE_P"; fi
 CFGEDIT="$HERE/lib/cfgedit.sh"
 [[ -f "$CFGEDIT" ]] || { err "missing helper $CFGEDIT"; exit 1; }
 # shellcheck source=lib/cfgedit.sh
@@ -48,6 +50,10 @@ case "$UNAME_S" in
     Linux)  OS="linux"  ;;
     *)      err "unsupported OS: $UNAME_S"; exit 1 ;;
 esac
+
+if [[ "$OS" == darwin && ! -x /bin/pwd && ! -x /usr/bin/pwd ]]; then
+    refuse "neither /bin/pwd nor /usr/bin/pwd exists, so a path cannot be resolved to the name the filesystem stores"
+fi
 
 DEFAULT_STORE="$HOME/.local/share/activity-mesh"
 DEFAULT_STATE="$HOME/.local/state/activity-mesh"
@@ -64,12 +70,19 @@ check_value() {
 }
 
 resolve_dir() {
+    local a b
     check_value "$1" "$2"
     RES_LEX="$(norm_lex "$2")"
     RES_CANON="$(canon_path "$RES_LEX")"
     case "$RES_CANON/" in
         */./*|*/../*) refuse "$1=$2 uses . or .. below something that does not exist, so it cannot be resolved" ;;
     esac
+    if [[ -e "$RES_LEX" ]]; then
+        a="$(dir_id "$RES_LEX" 2>/dev/null || true)"
+        b="$(dir_id "$RES_CANON" 2>/dev/null || true)"
+        [[ -n "$a" && -n "$b" ]] || refuse "$1=$2: cannot read the identity of that directory (is stat available?)"
+        [[ "$a" == "$b" ]] || refuse "$1=$2 does not resolve to the directory it names (a newline or another unusual character in a path component?)"
+    fi
 }
 
 parent_of() {
@@ -89,13 +102,20 @@ P_LEX=()
 P_CANON=()
 P_IDS=()
 P_WHY=()
-protect() {
+add_protected() {
     local n="${#P_LEX[@]}"
     P_LEX[n]="$1"
     P_CANON[n]="$2"
     P_IDS[n]="$(chain_ids "$1")"
     if [[ "$1" != "$2" ]]; then P_IDS[n]="${P_IDS[n]}"$'\n'"$(chain_ids "$2")"; fi
     P_WHY[n]="$3"
+}
+
+protect() {
+    add_protected "$1" "$2" "$3"
+    if [[ "$OS" == darwin && "$2" != /System/Volumes/Data && "$2" != /System/Volumes/Data/* && -e "/System/Volumes/Data$2" ]]; then
+        add_protected "/System/Volumes/Data$2" "/System/Volumes/Data$2" "$3"
+    fi
 }
 
 guard_dir() {
@@ -110,7 +130,9 @@ guard_dir() {
 
 SYNC_EFFECTIVE=""
 add_sync() {
-    local label="$1" raw="$2" effective="$3" tilde='~'
+    local label="$1" raw effective="$3" tilde='~'
+    raw="$(trim_ws "$2")"
+    [[ -n "$raw" ]] || return 0
     case "$raw" in
         "$tilde") raw="$HOME" ;;
         "$tilde"/*) raw="$HOME/${raw:2}" ;;
@@ -135,6 +157,7 @@ sync_from_config() {
 }
 
 resolve_dir HOME "$HOME"
+dir_id "$RES_CANON" > /dev/null 2>&1 || refuse "cannot read the identity of HOME=$HOME"
 protect "$RES_LEX" "$RES_CANON" "is your home directory or one of its parents"
 
 resolve_dir ACTIVITY_MESH_HOME "$STORE_DIR"
@@ -162,6 +185,97 @@ done
 guard_dir ACTIVITY_MESH_HOME "$STORE_DIR" "$STORE_LEX" "$STORE_CANON"
 guard_dir ACTIVITY_MESH_STATE "$STATE_DIR" "$STATE_LEX" "$STATE_CANON"
 guard_dir CONFIG_DIR "$CONFIG_DIR" "$CONFIG_LEX" "$CONFIG_CANON"
+
+VERSION_DIR_RE='^(v?[0-9][0-9A-Za-z._+-]*|dev-local)$'
+SHAPE_BAD=()
+SHAPE_SEEN=()
+SHAPE_MARKERS=0
+
+volume_root() {
+    local c="$1" id pid
+    [[ "$c" != "/" ]] || return 0
+    if [[ "$OS" == darwin ]]; then
+        case "$c" in
+            /System|/System/Volumes) return 0 ;;
+            /System/Volumes/*) [[ "${c#/System/Volumes/}" == */* ]] || return 0 ;;
+        esac
+    fi
+    id="$(dir_id "$c" 2>/dev/null)" || refuse "cannot read the identity of $c"
+    pid="$(dir_id "$(parent_of "$c")" 2>/dev/null)" || refuse "cannot read the identity of $(parent_of "$c")"
+    [[ "${id%%:*}" != "${pid%%:*}" ]]
+}
+
+sub_expected() {
+    case "$1:$2" in
+        store:audit|store:dist) return 0 ;;
+        dist:*) [[ "$2" =~ $VERSION_DIR_RE ]] ;;
+        *) return 1 ;;
+    esac
+}
+
+shape_scan() {
+    local kind="$1" dir="$2" e name dev
+    SHAPE_BAD=()
+    SHAPE_SEEN=()
+    SHAPE_MARKERS=0
+    dev="$(dir_id "$dir" 2>/dev/null)" || refuse "cannot read the identity of $dir"
+    dev="${dev%%:*}"
+    for e in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
+        [[ -e "$e" || -L "$e" ]] || continue
+        name="${e##*/}"
+        SHAPE_SEEN[${#SHAPE_SEEN[@]}]="$name"
+        if [[ -d "$e" && ! -L "$e" ]]; then
+            if sub_expected "$kind" "$name" && [[ "$(dir_id "$e" 2>/dev/null)" == "$dev":* ]]; then continue; fi
+            SHAPE_BAD[${#SHAPE_BAD[@]}]="$name/"
+            continue
+        fi
+        case "$kind:$name" in
+            dist:current)
+                if [[ ! -L "$e" ]]; then SHAPE_BAD[${#SHAPE_BAD[@]}]="$name"; fi ;;
+            dist:.DS_Store) ;;
+            dist:*)
+                SHAPE_BAD[${#SHAPE_BAD[@]}]="$name" ;;
+            store:config.json|store:cursors.json|store:index.db|store:seq-*)
+                if [[ -f "$e" ]]; then SHAPE_MARKERS=$((SHAPE_MARKERS + 1)); fi ;;
+            state:*.log|state:*.err|state:last-health.json|state:last-digest.json|state:heartbeat-misses|state:heartbeat-last-alert|state:clock-offset-ms|state:decay-state.json|state:tokens-*)
+                if [[ -f "$e" ]]; then SHAPE_MARKERS=$((SHAPE_MARKERS + 1)); fi ;;
+            config:watcher.yaml|config:scopes-cache|config:agents-cache|config:telegram.env)
+                if [[ -f "$e" ]]; then SHAPE_MARKERS=$((SHAPE_MARKERS + 1)); fi ;;
+        esac
+    done
+    if [[ "$kind" == store && -L "$dir/dist/current" ]]; then SHAPE_MARKERS=$((SHAPE_MARKERS + 1)); fi
+}
+
+identify_dir() {
+    local name="$1" raw="$2" kind="$3" dir="$4" what shown="" n
+    [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    case "$kind" in
+        store) what="an activity-mesh store dir" ;;
+        state) what="an activity-mesh state dir" ;;
+        config) what="an activity-mesh config dir" ;;
+        dist) what="activity-mesh's runtime assets dir" ;;
+    esac
+    if volume_root "$dir"; then refuse "$name=$raw: $dir is a mount point or a volume root, not $what"; fi
+    [[ -r "$dir" && -x "$dir" ]] || refuse "$name=$raw: cannot list $dir"
+    shape_scan "$kind" "$dir"
+    if [[ ${#SHAPE_BAD[@]} -gt 0 ]]; then
+        for ((n = 0; n < ${#SHAPE_BAD[@]} && n < 5; n++)); do shown="$shown${shown:+, }${SHAPE_BAD[n]}"; done
+        if [[ ${#SHAPE_BAD[@]} -gt 5 ]]; then shown="$shown (and $((${#SHAPE_BAD[@]} - 5)) more)"; fi
+        refuse "$name=$raw: $dir is not $what, it holds unexpected entries: $shown"
+    fi
+    if [[ "$kind" != dist && $SHAPE_MARKERS -eq 0 ]]; then
+        for ((n = 0; n < ${#SHAPE_SEEN[@]} && n < 5; n++)); do shown="$shown${shown:+, }${SHAPE_SEEN[n]}"; done
+        if [[ -z "$shown" ]]; then shown="it is empty, and an empty dir has to be removed by hand"; else shown="it holds only: $shown"; fi
+        refuse "$name=$raw: $dir is not $what, it holds none of the files such a dir has ($shown)"
+    fi
+}
+
+identify_dir ACTIVITY_MESH_HOME "$STORE_DIR" dist "$STORE_CANON/dist"
+if [[ $PURGE -eq 1 ]]; then
+    identify_dir ACTIVITY_MESH_HOME "$STORE_DIR" store "$STORE_CANON"
+    identify_dir ACTIVITY_MESH_STATE "$STATE_DIR" state "$STATE_CANON"
+    identify_dir CONFIG_DIR "$CONFIG_DIR" config "$CONFIG_CANON"
+fi
 
 uninstall_macos() {
     local unit plist
@@ -331,14 +445,19 @@ if [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
 fi
 
 purge_dir() {
+    local p="$2" hops=0 target base
     if [[ -d "$1" ]]; then
         run_argv rm -rf "$1"
         ok "purged $1"
     fi
-    if [[ -L "$2" ]]; then
-        run_argv rm -f "$2"
-        ok "removed the link $2"
-    fi
+    while [[ -L "$p" && $hops -lt 20 ]]; do
+        target="$(readlink "$p")"
+        base="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd)" || break
+        run_argv rm -f "$p"
+        ok "removed the link $p"
+        case "$target" in /*) p="$target" ;; *) p="$base/$target" ;; esac
+        hops=$((hops + 1))
+    done
 }
 
 if [[ $PURGE -eq 1 ]]; then

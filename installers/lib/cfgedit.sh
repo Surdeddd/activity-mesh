@@ -57,6 +57,13 @@ canon_path() {
 
 covers() { [[ "$1" == "/" || "$2" == "$1" || "$2" == "$1"/* ]]; }
 
+trim_ws() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
 dir_id() {
     local i
     if [[ "$STAT_ID_FMT" == gnu ]]; then

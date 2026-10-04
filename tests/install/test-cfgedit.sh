@@ -525,6 +525,14 @@ test_paths() {
     pass "covers is path containment, not a string prefix"
 }
 
+test_trim() {
+    echo "== trim_ws =="
+    [ "$(trim_ws "  a b  ")" = "a b" ] && [ "$(trim_ws $'\t/x/y\t')" = "/x/y" ] && [ "$(trim_ws $'\n x \n')" = "x" ] \
+        && [ -z "$(trim_ws "   ")" ] && [ -z "$(trim_ws "")" ] && [ "$(trim_ws x)" = "x" ] && [ "$(trim_ws " a  b ")" = "a  b" ] \
+        || fail "trim_ws"
+    pass "trim_ws strips blanks at both ends and nothing else"
+}
+
 test_json() {
     local d="$WORK/json" out_lib out_boot rc_lib rc_boot input
     echo "== sync_dir from config.json =="
@@ -556,6 +564,7 @@ test_json() {
 
 test_write_through
 test_paths
+test_trim
 test_json
 test_replace
 test_strip

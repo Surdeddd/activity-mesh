@@ -20,10 +20,12 @@ SELF="${BASH_SOURCE[0]}"
 hops=0
 while [ -L "$SELF" ] && [ "$hops" -lt 20 ]; do
     link="$(readlink "$SELF")"
-    case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname "$SELF")/$link" ;; esac
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$link" ;; esac
     hops=$((hops + 1))
 done
 HERE="$(cd "$(dirname "$SELF")" && pwd)"
+HERE_P="$(cd -P "$(dirname "$SELF")" && pwd)"
+if [ "$(cd -P "$HERE" && pwd)" != "$HERE_P" ]; then HERE="$HERE_P"; fi
 CFGEDIT="$HERE/../installers/lib/cfgedit.sh"
 [ -f "$CFGEDIT" ] || { err "missing helper $CFGEDIT"; exit 1; }
 # shellcheck source=../installers/lib/cfgedit.sh

@@ -809,6 +809,310 @@ test_symlinked_script() {
     pass "uninstall.sh finds its helper through a chain of symlinks"
 }
 
+ident_sandbox() {
+    new_sandbox "$1"
+    printf 'keep\n' > "$U_HOME/sentinel.txt"
+    mkdir -p "$U_HOME/dist"
+}
+
+expect_refused_with() {
+    local fragment="$1"
+    shift
+    expect_refused "$@"
+    grep -qF -- "$fragment" "$S/out-refused.txt" || fail "the refusal of $1=$2 does not say [$fragment]: $(cat "$S/out-refused.txt")"
+}
+
+expect_accepted() {
+    local name="$1" dir="$2" canon
+    canon="$(cd -P "$dir" && /bin/pwd -P)"
+    uninstall_run "$S/out-ok.txt" "$name=$dir" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-ok.txt" >&2; fail "$name=$dir was refused although it has the shape of activity-mesh's own dir"; }
+    grep -qxF "DRY rm -rf $canon" "$S/out-ok.txt" || fail "$name=$dir is not planned for removal: $(cat "$S/out-ok.txt")"
+}
+
+test_volume_roots() {
+    local v ids dev ino
+    echo "== a volume root, in every spelling, is refused (dry-run) =="
+    ident_sandbox volroot
+    if [ -d /System/Volumes/Data ]; then
+        ids="$(fs_id /System/Volumes/Data)"
+        dev="${ids%%:*}"
+        ino="${ids#*:}"
+        for v in /System/Volumes/Data /System/Volumes/Data/ /System/Volumes/Data/. /System/Volumes /System "/.vol/$dev/$ino"; do
+            expect_refused ACTIVITY_MESH_HOME "$v"
+            expect_refused ACTIVITY_MESH_STATE "$v"
+        done
+        SKIPPED_SPELLINGS=0
+        for v in /SYSTEM/VOLUMES/DATA /system/volumes/data; do
+            expect_refused_alias ACTIVITY_MESH_HOME "$v" /System/Volumes/Data
+            expect_refused_alias ACTIVITY_MESH_STATE "$v" /System/Volumes/Data
+        done
+        pass "the data volume root, its parents, its case spellings and its /.vol spelling are refused"
+    else
+        skip "no /System/Volumes/Data on this system"
+    fi
+    if [ -d /dev/shm ] && [ "$(fs_id /dev/shm | cut -d: -f1)" != "$(fs_id /dev | cut -d: -f1)" ]; then
+        expect_refused ACTIVITY_MESH_STATE /dev/shm
+        pass "a mount point is refused (/dev/shm)"
+    fi
+}
+
+test_foreign_dirs() {
+    echo "== a directory that is not activity-mesh's own is refused, whatever it is called (dry-run) =="
+    ident_sandbox foreign
+    mkdir -p "$S/decoy/bin" "$S/decoy/lib" "$S/decoy/share"
+    : > "$S/decoy/readme.txt"
+    mkdir -p "$S/half/Documents"
+    : > "$S/half/index.db"
+    mkdir -p "$S/hidden/.git"
+    : > "$S/hidden/index.db"
+    mkdir -p "$S/emptydir" "$S/logs/archive" "$S/many/a" "$S/many/b" "$S/many/c" "$S/many/d" "$S/many/e" "$S/many/f" "$S/many/g"
+    : > "$S/logs/a.log"
+    : > "$S/many/index.db"
+    expect_refused_with "bin/, lib/, share/" ACTIVITY_MESH_HOME "$S/decoy"
+    expect_refused_with "bin/, lib/, share/" ACTIVITY_MESH_STATE "$S/decoy"
+    expect_refused_with "Documents/" ACTIVITY_MESH_HOME "$S/half"
+    expect_refused_with ".git/" ACTIVITY_MESH_HOME "$S/hidden"
+    expect_refused_with "empty dir" ACTIVITY_MESH_HOME "$S/emptydir"
+    expect_refused_with "empty dir" ACTIVITY_MESH_STATE "$S/emptydir"
+    expect_refused_with "archive/" ACTIVITY_MESH_STATE "$S/logs"
+    pass "foreign subdirectories, a foreign hidden directory, a dir with markers and a foreign subdir, and an empty dir are all refused, naming what is in the way"
+
+    expect_refused_with "(and 2 more)" ACTIVITY_MESH_HOME "$S/many"
+    grep -qF "a/, b/, c/, d/, e/ (and 2 more)" "$S/out-refused.txt" || fail "the first five unexpected entries are not listed: $(cat "$S/out-refused.txt")"
+    if grep -qF "f/" "$S/out-refused.txt"; then fail "more than five unexpected entries are listed: $(cat "$S/out-refused.txt")"; fi
+    pass "at most five unexpected entries are listed, with a count of the rest"
+
+    mkdir -p "$S/flat"
+    : > "$S/flat/readme.txt"
+    : > "$S/flat/notes.md"
+    expect_refused_with "it holds only: notes.md, readme.txt" ACTIVITY_MESH_HOME "$S/flat"
+    pass "a directory with files but none of activity-mesh's is refused, naming what it does hold"
+
+    mkdir -p "$U_HOME/.config/activity-mesh/notes"
+    : > "$U_HOME/.config/activity-mesh/watcher.yaml"
+    uninstall_run "$S/out-cfg.txt" -- --purge --dry-run
+    [ "$RC" -ne 0 ] || fail "a config dir with a foreign subdirectory must be refused"
+    grep -q 'CONFIG_DIR' "$S/out-cfg.txt" && grep -qF 'notes/' "$S/out-cfg.txt" || fail "the refusal does not name the config dir and what is in it: $(cat "$S/out-cfg.txt")"
+    if grep -q 'DRY' "$S/out-cfg.txt"; then fail "the plan started although the config dir has a foreign subdirectory"; fi
+    rm -rf "$U_HOME/.config/activity-mesh"
+    pass "the config dir is held to the same rule"
+
+    mkdir -p "$S/dist-store/dist/Documents" "$S/dist-store/dist/1.0.0"
+    ln -s 1.0.0 "$S/dist-store/dist/current"
+    : > "$S/dist-store/index.db"
+    uninstall_run "$S/out-dist.txt" ACTIVITY_MESH_HOME="$S/dist-store" -- --dry-run
+    [ "$RC" -ne 0 ] && grep -qF 'Documents/' "$S/out-dist.txt" || fail "a dist dir with a foreign subdirectory must be refused even without --purge: $(cat "$S/out-dist.txt")"
+    if grep -q 'DRY' "$S/out-dist.txt"; then fail "the plan started although dist holds a foreign subdirectory"; fi
+    rm -rf "$S/dist-store/dist/Documents"
+    : > "$S/dist-store/dist/bundle.js"
+    uninstall_run "$S/out-dist.txt" ACTIVITY_MESH_HOME="$S/dist-store" -- --dry-run
+    [ "$RC" -ne 0 ] && grep -qF 'bundle.js' "$S/out-dist.txt" || fail "a dist dir with a foreign file must be refused: $(cat "$S/out-dist.txt")"
+    rm -f "$S/dist-store/dist/bundle.js"
+    mkdir -p "$S/dist-store/dist/current-copy"
+    uninstall_run "$S/out-dist.txt" ACTIVITY_MESH_HOME="$S/dist-store" -- --dry-run
+    [ "$RC" -ne 0 ] && grep -qF 'current-copy/' "$S/out-dist.txt" || fail "a dist dir with a directory that is no version must be refused: $(cat "$S/out-dist.txt")"
+    pass "without --purge the dist dir must hold only version dirs and current"
+
+    mkdir -p "$S/lone/bin" "$S/lone/lib"
+    uninstall_run "$S/out-lone.txt" ACTIVITY_MESH_HOME="$S/lone" -- --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-lone.txt" >&2; fail "a store with foreign subdirectories but no dist was refused although nothing in it is removed"; }
+    pass "without --purge nothing outside dist is removed, so nothing outside dist is examined"
+}
+
+test_real_shapes() {
+    local st
+    echo "== the directories activity-mesh makes are accepted, in every shape they come in (dry-run) =="
+    ident_sandbox shapes
+    mkdir -p "$S/st1/audit" "$S/st1/dist/0.4.0-rc.7" "$S/st1/dist/v0.4.0" "$S/st1/dist/dev-local" "$S/st1/dist/1.0.0-local"
+    ln -s 0.4.0-rc.7 "$S/st1/dist/current"
+    : > "$S/st1/config.json"
+    : > "$S/st1/seq-macbook"
+    : > "$S/st1/.DS_Store"
+    : > "$S/st1/dist/.DS_Store"
+    mkdir -p "$S/st2" "$S/st3/dist/1.0.0" "$S/st4" "$S/st5" "$S/st6/dist"
+    : > "$S/st2/seq-host"
+    ln -s 1.0.0 "$S/st3/dist/current"
+    : > "$S/st4/cursors.json"
+    : > "$S/st5/index.db"
+    : > "$S/st6/index.db"
+    for st in st1 st2 st3 st4 st5 st6; do
+        expect_accepted ACTIVITY_MESH_HOME "$S/$st"
+    done
+    pass "a store is accepted with audit and dist, or with just one of config.json, cursors.json, index.db, seq-*, dist/current; versions are numbers, v-numbers or dev-local"
+
+    st="/System/Volumes/Data$(cd -P "$S/st1" && /bin/pwd -P)"
+    if [ -d /System/Volumes/Data ] && [ "$(fs_id "$st" 2>/dev/null)" = "$(fs_id "$S/st1")" ]; then
+        expect_accepted ACTIVITY_MESH_HOME "$st"
+        pass "a store spelled through /System/Volumes/Data is accepted: that protection is for HOME, the sync dir and their parents"
+    fi
+
+    mkdir -p "$S/sa" "$S/sb" "$S/sc" "$S/sd" "$S/se"
+    : > "$S/sa/tokens-abc"
+    : > "$S/sb/last-health.json"
+    : > "$S/sc/daemon.err"
+    : > "$S/sd/heartbeat-misses"
+    : > "$S/se/clock-offset-ms"
+    for st in sa sb sc sd se; do
+        expect_accepted ACTIVITY_MESH_STATE "$S/$st"
+    done
+    pass "a state dir is accepted with any one of its files"
+
+    mkdir -p "$U_HOME/.config/activity-mesh"
+    : > "$U_HOME/.config/activity-mesh/agents-cache"
+    uninstall_run "$S/out-cfg.txt" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-cfg.txt" >&2; fail "a config dir that holds only agents-cache was refused"; }
+    grep -qxF "DRY rm -rf $(cd -P "$U_HOME/.config/activity-mesh" && /bin/pwd -P)" "$S/out-cfg.txt" || fail "the config dir is not planned for removal"
+    pass "a config dir is accepted with any one of its files"
+}
+
+test_link_chains() {
+    local link
+    echo "== --purge through a chain of links removes every link that pointed into the purged dir =="
+    new_sandbox chains
+    mkdir -p "$S/real-store/dist/0.1" "$S/real-state" "$S/linkdir-target/inner-store" "$S/cfg-real"
+    : > "$S/real-store/index.db"
+    : > "$S/real-state/health.log"
+    : > "$S/linkdir-target/inner-store/index.db"
+    : > "$S/cfg-real/watcher.yaml"
+    ln -s real-store "$S/chain2"
+    ln -s chain2 "$S/chain1"
+    ln -s "$S/real-state" "$S/schain2"
+    ln -s schain2 "$S/schain1"
+    ln -s linkdir-target "$S/linkdir"
+    mkdir -p "$U_HOME/.config"
+    ln -s "$S/cfg-real" "$U_HOME/.config/activity-mesh"
+    uninstall_run "$S/out-dry.txt" ACTIVITY_MESH_HOME="$S/chain1" ACTIVITY_MESH_STATE="$S/schain1" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-dry.txt" >&2; fail "the dry run exited $RC"; }
+    for link in '/chain1' '/chain2' '/schain1' '/schain2' '/.config/activity-mesh'; do
+        grep -q "^DRY rm -f .*$link\$" "$S/out-dry.txt" || fail "the dry run does not plan to remove the link ...$link: $(grep 'DRY rm -f' "$S/out-dry.txt")"
+    done
+    [ -e "$S/real-store" ] && [ -L "$S/chain1" ] && [ -L "$S/chain2" ] || fail "the dry run changed something"
+
+    uninstall_run "$S/out.txt" ACTIVITY_MESH_HOME="$S/chain1" ACTIVITY_MESH_STATE="$S/schain1" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge exited $RC"; }
+    [ ! -e "$S/real-store" ] && [ ! -e "$S/real-state" ] && [ ! -e "$S/cfg-real" ] || fail "--purge left a directory behind"
+    [ ! -L "$S/chain1" ] && [ ! -L "$S/chain2" ] || fail "a link of the store chain was left dangling"
+    [ ! -L "$S/schain1" ] && [ ! -L "$S/schain2" ] || fail "a link of the state chain was left dangling"
+    [ ! -L "$U_HOME/.config/activity-mesh" ] || fail "the link to the config dir was left dangling"
+    [ -d "$U_HOME" ] || fail "HOME disappeared"
+    pass "a chain of two links (relative, absolute) to the store and to the state dir, and a link to the config dir, are removed with what they pointed to"
+
+    uninstall_run "$S/out-mid.txt" ACTIVITY_MESH_HOME="$S/linkdir/inner-store" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out-mid.txt" >&2; fail "--purge through a linked parent exited $RC"; }
+    [ ! -e "$S/linkdir-target/inner-store" ] || fail "--purge left the store behind"
+    [ -L "$S/linkdir" ] && [ -d "$S/linkdir-target" ] || fail "a link that only led to the store's parent was removed"
+    pass "a link that points at the parent of the purged dir, not at the dir, stays"
+}
+
+test_residuals() {
+    local box
+    echo "== names that resolve to something else, and padded sync dirs =="
+    ident_sandbox residual
+    mkdir -p "$U_HOME/Documents" "$U_HOME/Documents"$'\n'
+    printf 'precious\n' > "$U_HOME/Documents/thesis.txt"
+    ln -s "$U_HOME/Documents"$'\n' "$S/store-link"
+    uninstall_run "$S/out-nl.txt" ACTIVITY_MESH_HOME="$S/store-link" -- --purge --dry-run
+    [ "$RC" -ne 0 ] || fail "a link to a directory whose name ends in a newline must be refused"
+    grep -qF 'does not resolve to the directory it names' "$S/out-nl.txt" || fail "the refusal does not say why: $(cat "$S/out-nl.txt")"
+    if grep -q 'DRY' "$S/out-nl.txt"; then fail "the plan started: $(cat "$S/out-nl.txt")"; fi
+    [ -f "$U_HOME/Documents/thesis.txt" ] || fail "the other Documents directory was touched"
+    pass "a path whose resolved name is a different directory (a trailing newline lost to command substitution) is refused"
+
+    box="$U_HOME/Box/sync"
+    mkdir -p "$box"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Box" "ACTIVITY_MESH_SYNC= $box "
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Box" "ACTIVITY_MESH_SYNC=$(printf '\t')$box$(printf '\t')"
+    mkdir -p "$U_HOME/.local/share/activity-mesh"
+    printf '{"sync_dir": "  %s  "}\n' "$box" > "$U_HOME/.local/share/activity-mesh/config.json"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Box"
+    uninstall_run "$S/out-pad.txt" -- --purge --dry-run
+    grep -qF "$box alone" "$S/out-pad.txt" || fail "the padded sync_dir is not named without its padding: $(grep -i alone "$S/out-pad.txt")"
+    uninstall_run "$S/out-blank.txt" "ACTIVITY_MESH_SYNC=   " -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-blank.txt" >&2; fail "a blank ACTIVITY_MESH_SYNC stopped the uninstall"; }
+    pass "blanks around ACTIVITY_MESH_SYNC or sync_dir are trimmed, the way the CLI trims them; a blank value is ignored"
+}
+
+make_nostat_path() {
+    local c p
+    mkdir -p "$WORK/nostat"
+    for c in bash uname id dirname rm mktemp cp cmp date grep readlink mv chmod cat sed tr wc head ls; do
+        p="$(command -v "$c" 2>/dev/null || true)"
+        if [ -n "$p" ] && [ ! -e "$WORK/nostat/$c" ]; then ln -s "$p" "$WORK/nostat/$c"; fi
+    done
+}
+
+test_fail_closed() {
+    local mut
+    echo "== when identities cannot be read, nothing is removed =="
+    ident_sandbox closed
+    mkdir -p "$S/dedicated"
+    : > "$S/dedicated/index.db"
+    set +e
+    env -i HOME="$S/no-such-home" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" ACTIVITY_MESH_HOME="$S/dedicated" \
+        bash "$REPO_ROOT/installers/uninstall.sh" --purge --dry-run > "$S/out-nohome.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -ne 0 ] && grep -qF 'cannot read the identity of HOME' "$S/out-nohome.txt" || fail "a HOME that does not exist must stop the uninstall (rc=$RC): $(cat "$S/out-nohome.txt")"
+    if grep -q 'DRY' "$S/out-nohome.txt"; then fail "the plan started without a HOME: $(cat "$S/out-nohome.txt")"; fi
+    pass "a HOME whose identity cannot be read stops the uninstall before anything is planned"
+
+    make_nostat_path
+    set +e
+    env -i HOME="$U_HOME" PATH="$SHIM:$WORK/nostat" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" ACTIVITY_MESH_HOME="$S/dedicated" \
+        bash "$REPO_ROOT/installers/uninstall.sh" --purge --dry-run > "$S/out-nostat.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -ne 0 ] && grep -qF 'identity' "$S/out-nostat.txt" || fail "without stat the uninstall must stop (rc=$RC): $(cat "$S/out-nostat.txt")"
+    if grep -q 'DRY' "$S/out-nostat.txt"; then fail "the plan started without stat: $(cat "$S/out-nostat.txt")"; fi
+    [ -f "$S/dedicated/index.db" ] || fail "the store was touched"
+    pass "without stat even a dedicated directory is not purged"
+
+    if [ "$(uname -s)" = Darwin ]; then
+        mut="$S/mut/installers"
+        mkdir -p "$mut/lib"
+        sed 's|/usr/bin/pwd|/nonexistent/pwd2|g; s|/bin/pwd|/nonexistent/pwd1|g' "$REPO_ROOT/installers/uninstall.sh" > "$mut/uninstall.sh"
+        sed 's|/usr/bin/pwd|/nonexistent/pwd2|g; s|/bin/pwd|/nonexistent/pwd1|g' "$REPO_ROOT/installers/lib/cfgedit.sh" > "$mut/lib/cfgedit.sh"
+        set +e
+        env -i HOME="$U_HOME" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" ACTIVITY_MESH_HOME="$S/dedicated" \
+            bash "$mut/uninstall.sh" --purge --dry-run > "$S/out-nopwd.txt" 2>&1
+        RC=$?
+        set -e
+        [ "$RC" -ne 0 ] && grep -qF 'cannot be resolved to the name the filesystem stores' "$S/out-nopwd.txt" || fail "on darwin without a pwd binary the uninstall must stop (rc=$RC): $(cat "$S/out-nopwd.txt")"
+        pass "on darwin, without /bin/pwd and /usr/bin/pwd, the builtin is not trusted and the uninstall stops"
+    else
+        skip "not darwin: the builtin pwd is trusted on a case-sensitive filesystem"
+    fi
+}
+
+test_decoy_layout() {
+    local real decoy
+    echo "== uninstall.sh reached through a symlinked directory sources the helper next to the real script =="
+    new_sandbox decoylayout
+    fake_store "$U_HOME/.local/share/activity-mesh" "$U_HOME/.local/state/activity-mesh"
+    real="$S/dotfiles/tree/installers"
+    decoy="$S/tree/installers"
+    mkdir -p "$real/lib" "$decoy/lib" "$S/dotfiles/bin"
+    cp "$REPO_ROOT/installers/uninstall.sh" "$real/uninstall.sh"
+    cp "$REPO_ROOT/installers/lib/cfgedit.sh" "$real/lib/cfgedit.sh"
+    printf '%s\n' 'echo DECOY-HELPER-SOURCED >&2' 'exit 97' > "$decoy/lib/cfgedit.sh"
+    ln -s ../tree/installers/uninstall.sh "$S/dotfiles/bin/uninstall-link"
+    ln -s dotfiles/bin "$S/bin"
+    set +e
+    env -i HOME="$U_HOME" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" bash "$S/bin/uninstall-link" > "$S/out.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall.sh exited $RC through a symlinked directory with a decoy at the path's own location"; }
+    [ ! -e "$U_HOME/.local/share/activity-mesh/dist" ] || fail "the run did not remove dist"
+    fake_store "$U_HOME/.local/share/activity-mesh" "$U_HOME/.local/state/activity-mesh"
+    set +e
+    env -i HOME="$U_HOME" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" bash "$S/bin/../tree/installers/uninstall.sh" > "$S/out-dotdot.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -eq 0 ] || { cat "$S/out-dotdot.txt" >&2; fail "uninstall.sh exited $RC when started by a path that goes through a symlinked directory and .."; }
+    pass "the helper next to the real script is the one that is sourced"
+}
+
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
@@ -826,6 +1130,13 @@ test_registrations_dry_run
 test_without_jq
 test_missing_helper
 test_symlinked_script
+test_decoy_layout
+test_volume_roots
+test_foreign_dirs
+test_real_shapes
+test_link_chains
+test_residuals
+test_fail_closed
 
 echo
 echo "ALL UNINSTALL TESTS PASSED"

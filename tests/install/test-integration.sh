@@ -622,6 +622,68 @@ test_symlinked_scripts() {
     fi
 }
 
+test_decoy_layout() {
+    local d="$WORK/p5" real="$WORK/p5/dotfiles/tree" decoy="$WORK/p5/tree" f cmd real_p
+    echo "== a link reached through a symlinked directory is resolved where the link lives, not where its path says =="
+    mkdir -p "$real/hooks" "$real/installers/lib" "$real/integration" "$real/mcp" \
+             "$decoy/hooks" "$decoy/installers/lib" "$decoy/integration" "$decoy/mcp" "$d/dotfiles/bin" "$d/home/.claude" "$d/home/.codex"
+    for f in hooks/install.sh hooks/session-start-digest.sh hooks/user-prompt-router.sh installers/lib/cfgedit.sh \
+             integration/install.sh integration/update-session-end-flush.sh mcp/install.sh; do
+        cp "$REPO_ROOT/$f" "$real/$f"
+        chmod +x "$real/$f"
+    done
+    : > "$real/mcp/server.mjs"
+    printf '%s\n' 'echo DECOY-HELPER-SOURCED >&2' 'exit 97' > "$decoy/installers/lib/cfgedit.sh"
+    : > "$decoy/hooks/session-start-digest.sh"
+    : > "$decoy/hooks/user-prompt-router.sh"
+    ln -s ../tree/hooks/install.sh "$d/dotfiles/bin/hooks-install"
+    ln -s ../tree/integration/install.sh "$d/dotfiles/bin/integration-install"
+    ln -s ../tree/integration/update-session-end-flush.sh "$d/dotfiles/bin/flush-update"
+    ln -s ../tree/mcp/install.sh "$d/dotfiles/bin/mcp-install"
+    ln -s dotfiles/bin "$d/bin"
+    real_p="$(cd -P "$real" && pwd)"
+    HOME_UNDER_TEST="$d/home"; RUN_PATH="$SHIM:$BASE_PATH"
+
+    if have jq; then
+        printf '{"hooks":{}}\n' > "$d/settings.json"
+        run_capture "$d/out-hooks.txt" sandbox CLAUDE_SETTINGS="$d/settings.json" bash "$d/bin/hooks-install"
+        [ "$RC" -eq 0 ] || { cat "$d/out-hooks.txt" >&2; fail "hooks/install.sh exited $RC through a symlinked directory with a decoy at the path's own location"; }
+        cmd="$("$TOOLS/jq" -r '.hooks.SessionStart[0].hooks[0].command' "$d/settings.json")"
+        [ "$cmd" = "$real_p/hooks/session-start-digest.sh" ] || fail "the hook was registered as $cmd instead of under $real_p"
+        printf '{"hooks":{}}\n' > "$d/settings-dotdot.json"
+        run_capture "$d/out-dotdot.txt" sandbox CLAUDE_SETTINGS="$d/settings-dotdot.json" bash "$d/bin/../tree/hooks/install.sh"
+        [ "$RC" -eq 0 ] || { cat "$d/out-dotdot.txt" >&2; fail "hooks/install.sh exited $RC when started by a path that goes through a symlinked directory and .."; }
+        cmd="$("$TOOLS/jq" -r '.hooks.SessionStart[0].hooks[0].command' "$d/settings-dotdot.json")"
+        [ "$cmd" = "$real_p/hooks/session-start-digest.sh" ] || fail "started through <symlinked dir>/../tree/hooks the hook was registered as $cmd instead of under $real_p"
+        pass "hooks/install.sh registers the hooks next to the real script, not next to a look-alike directory"
+    else
+        skip "jq not found — hooks/install.sh not exercised"
+    fi
+    if have python3; then
+        seed_claude_md "$d/CLAUDE.md"
+        run_capture "$d/out-integration.txt" sandbox CLAUDE_MD="$d/CLAUDE.md" bash "$d/bin/integration-install"
+        [ "$RC" -eq 0 ] || { cat "$d/out-integration.txt" >&2; fail "integration/install.sh exited $RC through a symlinked directory with a decoy"; }
+        grep -qF 'activity-mesh:integration:end' "$d/CLAUDE.md" || fail "integration/install.sh did not patch the target"
+        printf '#!/bin/bash\nSTAGE_OUT=a\nOUT=b\nmv "$STAGE_OUT" "$OUT"\n' > "$d/hook.sh"
+        run_capture "$d/out-flush.txt" sandbox SESSION_END_HOOK="$d/hook.sh" bash "$d/bin/flush-update"
+        [ "$RC" -eq 0 ] || { cat "$d/out-flush.txt" >&2; fail "update-session-end-flush.sh exited $RC through a symlinked directory with a decoy"; }
+        grep -qF '# activity-mesh: emit session-summary event' "$d/hook.sh" || fail "update-session-end-flush.sh did not patch the hook"
+        pass "integration/install.sh and update-session-end-flush.sh source the helper next to the real script"
+    else
+        skip "python3 not found — integration scripts not exercised"
+    fi
+    if have node; then
+        : > "$WORK/shim.log"
+        run_capture "$d/out-mcp.txt" sandbox bash "$d/bin/mcp-install"
+        [ "$RC" -eq 0 ] || { cat "$d/out-mcp.txt" >&2; fail "mcp/install.sh exited $RC through a symlinked directory with a decoy"; }
+        grep -qxF "claude mcp add activity-mesh --scope user -- $TOOLS/node $real_p/mcp/server.mjs" "$WORK/shim.log" \
+            || fail "mcp/install.sh registered another server path: $(cat "$WORK/shim.log")"
+        pass "mcp/install.sh registers the server that sits next to the real script"
+    else
+        skip "node not found — mcp/install.sh not exercised"
+    fi
+}
+
 if have python3; then test_integration_install; else skip "python3 not found — integration/install.sh needs it"; fi
 if have jq; then test_hooks_install; else skip "jq not found — hooks/install.sh needs it"; fi
 if have python3; then test_session_end_flush; else skip "python3 not found — update-session-end-flush.sh needs it"; fi
@@ -631,6 +693,7 @@ test_no_author_paths
 test_single_helper
 test_missing_helper
 test_symlinked_scripts
+test_decoy_layout
 
 echo
 echo "ALL INTEGRATION INSTALL TESTS PASSED"
