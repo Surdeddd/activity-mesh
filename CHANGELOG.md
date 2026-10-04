@@ -100,7 +100,8 @@ MCP server and uninstall are hardened.
   snapshot is saved before the notifier runs.
 - **Health is not silent without `jq`.** The checks printed nothing and
   `master.sh` exited without a snapshot or an alert. Every check now reports
-  itself failed ("jq not found"), and the run sends an alert that it failed.
+  itself failed ("jq not found"), and the run sends an alert that it failed,
+  at most once per 24 hours like any other alert.
 - **`adoption-ratio` is informational.** It counted the heartbeat as a writing
   agent and paged on the ratio. It now leaves self-monitoring out, looks at 7
   days, reports a fractional ratio and stays at tier 1.

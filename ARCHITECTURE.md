@@ -150,7 +150,7 @@ Claude responds naturally with awareness
 | status / current | `статус`, `чё там`, `что (в работе\|пендинг)` ; `status`, `pending`, `active tasks`, `what's going on` | active sessions + tasks + last 10 events |
 | scope-named | known scopes from the generated `scopes-cache` (e.g. `demo-app`, `infra`, ...) | last 15 events in that scope |
 | agent-named | agent aliases from the generated `agents-cache` (e.g. "what did <agent> do", any language) | last 10 events for that agent |
-| incident | `incident`, `авария`, `падал`, `сломал`, `crashed`, `failed` | ≤5 `--kind error` events of the last 30 days |
+| incident | `incident`, `авария`, `падал`, `сломал`, `упал`, `crashed`, `failed`, `broken`, `outage` | ≤5 `--kind error` events of the last 30 days |
 
 **Anti-triggers** (suppress injection): `что такое X`, `как сделать X`, `напиши X` — these are definition / how-to / creation, not recall.
 

@@ -158,7 +158,9 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   What is removed is the resolved path. A symlink you named it by is removed as
   well, and so is every link of a chain (`link1 -> link2 -> dir`, a trailing
   slash in a link target included) that led to it, so a purge leaves no
-  dangling link behind. Only a link that resolves to the removed dir goes: a
+  dangling link behind, unless two of the dirs name one directory through two
+  different links: the second link is left dangling. Only a link that
+  resolves to the removed dir goes: a
   link that leads to the parent of the dir, or anywhere else, stays, and a
   chain that ends at a file or at nothing is not touched at all. A store,
   state, config or `dist` dir that was not there when the checks ran is left
