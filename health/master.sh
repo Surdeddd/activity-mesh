@@ -112,6 +112,17 @@ if printf '%s' "$doc" | "$AM_JQ" -e . >/dev/null 2>&1; then
     fi
 else
     printf '{"error":"aggregation failed"}\n' >&2
+    if [ "$DRY_RUN" -eq 0 ]; then
+        why=$(am_t "the check results could not be combined" "результаты проверок не удалось собрать")
+        command -v "$AM_JQ" >/dev/null 2>&1 || why=$(am_t "jq not found" "jq не найден")
+        msg=$(am_t "activity-mesh: the health run on $HOST failed, no snapshot written: $why" \
+            "activity-mesh: проверка здоровья на $HOST не удалась, снимок не записан: $why")
+        if am_notify "$msg" fail; then
+            am_record_alert master fail
+        else
+            printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
+        fi
+    fi
     exit 0
 fi
 

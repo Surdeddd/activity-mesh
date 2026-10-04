@@ -115,7 +115,14 @@ am_emit() {
         '{name: $name, tier: $tier, status: $status, message: $message, duration_ms: $dur}'
 }
 
-am_start() { CHECK_START_MS=$(am_now_ms); export CHECK_START_MS; }
+am_start() {
+    local name="${0##*/}"
+    if ! command -v "$AM_JQ" >/dev/null 2>&1; then
+        printf '{"name":"%s","tier":3,"status":"fail","message":"jq not found","duration_ms":0}\n' "${name%.sh}"
+        exit 0
+    fi
+    CHECK_START_MS=$(am_now_ms); export CHECK_START_MS
+}
 
 am_shards() {
     local f

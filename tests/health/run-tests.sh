@@ -414,6 +414,36 @@ grep -q 'last_run_ts' "$C/jq.log" 2>/dev/null || err "decay-daemon bypassed the 
 grep -q 'generated_at' "$C/jq.log" 2>/dev/null || err "digest-freshness bypassed the resolved jq"
 end_case
 
+begin_case "every check fails loudly under its own name when jq cannot be run"
+for chk in "$HEALTH"/checks/*.sh; do
+    name=${chk##*/}; name=${name%.sh}
+    run_check "$name" ACTIVITY_MESH_JQ=/nonexistent/jq
+    [ "$OUT" = "{\"name\":\"$name\",\"tier\":3,\"status\":\"fail\",\"message\":\"jq not found\",\"duration_ms\":0}" ] \
+        || err "$name without jq printed [${OUT:-<nothing>}]"
+done
+end_case
+
+begin_case "master: without jq the run alerts once through the notifier instead of staying silent"
+mkdir -p "$C/h/checks"
+cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit quick 1 ok fine' > "$C/h/checks/quick.sh"
+env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
+    ACTIVITY_MESH_NOTIFY_CMD="tee -a $C/notified" ACTIVITY_MESH_JQ=/nonexistent/jq bash "$C/h/master.sh" --dry-run >/dev/null 2>&1
+[ ! -s "$C/notified" ] || err "a dry run must not notify: $(cat "$C/notified")"
+run_master ACTIVITY_MESH_JQ=/nonexistent/jq
+rc=$?
+[ "$rc" = 0 ] || err "master exited $rc without jq, want 0"
+sent=$(grep -o 'activity-mesh:' "$C/notified" 2>/dev/null | wc -l | tr -d ' ')
+[ "$sent" = 1 ] || err "one alert expected without jq, got $sent: $(cat "$C/notified" 2>/dev/null)"
+grep -q 'jq не найден' "$C/notified" 2>/dev/null || err "the alert must say in Russian that jq is missing: $(cat "$C/notified" 2>/dev/null)"
+grep -q 'jq not found' "$C/notified" 2>/dev/null && err "English glued into the Russian alert: $(cat "$C/notified")"
+grep -q ' master fail$' "$STATE/alerts.log" 2>/dev/null || err "the alert is not recorded in alerts.log"
+: > "$C/notified"
+run_master ACTIVITY_MESH_JQ=/nonexistent/jq ACTIVITY_MESH_LANG=en
+grep -q 'jq not found' "$C/notified" 2>/dev/null || err "English alert expected with ACTIVITY_MESH_LANG=en: $(cat "$C/notified" 2>/dev/null)"
+grep -q 'не найден' "$C/notified" 2>/dev/null && err "Russian glued into the English alert: $(cat "$C/notified")"
+end_case
+
 begin_case "master: a hung check is cut off and reported, the run still completes"
 mkdir -p "$C/h/checks"
 cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
