@@ -10,6 +10,11 @@ trap 'rm -rf "$WORK"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+toml_ok() {
+    command -v python3 > /dev/null 2>&1 || return 0
+    python3 -c 'import tomllib' 2> /dev/null || return 0
+    python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$1"
+}
 
 # shellcheck source=../../installers/lib/cfgedit.sh
 . "$REPO_ROOT/installers/lib/cfgedit.sh"
@@ -210,6 +215,76 @@ TOML
     printf 'model = "x"\n\n%s\n' "$BLOCK" > "$WANT"
     expect "no trailing newline" replace 0
     pass "a table on an unterminated last line is replaced"
+
+    cat > "$IN" <<TOML
+["mcp_servers"."activity-mesh"]
+command = "node"
+args = ["/old/server.mjs"]
+
+['mcp_servers'."activity-mesh".env]
+FOO = "bar"
+TOML
+    cat > "$WANT" <<TOML
+$BLOCK
+
+['mcp_servers'."activity-mesh".env]
+FOO = "bar"
+TOML
+    expect "quoted parent key" replace 0
+    toml_ok "$GOT" || fail "quoted parent key: the result is not valid TOML: $(cat "$GOT")"
+    pass "a header with the parent key quoted is replaced in place, not duplicated"
+
+    cat > "$IN" <<TOML
+[mcp_servers.activity-mesh.env]
+FOO = "bar"
+
+[mcp_servers.activity-mesh]
+command = "old"
+TOML
+    cat > "$WANT" <<TOML
+[mcp_servers.activity-mesh.env]
+FOO = "bar"
+
+$BLOCK
+TOML
+    expect "sub-table before the table" replace 0
+    toml_ok "$GOT" || fail "sub-table before the table: the result is not valid TOML: $(cat "$GOT")"
+    pass "a sub-table that precedes the table stays where it is while the table is replaced"
+}
+
+test_defines_elsewhere() {
+    local label want found
+    echo "== toml_defines_elsewhere =="
+    probe() {
+        want="$1"; label="$2"; shift 2
+        printf '%s\n' "$@" > "$IN"
+        if toml_defines_elsewhere "$IN" > "$GOT"; then found=yes; else found=no; fi
+        [ "$found" = "$want" ] || fail "$label: expected $want, got $found"
+    }
+    probe yes "dotted keys under [mcp_servers]" 'model = "o3"' '' '[mcp_servers]' 'activity-mesh.command = "node"' 'activity-mesh.args = ["/old/server.mjs"]'
+    [ "$(cat "$GOT")" = "4" ] || fail "the line number of the first dotted key: $(cat "$GOT")"
+    probe yes "inline table under [mcp_servers]" '[mcp_servers]' 'activity-mesh = { command = "node", args = ["/old/server.mjs"] }'
+    probe yes "quoted key with spaces around the dot" '[mcp_servers]' '  "activity-mesh" . command = "node"'
+    probe yes "single-quoted key, inline, no spaces" '[ mcp_servers ]' "'activity-mesh'={command='node'}"
+    probe yes "quoted parent header" '["mcp_servers"]' 'activity-mesh.command = "x"'
+    probe yes "top-level dotted keys" 'model = "o3"' 'mcp_servers.activity-mesh.command = "node"'
+    probe yes "top-level dotted keys, quoted" '"mcp_servers"."activity-mesh".command = "node"'
+    probe yes "top-level inline table, only entry" 'mcp_servers = { activity-mesh = { command = "node", args = ["/x"] } }'
+    probe yes "top-level inline table, later entry" 'mcp_servers = { other = { command = "o" }, "activity-mesh" = { command = "node" } }'
+    probe yes "top-level dotted inline table" 'mcp_servers.activity-mesh = { command = "node" }'
+    pass "dotted keys and inline tables that define the server are found, in every quoting"
+
+    probe no "a plain table" '[mcp_servers.activity-mesh]' 'command = "node"'
+    probe no "a project path that ends in activity-mesh" 'model = "x"' '[projects."/home/u/Projects/activity-mesh"]' 'trust_level = "trusted"'
+    probe no "another server that mentions activity-mesh in its args" '[mcp_servers.other]' 'args = ["/home/u/activity-mesh/mcp/server.mjs"]'
+    probe no "a key that only starts with the name" '[mcp_servers]' 'activity-mesh-extra = { command = "node" }'
+    probe no "commented out keys" '[mcp_servers]' '# activity-mesh.command = "node"' 'other.command = "x"'
+    probe no "the key inside another server's table" '[mcp_servers.other]' 'activity-mesh = 1'
+    probe no "the key in an unrelated table" '[tools]' 'activity-mesh = true'
+    probe no "an inline table of another server" 'mcp_servers = { other = { command = "o" } }'
+    probe no "a sub-table on its own" '[mcp_servers.activity-mesh.env]' 'FOO = "bar"'
+    probe no "an empty file" ''
+    pass "tables, look-alikes, comments and other servers are not mistaken for a definition"
 }
 
 test_strip() {
@@ -285,14 +360,91 @@ args = ["/repo/mcp/server.mjs"]
 [mcp_servers.activity-mesh.env]
 PATH = "/h/.local/share/activity-mesh/dist/bin"
 TOML
-    cat > "$WANT" <<TOML
+    cp "$IN" "$WANT"
+    expect "only the sub-table points into dist" strip 1
+    pass "a sub-table that points into dist, under a table that does not, is left for the caller to report"
+
+    cat > "$IN" <<TOML
+[mcp_servers.activity-mesh.env]
+PATH = "/h/.local/share/activity-mesh/dist/bin"
+
 [mcp_servers.activity-mesh]
 command = "node"
 args = ["/repo/mcp/server.mjs"]
-
 TOML
-    expect "only the sub-table points into dist" strip 0
-    pass "a sub-table that points into dist is dropped on its own"
+    cp "$IN" "$WANT"
+    expect "sub-table first, only it points into dist" strip 1
+    pass "the order of a table and its sub-table makes no difference when the table is not ours"
+
+    cat > "$IN" <<TOML
+model = "gpt-5"
+
+[mcp_servers.activity-mesh.env]
+FOO = "bar"
+
+[mcp_servers.activity-mesh]
+command = "node"
+args = ["/h/.local/share/activity-mesh/dist/current/mcp/server.mjs"]
+
+# the other server
+[mcp_servers.other]
+command = "other-server"
+TOML
+    cat > "$WANT" <<TOML
+model = "gpt-5"
+
+# the other server
+[mcp_servers.other]
+command = "other-server"
+TOML
+    expect "sub-table before the table" strip 0
+    toml_ok "$GOT" || fail "sub-table before the table: the result is not valid TOML: $(cat "$GOT")"
+    if grep -q 'activity-mesh' "$GOT"; then fail "a sub-table placed before its table survived: $(cat "$GOT")"; fi
+    pass "a sub-table placed before the table goes with it, and what is left is valid TOML"
+
+    cat > "$IN" <<TOML
+[mcp_servers.activity-mesh]
+command = "node"
+args = ["/h/.local/share/activity-mesh/dist/current/mcp/server.mjs"]
+
+[[mcp_servers.activity-mesh.tools]]
+name = "a"
+
+[[mcp_servers.activity-mesh.tools]]
+name = "b"
+
+[mcp_servers.other]
+x = 1
+TOML
+    cat > "$WANT" <<TOML
+[mcp_servers.other]
+x = 1
+TOML
+    expect "array-of-tables below the table" strip 0
+    toml_ok "$GOT" || fail "array-of-tables: the result is not valid TOML: $(cat "$GOT")"
+    pass "an array-of-tables under the table goes with it"
+
+    cat > "$IN" <<TOML
+[[mcp_servers.activity-mesh.tools]]
+name = "a"
+
+["mcp_servers"."activity-mesh"]
+command = "node"
+args = ["/c/.local/share/activity-mesh/dist/x.mjs"]
+
+['mcp_servers'.'activity-mesh'.env]
+FOO = "bar"
+
+[mcp_servers.keep]
+y = 2
+TOML
+    cat > "$WANT" <<TOML
+[mcp_servers.keep]
+y = 2
+TOML
+    expect "quoted parent keys" strip 0
+    toml_ok "$GOT" || fail "quoted parent keys: the result is not valid TOML: $(cat "$GOT")"
+    pass "a header with the parent key quoted, in either quote style, is the table too"
 
     cat > "$IN" <<TOML
 [mcp_servers.activity-mesh]
@@ -407,6 +559,7 @@ test_paths
 test_json
 test_replace
 test_strip
+test_defines_elsewhere
 
 echo
 echo "ALL CFGEDIT TESTS PASSED"

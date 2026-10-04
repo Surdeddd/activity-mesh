@@ -109,86 +109,131 @@ config_sync_dir() {
 }
 
 toml_classify() {
-    case "$1" in
-        '[mcp_servers.activity-mesh]'|'[mcp_servers."activity-mesh"]'|"[mcp_servers.'activity-mesh']") TOML_KIND=main ;;
-        '[mcp_servers.activity-mesh.'*|'[mcp_servers."activity-mesh".'*|"[mcp_servers.'activity-mesh'."*) TOML_KIND=sub ;;
-        *) TOML_KIND=other ;;
-    esac
+    local h="$1" pq cq
+    TOML_KIND=other
+    for pq in mcp_servers '"mcp_servers"' "'mcp_servers'"; do
+        for cq in activity-mesh '"activity-mesh"' "'activity-mesh'"; do
+            case "$h" in
+                "[$pq.$cq]") TOML_KIND=main; return 0 ;;
+                "[$pq.$cq."*|"[[$pq.$cq."*) TOML_KIND=sub; return 0 ;;
+            esac
+        done
+    done
 }
 
 toml_edit_server() {
     local mode="$1" cfg="$2" out="$3" arg1="${4:-}" arg2="${5:-}"
-    local lines=() n=0 i line norm code chunk="" body="" pend="" hit=0 drop=0 replaced=0 changed=0 dropped first header eof
+    local lines=() n=0 i pass pass_from=2 line norm code chunk body pend hit dropped first header eof dest
+    local any_hit=0 replaced=0 changed=0
     while IFS= read -r line || [[ -n "$line" ]]; do
         lines[n]="$line"
         n=$((n + 1))
     done < "$cfg"
-    : > "$out"
-    for ((i = 0; i <= n; i++)); do
-        header=0
-        eof=0
-        if [[ $i -eq $n ]]; then
-            eof=1
-            line=""
-            norm=""
-        else
-            line="${lines[i]}"
-            norm="${line//[[:space:]]/}"
-            norm="${norm%%#*}"
-            if [[ "$norm" == '['* ]]; then header=1; fi
-        fi
-        if [[ $header -eq 1 || $eof -eq 1 ]]; then
-            if [[ -n "$chunk" ]]; then
-                dropped=0
-                case "$mode:$chunk" in
-                    replace:main)
-                        if [[ $replaced -eq 0 ]]; then printf '%s\n' "$arg1" >> "$out"; replaced=1; fi
-                        changed=1 ;;
-                    replace:sub)
-                        printf '%s' "$body" >> "$out" ;;
-                    strip:main)
-                        if [[ $hit -eq 1 ]]; then dropped=1; drop=1; changed=1; else drop=0; printf '%s' "$body" >> "$out"; fi ;;
-                    strip:sub)
-                        if [[ $hit -eq 1 || $drop -eq 1 ]]; then dropped=1; drop=1; changed=1; else printf '%s' "$body" >> "$out"; fi ;;
-                esac
-                if [[ $dropped -eq 1 ]]; then
-                    while [[ -n "$pend" ]]; do
-                        first="${pend%%$'\n'*}"
-                        [[ -z "${first//[[:space:]]/}" ]] || break
-                        pend="${pend#*$'\n'}"
-                    done
-                fi
-                printf '%s' "$pend" >> "$out"
-                chunk=""
-                body=""
-                pend=""
-                hit=0
-            fi
-            if [[ $header -eq 1 ]]; then
-                toml_classify "$norm"
-                if [[ "$TOML_KIND" == other ]]; then
-                    drop=0
-                    printf '%s\n' "$line" >> "$out"
-                else
-                    chunk="$TOML_KIND"
-                    body="$line"$'\n'
-                fi
-            fi
-        elif [[ -n "$chunk" ]]; then
-            if [[ -z "$norm" ]]; then
-                pend="$pend$line"$'\n'
+    if [[ "$mode" == strip ]]; then pass_from=1; fi
+    for ((pass = pass_from; pass <= 2; pass++)); do
+        chunk=""
+        body=""
+        pend=""
+        hit=0
+        dest="$out"
+        if [[ $pass -eq 1 ]]; then dest=/dev/null; else : > "$out"; fi
+        for ((i = 0; i <= n; i++)); do
+            header=0
+            eof=0
+            if [[ $i -eq $n ]]; then
+                eof=1
+                line=""
+                norm=""
             else
-                body="$body$pend$line"$'\n'
-                pend=""
-                if [[ "$mode" == strip ]]; then
-                    code="${line%%#*}"
-                    if [[ -n "$arg1" && "$code" == *"$arg1"* ]]; then hit=1; fi
-                    if [[ -n "$arg2" && "$code" == *"$arg2"* ]]; then hit=1; fi
-                fi
+                line="${lines[i]}"
+                norm="${line//[[:space:]]/}"
+                norm="${norm%%#*}"
+                if [[ "$norm" == '['* ]]; then header=1; fi
             fi
-        else
-            printf '%s\n' "$line" >> "$out"
-        fi
+            if [[ $header -eq 1 || $eof -eq 1 ]]; then
+                if [[ -n "$chunk" ]]; then
+                    dropped=0
+                    if [[ $pass -eq 1 ]]; then
+                        if [[ "$chunk" == main && $hit -eq 1 ]]; then any_hit=1; fi
+                    else
+                        case "$mode:$chunk" in
+                            replace:main)
+                                if [[ $replaced -eq 0 ]]; then printf '%s\n' "$arg1" >> "$dest"; replaced=1; fi
+                                changed=1 ;;
+                            replace:sub)
+                                printf '%s' "$body" >> "$dest" ;;
+                            strip:main|strip:sub)
+                                if [[ $any_hit -eq 1 ]]; then dropped=1; changed=1; else printf '%s' "$body" >> "$dest"; fi ;;
+                        esac
+                    fi
+                    if [[ $dropped -eq 1 ]]; then
+                        while [[ -n "$pend" ]]; do
+                            first="${pend%%$'\n'*}"
+                            [[ -z "${first//[[:space:]]/}" ]] || break
+                            pend="${pend#*$'\n'}"
+                        done
+                    fi
+                    printf '%s' "$pend" >> "$dest"
+                    chunk=""
+                    body=""
+                    pend=""
+                    hit=0
+                fi
+                if [[ $header -eq 1 ]]; then
+                    toml_classify "$norm"
+                    if [[ "$TOML_KIND" == other ]]; then
+                        printf '%s\n' "$line" >> "$dest"
+                    else
+                        chunk="$TOML_KIND"
+                        body="$line"$'\n'
+                    fi
+                fi
+            elif [[ -n "$chunk" ]]; then
+                if [[ -z "$norm" ]]; then
+                    pend="$pend$line"$'\n'
+                else
+                    body="$body$pend$line"$'\n'
+                    pend=""
+                    if [[ "$mode" == strip ]]; then
+                        code="${line%%#*}"
+                        if [[ -n "$arg1" && "$code" == *"$arg1"* ]]; then hit=1; fi
+                        if [[ -n "$arg2" && "$code" == *"$arg2"* ]]; then hit=1; fi
+                    fi
+                fi
+            else
+                printf '%s\n' "$line" >> "$dest"
+            fi
+        done
     done
     [[ $changed -eq 1 ]]
+}
+
+TOML_PARENT_RE='(mcp_servers|"mcp_servers"|'"'mcp_servers'"')'
+TOML_CHILD_RE='(activity-mesh|"activity-mesh"|'"'activity-mesh'"')'
+
+toml_defines_elsewhere() {
+    local cfg="$1" line norm n=0 where=top re_key re_dotted re_inline
+    re_key="^[[:space:]]*${TOML_CHILD_RE}[[:space:]]*[.=]"
+    re_dotted="^[[:space:]]*${TOML_PARENT_RE}[[:space:]]*\\.[[:space:]]*${TOML_CHILD_RE}[[:space:]]*[.=]"
+    re_inline="^[[:space:]]*${TOML_PARENT_RE}[[:space:]]*=[[:space:]]*\\{(.*[{,])?[[:space:]]*${TOML_CHILD_RE}[[:space:]]*[.=]"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        n=$((n + 1))
+        norm="${line//[[:space:]]/}"
+        norm="${norm%%#*}"
+        [[ -n "$norm" ]] || continue
+        if [[ "$norm" == '['* ]]; then
+            case "$norm" in
+                '[mcp_servers]'|'["mcp_servers"]'|"['mcp_servers']") where=servers ;;
+                *) where=other ;;
+            esac
+            continue
+        fi
+        case "$where" in
+            servers)
+                if [[ "$line" =~ $re_key ]]; then printf '%s\n' "$n"; return 0; fi ;;
+            top)
+                if [[ "$line" =~ $re_dotted ]] || [[ "$line" =~ $re_inline ]]; then printf '%s\n' "$n"; return 0; fi ;;
+        esac
+    done < "$cfg"
+    return 1
 }

@@ -140,7 +140,8 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   `activity-mesh` MCP server (`claude mcp remove activity-mesh --scope user`,
   or `jq` on `~/.claude.json` without the `claude` CLI) and the
   `[mcp_servers.activity-mesh]` table of `~/.codex/config.toml` (with its
-  sub-tables; the comments around it stay). Each edited file gets a
+  sub-tables and arrays of tables, wherever they sit in the file; the comments
+  around it stay). Each edited file gets a
   `.bak-<timestamp>` copy, symlinked files are edited in their target with
   their permissions kept, and entries that point at a repo checkout are left
   alone. A Hermes entry is only reported, and so is anything in `config.toml`

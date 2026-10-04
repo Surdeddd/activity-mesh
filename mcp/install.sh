@@ -22,6 +22,7 @@ if [[ ! -f "$CFGEDIT" ]]; then echo "ERR: missing helper $CFGEDIT" >&2; exit 1; 
 . "$CFGEDIT"
 if [[ -z "$NODE_BIN" ]]; then echo "ERR: node not on PATH (need 20+)" >&2; exit 1; fi
 
+CODEX_REFUSED=0
 say() { printf '%s\n' "$*"; }
 plan() { if [[ $DRY_RUN -eq 1 ]]; then say "  [dry-run] $*"; else say "  $*"; fi; }
 
@@ -76,10 +77,17 @@ codex_block() {
 }
 
 wire_codex() {
-  local cfg="$HOME/.codex/config.toml" has=0 block tmp bak
+  local cfg="$HOME/.codex/config.toml" has=0 block tmp bak at
   say "Codex → $cfg"
   block="$(codex_block)"
   if [[ -f "$cfg" ]] && toml_edit_server replace "$cfg" /dev/null "$block"; then has=1; fi
+  if [[ $has -eq 0 && -f "$cfg" ]] && at="$(toml_defines_elsewhere "$cfg")"; then
+    say "  WARN: $cfg already defines activity-mesh at line $at (dotted keys or an inline table) — a second definition would make it invalid TOML, so it is left untouched."
+    say "  Replace that definition by hand with:"
+    printf '%s\n' "$block" | sed 's/^/    /'
+    CODEX_REFUSED=1
+    return 0
+  fi
   if [[ $DRY_RUN -eq 1 ]]; then
     if [[ $has -eq 1 ]]; then
       plan "would replace the existing [mcp_servers.activity-mesh] block"
@@ -171,7 +179,12 @@ main() {
   wire_hermes
   note_openclaw
   say ""
-  say "done. restart your runtimes to pick up the new server."
+  if [[ $CODEX_REFUSED -eq 0 ]]; then
+    say "done. restart your runtimes to pick up the new server."
+  else
+    say "done, except Codex (see the WARN above). restart the runtimes that were wired."
+  fi
+  [[ $CODEX_REFUSED -eq 0 ]]
 }
 
 main "$@"

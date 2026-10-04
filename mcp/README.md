@@ -101,8 +101,8 @@ The installer registers `<checkout>/mcp/server.mjs` with:
   `~/.claude/settings.json` are not read by Claude Code, so nothing is written
   there.
 - **Codex** — `~/.codex/config.toml`: appends `[mcp_servers.activity-mesh]`, or
-  replaces the existing table in place (written `activity-mesh`,
-  `"activity-mesh"` or `'activity-mesh'`), after saving
+  replaces the existing table in place (the server name, and `mcp_servers`
+  itself, may each be bare, `"quoted"` or `'quoted'`), after saving
   `config.toml.bak-<timestamp>`. A replace resets the table's own keys:
   `command` and `args` are rewritten, and anything else you set directly inside
   `[mcp_servers.activity-mesh]` (`enabled = false`, a startup timeout, ...) is
@@ -111,7 +111,12 @@ The installer registers `<checkout>/mcp/server.mjs` with:
   blank lines around them are kept. Replace and append both write a new file
   beside the target and rename it into place, so an interrupted run never
   leaves a half-written config, and a re-run that would change nothing writes
-  nothing.
+  nothing. When the server is already defined some other way (dotted keys such
+  as `activity-mesh.command = ...` under `[mcp_servers]` or at the top of the
+  file, or an inline table), a second `[mcp_servers.activity-mesh]` table would
+  make the file invalid TOML, so the installer leaves the file alone, prints
+  the line it found and the block to paste in by hand, still wires the other
+  runtimes, and exits non-zero (also with `--dry-run`).
 - **Hermes** — `~/.hermes/config.yaml`: appends a stdio MCP entry (same server
   as the other clients); skipped if Hermes is not installed, and printed for
   you to add by hand when the file already has a top-level `mcp_servers:`.
@@ -126,7 +131,9 @@ idempotent — re-running just overwrites the `activity-mesh` entry.
 `--dry-run` only prints the plan.
 
 `installers/uninstall.sh` removes the Claude Code and Codex registrations that
-point into the `dist/` it deletes, and tells you about a Hermes entry.
+point into the `dist/` it deletes (for Codex the whole server: its table, and
+every sub-table of it wherever they sit in the file), and tells you about a
+Hermes entry and about anything else that still points into `dist/`.
 
 ## Binary resolution
 

@@ -38,6 +38,16 @@ toml_ok() {
     "$TOOLS/python3" -c 'import tomllib' 2>/dev/null || return 0
     "$TOOLS/python3" -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$1"
 }
+CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+codex_loads() {
+    env -i HOME="$1" CODEX_HOME="$1/.codex" PATH="$(dirname "$CODEX_BIN"):/usr/bin:/bin" TMPDIR="$WORK/tmp" "$CODEX_BIN" mcp list > /dev/null 2>&1
+}
+codex_usable() {
+    [ -n "$CODEX_BIN" ] || return 1
+    mkdir -p "$WORK/codex-baseline/home/.codex"
+    : > "$WORK/codex-baseline/home/.codex/config.toml"
+    codex_loads "$WORK/codex-baseline/home"
+}
 
 seed_claude_md() {
     printf '%b' '# Rules\n\n## Memory canonical sources (x)\n\n| a | b |\n|---|---|\n\n## Next section\n\ntext\n' > "$1"
@@ -212,6 +222,24 @@ test_session_end_flush() {
     pass "--help prints a usage line and an unknown flag is refused without touching the hook"
 }
 
+expect_codex_refused() {
+    local d="$1" label="$2" server="$REPO_ROOT/mcp/server.mjs" cfg before baks
+    cfg="$d/home/.codex/config.toml"
+    before="$(sum_of "$cfg")"
+    baks="$(find "$d/home/.codex" -name '*.bak-*' | wc -l | tr -d ' ')"
+    : > "$WORK/shim.log"
+    run_capture "$d/out-refused.txt" sandbox bash "$REPO_ROOT/mcp/install.sh" ${3:+"$3"}
+    [ "$RC" -ne 0 ] || { cat "$d/out-refused.txt" >&2; fail "$label: mcp/install.sh must exit non-zero"; }
+    [ "$(sum_of "$cfg")" = "$before" ] || fail "$label: config.toml was modified: $(cat "$cfg")"
+    [ "$(find "$d/home/.codex" -name '*.bak-*' | wc -l | tr -d ' ')" = "$baks" ] || fail "$label: a backup was written"
+    grep -q 'WARN' "$d/out-refused.txt" && grep -q 'by hand' "$d/out-refused.txt" || fail "$label: no warning: $(cat "$d/out-refused.txt")"
+    grep -qF 'command = ' "$d/out-refused.txt" || fail "$label: the block to paste is not shown: $(cat "$d/out-refused.txt")"
+    if [ -z "${3:-}" ]; then
+        grep -qxF "claude mcp add activity-mesh --scope user -- $TOOLS/node $server" "$WORK/shim.log" \
+            || fail "$label: the Claude registration was skipped after the Codex refusal: $(cat "$WORK/shim.log")"
+    fi
+}
+
 test_mcp_install() {
     local d="$WORK/m" server="$REPO_ROOT/mcp/server.mjs" cfg before out hdr baks
     echo "== mcp/install.sh =="
@@ -249,7 +277,7 @@ test_mcp_install() {
     [ "$(find "$d/home/.codex" -name 'config.toml.bak-*' | wc -l | tr -d ' ')" = "1" ] || fail "second run wrote another backup"
     pass "a second run leaves config.toml untouched"
 
-    for hdr in '[mcp_servers.activity-mesh]' "[mcp_servers.'activity-mesh']" '[ mcp_servers . "activity-mesh" ]  # mine'; do
+    for hdr in '[mcp_servers.activity-mesh]' "[mcp_servers.'activity-mesh']" '[ mcp_servers . "activity-mesh" ]  # mine' '["mcp_servers"."activity-mesh"]' "['mcp_servers'.\"activity-mesh\"]"; do
         printf '%s\n' "$hdr" 'command = "node"' 'args = ["/old/path/server.mjs"]' > "$cfg"
         run_capture "$d/out-hdr.txt" sandbox bash "$REPO_ROOT/mcp/install.sh"
         [ "$RC" -eq 0 ] || fail "exit $RC for header $hdr"
@@ -376,6 +404,48 @@ test_mcp_install() {
         pass "without the claude CLI the jq fallback writes through ~/.claude.json symlinks"
     else
         skip "jq not found — jq fallback not exercised"
+    fi
+
+    rm -f "$cfg"
+    printf '%s\n' 'model = "o3"' '' '[mcp_servers]' 'activity-mesh.command = "node"' 'activity-mesh.args = ["/old/path/server.mjs"]' > "$cfg"
+    expect_codex_refused "$d" "dotted keys under [mcp_servers]"
+    grep -q 'line 4' "$d/out-refused.txt" || fail "the refusal does not name the line of the definition: $(cat "$d/out-refused.txt")"
+    printf '%s\n' '[mcp_servers]' 'activity-mesh = { command = "node", args = ["/old/path/server.mjs"] }' > "$cfg"
+    expect_codex_refused "$d" "an inline table under [mcp_servers]"
+    printf '%s\n' 'mcp_servers = { activity-mesh = { command = "node", args = ["/old/path/server.mjs"] } }' > "$cfg"
+    expect_codex_refused "$d" "a top-level inline table"
+    printf '%s\n' 'mcp_servers.activity-mesh.command = "node"' > "$cfg"
+    expect_codex_refused "$d" "top-level dotted keys"
+    pass "a server defined as dotted keys or an inline table is not defined a second time: non-zero exit, the block to paste, nothing written, the other runtimes still wired"
+
+    printf '%s\n' '[mcp_servers]' 'activity-mesh = { command = "node" }' > "$cfg"
+    expect_codex_refused "$d" "--dry-run on an inline table" --dry-run
+    pass "--dry-run reports the same refusal in its exit code and writes nothing"
+
+    printf '%s\n' 'model = "x"' '' '[projects."/home/u/Projects/activity-mesh"]' 'trust_level = "trusted"' > "$cfg"
+    run_capture "$d/out-proj.txt" sandbox bash "$REPO_ROOT/mcp/install.sh"
+    [ "$RC" -eq 0 ] || { cat "$d/out-proj.txt" >&2; fail "a project path that ends in activity-mesh was mistaken for a definition (rc $RC)"; }
+    grep -qxF '[mcp_servers.activity-mesh]' "$cfg" || fail "the table was not appended: $(cat "$cfg")"
+    [ "$(count_of '^\[projects' "$cfg")" = "1" ] || fail "the project table was lost: $(cat "$cfg")"
+    toml_ok "$cfg" || fail "invalid TOML: $(cat "$cfg")"
+    pass "a project whose path ends in activity-mesh is not mistaken for a definition"
+
+    printf '%s\n' '[mcp_servers.activity-mesh.env]' 'FOO = "bar"' > "$cfg"
+    run_capture "$d/out-subonly.txt" sandbox bash "$REPO_ROOT/mcp/install.sh"
+    [ "$RC" -eq 0 ] || { cat "$d/out-subonly.txt" >&2; fail "a lone sub-table stopped the install (rc $RC)"; }
+    grep -qxF '[mcp_servers.activity-mesh]' "$cfg" && grep -qxF '[mcp_servers.activity-mesh.env]' "$cfg" || fail "table or sub-table missing: $(cat "$cfg")"
+    toml_ok "$cfg" || fail "a table added after its sub-table is not valid TOML: $(cat "$cfg")"
+    pass "a lone sub-table does not stop the table from being added"
+
+    if codex_usable; then
+        codex_loads "$d/home" || fail "codex refuses to load a config with a table added after its sub-table: $(cat "$cfg")"
+        printf '%s\n' '["mcp_servers"."activity-mesh"]' 'command = "node"' 'args = ["/old/path/server.mjs"]' > "$cfg"
+        run_capture "$d/out-codex.txt" sandbox bash "$REPO_ROOT/mcp/install.sh"
+        [ "$RC" -eq 0 ] || fail "exit $RC replacing a quoted-parent table"
+        codex_loads "$d/home" || fail "codex refuses to load the replaced quoted-parent table: $(cat "$cfg")"
+        pass "the real codex loads what the installer wrote"
+    else
+        skip "codex is not usable here — its own loader was not consulted"
     fi
 }
 

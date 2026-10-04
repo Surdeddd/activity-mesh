@@ -41,6 +41,16 @@ toml_ok() {
     "$TOOLS/python3" -c 'import tomllib' 2>/dev/null || return 0
     "$TOOLS/python3" -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$1"
 }
+CODEX_BIN="$(command -v codex 2>/dev/null || true)"
+codex_loads() {
+    env -i HOME="$1" CODEX_HOME="$1/.codex" PATH="$(dirname "$CODEX_BIN"):/usr/bin:/bin" TMPDIR="$WORK/tmp" "$CODEX_BIN" mcp list > /dev/null 2>&1
+}
+codex_usable() {
+    [ -n "$CODEX_BIN" ] || return 1
+    mkdir -p "$WORK/codex-baseline/home/.codex"
+    : > "$WORK/codex-baseline/home/.codex/config.toml"
+    codex_loads "$WORK/codex-baseline/home"
+}
 run_path() {
     if [ "$NO_JQ" -eq 1 ]; then echo "$SHIM:$WORK/nojq"; return; fi
     if [ "$WITH_CLAUDE" -eq 1 ]; then echo "$SHIM:$SHIM_CLAUDE:$TOOLS:$BASE_PATH"; else echo "$SHIM:$TOOLS:$BASE_PATH"; fi
@@ -572,6 +582,42 @@ TOML
     [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
     [ "$(sum_of "$cfg")" = "$before" ] || fail "config.toml was rewritten although the table points at a repo checkout"
     pass "a table that points at a repo checkout is left alone"
+
+    new_sandbox codex-order
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.codex"
+    cfg="$U_HOME/.codex/config.toml"
+    cat > "$cfg" <<TOML
+model = "gpt-5"
+
+[mcp_servers.activity-mesh.env]
+FOO = "bar"
+
+["mcp_servers"."activity-mesh"]
+command = "node"
+args = ["$store/dist/current/mcp/server.mjs"]
+
+[[mcp_servers.activity-mesh.tools]]
+name = "a"
+
+# the other server
+[mcp_servers.other]
+command = "other-server"
+TOML
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    if grep -q 'mcp_servers.*activity-mesh' "$cfg"; then fail "a sub-table before the table, or an array-of-tables after it, survived: $(cat "$cfg")"; fi
+    grep -qxF '# the other server' "$cfg" && grep -qxF '[mcp_servers.other]' "$cfg" && grep -qF 'model = "gpt-5"' "$cfg" || fail "unrelated config was lost: $(cat "$cfg")"
+    toml_ok "$cfg" || fail "what is left of config.toml is not valid TOML: $(cat "$cfg")"
+    if grep -q 'by hand' "$S/out.txt"; then fail "a clean strip reported leftovers: $(cat "$S/out.txt")"; fi
+    pass "a sub-table before the table and an array-of-tables after it go with the table, and the rest still loads"
+    if codex_usable; then
+        codex_loads "$U_HOME" || fail "codex refuses to load what the uninstall left: $(cat "$cfg")"
+        pass "the real codex loads what the uninstall left"
+    else
+        skip "codex is not usable here — its own loader was not consulted"
+    fi
 }
 
 test_codex_inline_tables() {
@@ -627,6 +673,21 @@ TOML
     grep -qF '[mcp_servers.helper]' "$cfg" || fail "an unrelated server was removed: $(cat "$cfg")"
     grep -q 'by hand' "$S/out.txt" || fail "another server that points into dist was not reported after the strip: $(cat "$S/out.txt")"
     pass "after the strip, anything else in the file that still points into dist is reported"
+
+    cat > "$cfg" <<TOML
+[mcp_servers.activity-mesh]
+command = "node"
+args = ["/repo/mcp/server.mjs"]
+
+[mcp_servers.activity-mesh.env]
+PATH = "$store/dist/bin"
+TOML
+    before="$(sum_of "$cfg")"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    [ "$(sum_of "$cfg")" = "$before" ] || fail "a table that points at a repo checkout was edited because of its sub-table"
+    grep -q 'by hand' "$S/out.txt" || fail "the sub-table that points into dist was not reported: $(cat "$S/out.txt")"
+    pass "a sub-table that points into dist under a table that is not ours is reported, not edited"
 }
 
 test_hermes_warning() {
