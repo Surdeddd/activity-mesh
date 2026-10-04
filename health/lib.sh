@@ -127,11 +127,15 @@ am_shards() {
 }
 
 am_scan_shards() {
-    local pat="$1" f h n hits=0 lines=0 sample=""
+    local pat="$1" strip="${2:-}" f h n hits=0 lines=0 sample=""
     while IFS= read -r f; do
         n=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
         lines=$(( lines + ${n:-0} ))
-        h=$(grep -cE "$pat" "$f" 2>/dev/null)
+        if [ -n "$strip" ]; then
+            h=$(LC_ALL=C sed -E "$strip" "$f" 2>/dev/null | grep -cE "$pat" 2>/dev/null)
+        else
+            h=$(grep -cE "$pat" "$f" 2>/dev/null)
+        fi
         case "$h" in ''|*[!0-9]*) h=0 ;; esac
         if [ "$h" -gt 0 ]; then
             hits=$(( hits + h ))

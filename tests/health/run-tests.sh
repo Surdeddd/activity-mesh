@@ -242,6 +242,30 @@ expect '.tier == 2 and (.message | startswith("1/51 lines with possible PII"))' 
 expect '.message | contains("sync-conflict-20261003-010203-ABCDEFG")' "the message names the copy so the operator knows where to look"
 end_case
 
+begin_case "redactor-coverage: git SSH remotes, which the redactor keeps, are not PII"
+gen "$SYNC/$LOCAL" 1 $((NOW - 3600)) 60 cli note memory "pushed to git@github.com:Surdeddd/activity-mesh.git" g1
+gen "$SYNC/$LOCAL" 1 $((NOW - 3500)) 60 cli note memory "mirror GIT@GitLab.Example.com:Team/repo.git" g2
+gen "$SYNC/$LOCAL" 1 $((NOW - 3400)) 60 cli note memory "$(printf 'pushed\ngit@github.com:Surdeddd/activity-mesh.git')" g3
+printf '{"v":1,"id":"g4","ts":"%s","host":"%s","agent":"cli","kind":"note","scope":"memory","summary":"\\u003cgit@github.com:Surdeddd/activity-mesh.git\\u003e"}\n' "$(isotime $((NOW - 3300)))" "$HOST" >> "$SYNC/$LOCAL"
+gen "$SYNC/$LOCAL" 1 $((NOW - 3200)) 60 cli note memory "remotes git@a.example.com:x/git@b.example.com:y/z" g5
+run_check redactor-coverage
+expect '.tier == 1 and .status == "ok" and (.message | test("^0 hits in 5 lines"))' "remotes the redactor exempts (any case, after a JSON escape, side by side) must not be counted"
+end_case
+
+begin_case "redactor-coverage: user@host:path/ that is not a git remote is still counted"
+gen "$SYNC/$LOCAL" 1 $((NOW - 3600)) 60 cli note memory "copied to jane@corp.example.com:docs/x" j
+run_check redactor-coverage
+expect '.tier == 2 and (.message | startswith("1/1 lines with possible PII"))' "an address in scp form is still an email"
+end_case
+
+begin_case "redactor-coverage: git-like addresses the redactor still redacts are still counted"
+gen "$SYNC/$LOCAL" 1 $((NOW - 3600)) 60 cli note memory "from xgit@github.com:o/r" x1
+gen "$SYNC/$LOCAL" 1 $((NOW - 3500)) 60 cli note memory "from jane.git@github.com:o/r" x2
+gen "$SYNC/$LOCAL" 1 $((NOW - 3400)) 60 cli note memory "from git@github.com:o" x3
+run_check redactor-coverage
+expect '.tier == 3 and (.message | startswith("3/3 lines with potential PII"))' "a longer local part or a remote without :path/ is an email to the redactor"
+end_case
+
 begin_case "secrets-bypass: a secret written two hours ago is still a critical leak"
 SECRET="AKIA$(printf 'Q%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)"
 gen "$SYNC/$LOCAL" 1 $((NOW - 7200)) 60 cli note memory "key $SECRET" s
