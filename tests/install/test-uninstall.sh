@@ -9,19 +9,42 @@ trap 'rm -rf "$WORK"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
+skip() { echo "SKIP: $*"; }
+mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 sum_of() { cksum < "$1"; }
 
-mkdir -p "$WORK/tmp" "$WORK/shim"
+mkdir -p "$WORK/tmp" "$WORK/shim" "$WORK/shim-claude" "$WORK/tools"
 SHIM="$WORK/shim"
-for c in launchctl systemctl loginctl sudo claude; do
+SHIM_CLAUDE="$WORK/shim-claude"
+TOOLS="$WORK/tools"
+for c in launchctl systemctl loginctl sudo; do
     printf '#!/bin/sh\necho "%s $*" >> "%s/shim.log"\nexit 0\n' "$c" "$WORK" > "$SHIM/$c"
     chmod +x "$SHIM/$c"
+done
+printf '#!/bin/sh\necho "claude $*" >> "%s/shim.log"\nexit 0\n' "$WORK" > "$SHIM_CLAUDE/claude"
+chmod +x "$SHIM_CLAUDE/claude"
+for t in jq python3; do
+    tool_path="$(command -v "$t" 2>/dev/null || true)"
+    if [ -n "$tool_path" ]; then ln -s "$tool_path" "$TOOLS/$t"; fi
 done
 BASE_PATH="/usr/bin:/bin"
 RC=0
 S=""
 U_HOME=""
 U_PREFIX=""
+WITH_CLAUDE=1
+NO_JQ=0
+
+have() { [ -x "$TOOLS/$1" ]; }
+toml_ok() {
+    have python3 || return 0
+    "$TOOLS/python3" -c 'import tomllib' 2>/dev/null || return 0
+    "$TOOLS/python3" -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$1"
+}
+run_path() {
+    if [ "$NO_JQ" -eq 1 ]; then echo "$SHIM:$WORK/nojq"; return; fi
+    if [ "$WITH_CLAUDE" -eq 1 ]; then echo "$SHIM:$SHIM_CLAUDE:$TOOLS:$BASE_PATH"; else echo "$SHIM:$TOOLS:$BASE_PATH"; fi
+}
 
 new_sandbox() {
     local b
@@ -49,7 +72,7 @@ uninstall_run() {
     while [ "$1" != "--" ]; do envs+=("$1"); shift; done
     shift
     set +e
-    env -i HOME="$U_HOME" PATH="$SHIM:$BASE_PATH" PREFIX="$U_PREFIX" ${envs[@]+"${envs[@]}"} \
+    env -i HOME="$U_HOME" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" ${envs[@]+"${envs[@]}"} \
         bash "$REPO_ROOT/installers/uninstall.sh" "$@" > "$out" 2>&1
     RC=$?
     set -e
@@ -140,11 +163,314 @@ test_dry_run() {
     pass "--dry-run prints the plan and removes nothing"
 }
 
+make_nojq_path() {
+    local c p
+    mkdir -p "$WORK/nojq"
+    for c in bash uname id dirname rm mktemp cp cmp date grep readlink stat mv chmod cat sed tr wc head; do
+        p="$(command -v "$c" 2>/dev/null || true)"
+        if [ -n "$p" ] && [ ! -e "$WORK/nojq/$c" ]; then ln -s "$p" "$WORK/nojq/$c"; fi
+    done
+}
+
+test_alternate_prefix() {
+    local b
+    echo "== binaries are removed from ~/.local/bin as well as --prefix =="
+    new_sandbox altprefix
+    mkdir -p "$U_HOME/.local/bin"
+    for b in activity-log activity-watcher activity-mesh-daemon other-tool; do
+        printf '#!/bin/sh\n' > "$U_HOME/.local/bin/$b"
+        chmod +x "$U_HOME/.local/bin/$b"
+    done
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        [ ! -e "$U_HOME/.local/bin/$b" ] || fail "$b was left in ~/.local/bin"
+        [ ! -e "$U_PREFIX/$b" ] || fail "$b was left in the prefix"
+    done
+    [ -e "$U_HOME/.local/bin/other-tool" ] || fail "an unrelated file in ~/.local/bin was removed"
+    pass "a previous ~/.local/bin install is cleaned up and unrelated files stay"
+
+    new_sandbox sameprefix
+    U_PREFIX="$U_HOME/.local/bin"
+    mkdir -p "$U_PREFIX"
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        printf '#!/bin/sh\n' > "$U_PREFIX/$b"
+        chmod +x "$U_PREFIX/$b"
+    done
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC when the prefix is ~/.local/bin"; }
+    [ ! -e "$U_PREFIX/activity-log" ] && [ ! -e "$U_PREFIX/activity-watcher" ] && [ ! -e "$U_PREFIX/activity-mesh-daemon" ] \
+        || fail "binaries were left in ~/.local/bin used as the prefix"
+    pass "--prefix ~/.local/bin works"
+}
+
+test_claude_hooks() {
+    local store settings before
+    echo "== Claude Code hooks pointing into dist are removed, the rest stays =="
+    if ! have jq; then skip "jq not found"; return 0; fi
+    new_sandbox hooks
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$S/dotfiles" "$U_HOME/.claude"
+    settings="$S/dotfiles/settings.json"
+    cat > "$settings" <<JSON
+{
+  "theme": "dark",
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "$store/dist/current/hooks/session-start-digest.sh"}]},
+      {"matcher": "x", "hooks": [{"type": "command", "command": "/opt/keep-start.sh"}]}
+    ],
+    "UserPromptSubmit": [
+      {"matcher": "", "hooks": [
+        {"type": "command", "command": "$store/dist/1.0.0/hooks/user-prompt-router.sh"},
+        {"type": "command", "command": "/opt/keep-prompt.sh"}
+      ]}
+    ],
+    "PreCompact": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "$store/dist/current/hooks/only-ours.sh"}]}
+    ],
+    "Stop": [
+      {"matcher": "", "hooks": [{"type": "command", "command": "/repo/hooks/stop.sh"}]}
+    ]
+  }
+}
+JSON
+    chmod 600 "$settings"
+    ln -s "$settings" "$U_HOME/.claude/settings.json"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    [ -L "$U_HOME/.claude/settings.json" ] || fail "the settings.json symlink was replaced by a regular file"
+    "$TOOLS/jq" -e '.theme == "dark"' "$settings" >/dev/null || fail "unrelated settings were lost: $(cat "$settings")"
+    "$TOOLS/jq" -e '[.hooks.SessionStart[].hooks[].command] == ["/opt/keep-start.sh"]' "$settings" >/dev/null \
+        || fail "SessionStart after uninstall: $("$TOOLS/jq" -c .hooks.SessionStart "$settings")"
+    "$TOOLS/jq" -e '[.hooks.UserPromptSubmit[].hooks[].command] == ["/opt/keep-prompt.sh"]' "$settings" >/dev/null \
+        || fail "UserPromptSubmit after uninstall: $("$TOOLS/jq" -c .hooks.UserPromptSubmit "$settings")"
+    "$TOOLS/jq" -e '.hooks | has("PreCompact") | not' "$settings" >/dev/null || fail "an event left empty by the uninstall was kept"
+    "$TOOLS/jq" -e '[.hooks.Stop[].hooks[].command] == ["/repo/hooks/stop.sh"]' "$settings" >/dev/null || fail "a hook outside dist was touched"
+    if grep -qF "$store/dist" "$settings"; then fail "a reference to dist survived: $(cat "$settings")"; fi
+    [ "$(mode_of "$settings")" = "600" ] || fail "settings.json mode changed to $(mode_of "$settings")"
+    [ -n "$(find "$U_HOME/.claude" -name 'settings.json.bak-*')" ] || fail "no backup of settings.json"
+    [ -z "$(find "$S/dotfiles" -name 'settings.json.*')" ] || fail "temp files left next to settings.json"
+    [ ! -e "$store/dist" ] || fail "dist was not removed"
+    pass "hooks under dist are removed from a symlinked settings.json; others, mode and link stay"
+
+    new_sandbox hooks-only-ours
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.claude"
+    settings="$U_HOME/.claude/settings.json"
+    cat > "$settings" <<JSON
+{"theme": "dark", "hooks": {
+  "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "$store/dist/current/hooks/session-start-digest.sh"}]}],
+  "UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "$store/dist/current/hooks/user-prompt-router.sh"}]}]
+}}
+JSON
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    "$TOOLS/jq" -e '. == {"theme": "dark"}' "$settings" >/dev/null || fail "an emptied hooks object was kept: $(cat "$settings")"
+    pass "when every hook was ours the hooks key goes away and the other settings stay"
+
+    new_sandbox hooks-repo
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.claude"
+    settings="$U_HOME/.claude/settings.json"
+    cat > "$settings" <<JSON
+{"note": "$store/dist/readme", "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "/repo/hooks/session-start-digest.sh"}]}]}}
+JSON
+    before="$(sum_of "$settings")"
+    uninstall_run "$S/out.txt" CLAUDE_SETTINGS="$settings" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    [ "$(sum_of "$settings")" = "$before" ] || fail "settings.json was rewritten although no hook points into dist"
+    [ -z "$(find "$U_HOME/.claude" -name 'settings.json.bak-*')" ] || fail "a backup was written although nothing changed"
+    pass "hooks that point at a repo checkout are left alone, even when dist is mentioned elsewhere"
+}
+
+test_claude_mcp() {
+    local store before cj
+    echo "== the Claude MCP registration pointing into dist is removed =="
+    if ! have jq; then skip "jq not found"; return 0; fi
+    new_sandbox mcp-cli
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    cj="$U_HOME/.claude.json"
+    cat > "$cj" <<JSON
+{"mcpServers": {"activity-mesh": {"command": "node", "args": ["$store/dist/current/mcp/server.mjs"]}, "other": {"command": "o"}}}
+JSON
+    before="$(sum_of "$cj")"
+    : > "$WORK/shim.log"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    grep -qxF "claude mcp remove activity-mesh --scope user" "$WORK/shim.log" || fail "claude mcp remove was not called: $(cat "$WORK/shim.log")"
+    [ "$(sum_of "$cj")" = "$before" ] || fail "the user-scope claude.json was edited directly although the claude CLI is available"
+    pass "with the claude CLI the registration is removed through claude mcp remove"
+
+    new_sandbox mcp-repo
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    cj="$U_HOME/.claude.json"
+    printf '%s\n' '{"mcpServers":{"activity-mesh":{"command":"node","args":["/repo/mcp/server.mjs"]}}}' > "$cj"
+    before="$(sum_of "$cj")"
+    : > "$WORK/shim.log"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    if grep -q 'mcp remove' "$WORK/shim.log"; then fail "claude mcp remove ran for a registration that points at a repo checkout"; fi
+    [ "$(sum_of "$cj")" = "$before" ] || fail "the user-scope claude.json changed"
+    pass "a registration that points at a repo checkout is left alone"
+
+    WITH_CLAUDE=0
+    new_sandbox mcp-jq
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$S/dotfiles"
+    cat > "$S/dotfiles/claude.json" <<JSON
+{"other": 1, "mcpServers": {"activity-mesh": {"command": "node", "args": ["$store/dist/current/mcp/server.mjs"]}, "other": {"command": "o"}}}
+JSON
+    chmod 600 "$S/dotfiles/claude.json"
+    ln -s "$S/dotfiles/claude.json" "$U_HOME/.claude.json"
+    uninstall_run "$S/out.txt" --
+    WITH_CLAUDE=1
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC without the claude CLI"; }
+    [ -L "$U_HOME/.claude.json" ] || fail "the ~/.claude.json symlink was replaced by a regular file"
+    "$TOOLS/jq" -e '(.mcpServers | has("activity-mesh") | not) and .mcpServers.other.command == "o" and .other == 1' "$S/dotfiles/claude.json" >/dev/null \
+        || fail "the jq fallback did not remove exactly the activity-mesh entry: $(cat "$S/dotfiles/claude.json")"
+    [ "$(mode_of "$S/dotfiles/claude.json")" = "600" ] || fail "mode changed to $(mode_of "$S/dotfiles/claude.json")"
+    [ -n "$(find "$U_HOME" -maxdepth 1 -name '.claude.json.bak-*')" ] || fail "no backup of ~/.claude.json"
+    pass "without the claude CLI the entry is removed with jq through the symlink"
+}
+
+test_codex_mcp() {
+    local store cfg before
+    echo "== the Codex MCP table pointing into dist is removed =="
+    new_sandbox codex
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$S/dotfiles" "$U_HOME/.codex"
+    cat > "$S/dotfiles/codex.toml" <<TOML
+model = "gpt-5"
+
+[mcp_servers."activity-mesh"]
+command = "node"
+args = ["$store/dist/current/mcp/server.mjs"]
+
+[mcp_servers."activity-mesh".env]
+FOO = "bar"
+
+# the other server
+[mcp_servers.other]
+command = "other-server"
+TOML
+    chmod 640 "$S/dotfiles/codex.toml"
+    ln -s "$S/dotfiles/codex.toml" "$U_HOME/.codex/config.toml"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    cfg="$S/dotfiles/codex.toml"
+    [ -L "$U_HOME/.codex/config.toml" ] || fail "the config.toml symlink was replaced by a regular file"
+    if grep -q 'activity-mesh' "$cfg"; then fail "the activity-mesh table or its sub-table survived: $(cat "$cfg")"; fi
+    grep -qF 'model = "gpt-5"' "$cfg" && grep -qF '[mcp_servers.other]' "$cfg" && grep -qF 'command = "other-server"' "$cfg" \
+        || fail "unrelated config was lost: $(cat "$cfg")"
+    grep -qxF '# the other server' "$cfg" || fail "the comment that introduces the next table was removed with the block: $(cat "$cfg")"
+    [ "$(mode_of "$cfg")" = "640" ] || fail "config.toml mode changed to $(mode_of "$cfg")"
+    [ -n "$(find "$U_HOME/.codex" -name 'config.toml.bak-*')" ] || fail "no backup of config.toml"
+    toml_ok "$cfg" || fail "config.toml is not valid TOML: $(cat "$cfg")"
+    pass "the table and its sub-tables are removed from a symlinked config.toml; the rest stays"
+
+    new_sandbox codex-repo
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.codex"
+    cfg="$U_HOME/.codex/config.toml"
+    printf '%s\n' '[mcp_servers.activity-mesh]' 'command = "node"' 'args = ["/repo/mcp/server.mjs"]' > "$cfg"
+    before="$(sum_of "$cfg")"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    [ "$(sum_of "$cfg")" = "$before" ] || fail "config.toml was rewritten although the table points at a repo checkout"
+    pass "a table that points at a repo checkout is left alone"
+}
+
+test_hermes_warning() {
+    local store cfg before
+    echo "== a Hermes entry pointing into dist is reported, not edited =="
+    new_sandbox hermes
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.hermes"
+    cfg="$U_HOME/.hermes/config.yaml"
+    printf 'mcp_servers:\n  activity-mesh:\n    command: node\n    args: ["%s/dist/current/mcp/server.mjs"]\n' "$store" > "$cfg"
+    before="$(sum_of "$cfg")"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    [ "$(sum_of "$cfg")" = "$before" ] || fail "the Hermes config was edited"
+    grep -q 'config.yaml' "$S/out.txt" && grep -q 'by hand' "$S/out.txt" || fail "no warning about the Hermes entry: $(cat "$S/out.txt")"
+    pass "the Hermes entry is left in place with a warning"
+}
+
+test_registrations_dry_run() {
+    local store before_s before_c before_t
+    echo "== --dry-run leaves every registration alone =="
+    if ! have jq; then skip "jq not found"; return 0; fi
+    new_sandbox regdry
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.claude" "$U_HOME/.codex"
+    cat > "$U_HOME/.claude/settings.json" <<JSON
+{"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "$store/dist/current/hooks/session-start-digest.sh"}]}]}}
+JSON
+    cat > "$U_HOME/.claude.json" <<JSON
+{"mcpServers": {"activity-mesh": {"command": "node", "args": ["$store/dist/current/mcp/server.mjs"]}}}
+JSON
+    printf '%s\n' '[mcp_servers.activity-mesh]' 'command = "node"' "args = [\"$store/dist/current/mcp/server.mjs\"]" > "$U_HOME/.codex/config.toml"
+    before_s="$(sum_of "$U_HOME/.claude/settings.json")"
+    before_c="$(sum_of "$U_HOME/.claude.json")"
+    before_t="$(sum_of "$U_HOME/.codex/config.toml")"
+    : > "$WORK/shim.log"
+    uninstall_run "$S/out.txt" -- --dry-run
+    [ "$RC" -eq 0 ] || fail "--dry-run exited $RC"
+    [ "$(sum_of "$U_HOME/.claude/settings.json")" = "$before_s" ] || fail "--dry-run edited settings.json"
+    [ "$(sum_of "$U_HOME/.claude.json")" = "$before_c" ] || fail "--dry-run edited ~/.claude.json"
+    [ "$(sum_of "$U_HOME/.codex/config.toml")" = "$before_t" ] || fail "--dry-run edited config.toml"
+    if grep -q 'mcp remove' "$WORK/shim.log"; then fail "--dry-run ran claude mcp remove"; fi
+    [ -d "$store/dist" ] || fail "--dry-run removed dist"
+    grep -q 'settings.json' "$S/out.txt" && grep -q 'config.toml' "$S/out.txt" && grep -q 'claude.json' "$S/out.txt" \
+        || fail "--dry-run does not announce the registrations it would remove: $(cat "$S/out.txt")"
+    pass "--dry-run announces the registrations and edits nothing"
+}
+
+test_without_jq() {
+    local store before
+    echo "== without jq the JSON registrations are reported, not touched =="
+    make_nojq_path
+    new_sandbox nojq
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.claude"
+    cat > "$U_HOME/.claude/settings.json" <<JSON
+{"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "$store/dist/current/hooks/session-start-digest.sh"}]}]}}
+JSON
+    before="$(sum_of "$U_HOME/.claude/settings.json")"
+    NO_JQ=1
+    uninstall_run "$S/out.txt" --
+    NO_JQ=0
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC without jq"; }
+    [ "$(sum_of "$U_HOME/.claude/settings.json")" = "$before" ] || fail "settings.json was edited without jq"
+    grep -q 'jq not found' "$S/out.txt" || fail "no warning about the missing jq: $(cat "$S/out.txt")"
+    [ ! -e "$store/dist" ] || fail "dist was not removed"
+    pass "a missing jq produces a warning and the rest of the uninstall still runs"
+}
+
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
 test_odd_paths
 test_dry_run
+test_alternate_prefix
+test_claude_hooks
+test_claude_mcp
+test_codex_mcp
+test_hermes_warning
+test_registrations_dry_run
+test_without_jq
 
 echo
 echo "ALL UNINSTALL TESTS PASSED"

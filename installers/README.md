@@ -24,20 +24,31 @@ What it does — and fails hard (non-zero exit, no "bootstrap complete") if any 
 3. Checks that the archive carries the three binaries and the runtime layout
    (`VERSION`, `health/`, `hooks/`, `configs/`, `registries/`, unit templates) and
    refuses it otherwise — nothing on the machine has changed at that point.
-4. Installs runtime assets (health scripts, unit templates, registries, default
-   `watcher.yaml`, hooks, MCP server) to `~/.local/share/activity-mesh/dist/<version>/`
-   and points the `dist/current` symlink at it. **Supervisor units reference
-   `dist/current`, never a repo checkout.**
-5. Only then installs `activity-log`, `activity-watcher`, `activity-mesh-daemon` to
-   `--prefix` (default `/usr/local/bin`, sudo only if not writable).
-6. Scaffolds `~/.local/share/activity-mesh`, `~/.local/state/activity-mesh`,
-   `~/Sync/activity`, `~/.config/activity-mesh`; seeds missing registries into the
-   sync dir; runs `activity-log init --sync-dir ... --yes` and `refresh-caches`.
-7. macOS: renders + bootstraps **6 launchd units** (`watcher`, `daemon`, `health`,
+4. **Stages** the three binaries next to their final location, as
+   `<prefix>/.activity-log.new`, `<prefix>/.activity-watcher.new` and
+   `<prefix>/.activity-mesh-daemon.new` (`--prefix`, default `/usr/local/bin`).
+   If the prefix is not writable, this is where `sudo` is asked for — before
+   anything else on the machine has changed, so a refused password leaves the
+   installed binaries, `dist/current` and the config exactly as they were. A
+   failure before the final rename removes the staged files.
+5. Scaffolds `~/.local/share/activity-mesh`, `~/.local/state/activity-mesh`,
+   `~/Sync/activity`, `~/.config/activity-mesh` (`ACTIVITY_MESH_HOME`,
+   `ACTIVITY_MESH_STATE` and `ACTIVITY_MESH_SYNC` relocate the first three).
+6. Installs runtime assets (health scripts, unit templates, registries, default
+   `watcher.yaml`, hooks, MCP server) to `<store>/dist/<version>/`, checks that
+   every required file arrived, and only then points the `dist/current` symlink
+   at it. **Supervisor units reference `dist/current`, never a repo checkout.**
+7. Renames the staged binaries into place (`mv -f`), so the new assets and the new
+   binaries switch together. A warning names an older `activity-log` that wins on
+   `PATH`.
+8. Seeds the default `watcher.yaml` into `~/.config/activity-mesh` and any missing
+   registries into the sync dir; runs `activity-log init --sync-dir ... --yes`
+   and `refresh-caches`.
+9. macOS: renders + bootstraps **6 launchd units** (`watcher`, `daemon`, `health`,
    `heartbeat`, `compact`, `weekly-digest`).
    Linux: renders + enables 2 systemd user units (`watcher`, `daemon`) and calls
    `loginctl enable-linger`; periodic jobs are documented below.
-8. Smoke-verifies: `--version`, `status`, one `emit`, then prints `bootstrap complete`.
+10. Smoke-verifies: `--version`, `status`, one `emit`, then prints `bootstrap complete`.
 
 ### Windows (PowerShell 7+) — CLI only
 
@@ -61,7 +72,7 @@ Signature verification is not implemented on Windows — the script says so.
 |---|---|---|
 | `--dry-run` | off | print the plan, do nothing |
 | `--version vX.Y.Z` | `latest` | pin a release tag (`latest` = newest release, prereleases included) |
-| `--prefix DIR` | `/usr/local/bin` | binary install dir |
+| `--prefix DIR` | `/usr/local/bin` | binary install dir (made absolute; staged files and the final binaries both live here) |
 | `--no-services` | off | render units but do not register them (tests, containers); on macOS they go to `dist/<version>/units/`, not `~/Library/LaunchAgents` (launchd loads that dir at every login) |
 | `--local` | off | use the repo checkout as the asset source and rebuild all three binaries with Go (falls back to the installed binaries only when no toolchain is present) |
 | `--require-signature` | off | fail unless the cosign signature of checksums.txt verifies |
@@ -85,20 +96,40 @@ and the weekly digest run from `~/.local/share/activity-mesh/dist/current/health
 
 ## Upgrades
 
-Re-run the same bootstrap command. A new `dist/<version>/` is installed and
-`current` re-pointed, then the binaries are replaced; units are re-rendered
-and re-registered. Config, state, and the sync dir are never reset. Old
-`dist/<version>` directories can be deleted by hand once nothing references them.
+Re-run the same bootstrap command. The new binaries are staged first (a `sudo`
+prompt, if the prefix needs one, happens there, before anything changes), then
+a new `dist/<version>/` is installed and `current` re-pointed, then the staged
+binaries are renamed into place; units are re-rendered and re-registered.
+Config, state, and the sync dir are never reset. Old `dist/<version>`
+directories can be deleted by hand once nothing references them.
 
 ## Uninstall
 
 ```bash
-bash installers/uninstall.sh            # units + binaries + dist assets; keeps data
-bash installers/uninstall.sh --purge    # also removes state/config; never touches ~/Sync/activity
+bash installers/uninstall.sh            # units + binaries + dist assets + registrations that point into dist; keeps data
+bash installers/uninstall.sh --purge    # also removes the store, state and config dirs; never touches ~/Sync/activity
+bash installers/uninstall.sh --dry-run  # print the plan, change nothing
 ```
 
+- **Binaries** are removed from `--prefix` (default `/usr/local/bin`) and from
+  `~/.local/bin`, where earlier installs put them.
+- **Store and state dirs** follow `ACTIVITY_MESH_HOME` and `ACTIVITY_MESH_STATE`
+  exactly like bootstrap (defaults `~/.local/share/activity-mesh` and
+  `~/.local/state/activity-mesh`). A value that is `/`, `.`, `..` or your home
+  directory is refused before anything is removed.
+- **Hooks and MCP registrations** that point into `<store>/dist/` would be dead
+  once `dist/` is gone, so they are removed first: the Claude Code hooks in
+  `~/.claude/settings.json` (`CLAUDE_SETTINGS` overrides the path), the
+  `activity-mesh` MCP server (`claude mcp remove activity-mesh --scope user`,
+  or `jq` on `~/.claude.json` without the `claude` CLI) and the
+  `[mcp_servers.activity-mesh]` table of `~/.codex/config.toml`. Each edited
+  file gets a `.bak-<timestamp>` copy, symlinked files are edited in their
+  target with their permissions kept, and entries that point at a repo checkout
+  are left alone. A Hermes entry is only reported. The JSON files need `jq`;
+  without it you get the command to run by hand.
+
 ```powershell
-pwsh ./installers/uninstall.ps1         # removes activity-log.exe; -Purge for state
+pwsh ./installers/uninstall.ps1         # removes activity-log.exe; -Purge also removes .local\share\activity-mesh and .local\state\activity-mesh
 ```
 
 ## Templates
@@ -116,8 +147,13 @@ An unresolved placeholder aborts the install.
 assembles a fake release archive, serves it over local HTTP, and bootstraps
 into a temp `HOME` with `--no-services`, then asserts binaries, assets, units,
 registries, a queryable smoke event, and hard failure on checksum mismatch.
+The same target runs `tests/install/test-integration.sh` (the
+integration/hooks/MCP installers: symlinked config files, preserved permissions,
+in-place Codex update) and `tests/install/test-uninstall.sh` (env-relocated
+dirs, hook and MCP removal, alternate prefix), each with a temp `HOME` and
+log-only `PATH` shims for `claude`, `launchctl`, `systemctl` and `sudo`.
 `make test-archives` (needs goreleaser) asserts real release archive contents
-per platform. Both run in CI.
+per platform. All of them run in CI.
 
 ## Troubleshooting
 

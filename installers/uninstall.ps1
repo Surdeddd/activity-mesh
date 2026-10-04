@@ -4,7 +4,8 @@
     There are no scheduled tasks or services to remove: Windows installs are
     CLI-only (see bootstrap.ps1).
 .PARAMETER Purge
-    Also delete the local state directory. Default: keep data.
+    Also delete the local store (.local\share\activity-mesh) and state
+    (.local\state\activity-mesh) directories. Default: keep data.
 .PARAMETER DryRun
     Print plan without performing destructive operations.
 .PARAMETER Prefix
@@ -25,6 +26,7 @@ if (-not $Prefix) { $Prefix = Join-Path $UserHome 'bin' }
 
 $LogBin   = Join-Path $Prefix 'activity-log.exe'
 $StoreDir = Join-Path $UserHome '.local\share\activity-mesh'
+$StateDir = Join-Path $UserHome '.local\state\activity-mesh'
 $SyncDir  = Join-Path $UserHome 'Sync\activity'
 
 function W-Ok   ($m) { Write-Host "[OK]   $m" -ForegroundColor Green }
@@ -44,12 +46,14 @@ if (Test-Path $LogBin) {
 }
 
 if ($Purge) {
-    if (Test-Path $StoreDir) {
-        Invoke-Step "purge $StoreDir" { Remove-Item -Recurse -Force $StoreDir }
+    foreach ($dir in @($StoreDir, $StateDir)) {
+        if (Test-Path $dir) {
+            Invoke-Step "purge $dir" { Remove-Item -Recurse -Force $dir }
+        }
     }
     W-Warn "left $SyncDir alone — it's the cross-host source-of-truth, delete by hand if intended"
 } else {
-    W-Ok "preserved data: $StoreDir $SyncDir"
+    W-Ok "preserved data: $StoreDir $StateDir $SyncDir"
 }
 
 W-Ok 'uninstall complete'
