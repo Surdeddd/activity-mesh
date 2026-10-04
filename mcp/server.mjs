@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import process from "node:process";
@@ -108,12 +108,14 @@ function dayBounds(daysAgo) {
   return [start.getTime(), end.getTime()];
 }
 
+const WINDOW_FORMS = "today | yesterday | <N>h | <N>d | since:<26-char ULID>";
+
 async function activityDigest({ window = "today", group_by = "scope" } = {}) {
-  let since = "24h", lo = null, hi = null;
+  let since, lo = null, hi = null;
   if (window === "today") { since = "24h"; [lo, hi] = dayBounds(0); }
   else if (window === "yesterday") { since = "48h"; [lo, hi] = dayBounds(1); }
-  else if (window === "7d") since = "7d";
-  else if (window?.startsWith?.("since:")) {
+  else if (typeof window === "string" && /^[1-9]\d{0,4}[hd]$/.test(window)) since = window;
+  else if (typeof window === "string" && window.startsWith("since:")) {
     const ms = ulidToMs(window.slice(6));
     if (ms === null) throw new Error("since: window requires a 26-char ULID");
     const ageH = Math.max(1, Math.ceil((Date.now() - ms) / 3600000));
@@ -121,11 +123,12 @@ async function activityDigest({ window = "today", group_by = "scope" } = {}) {
     lo = ms;
     hi = Date.now() + 86400000;
   }
+  else throw new Error(`unknown window ${JSON.stringify(window)}: expected ${WINDOW_FORMS}`);
   let events = parseJsonl(await run(resolveBin(), ["query", "--since", since, "--limit", "0", "--format", "json"]));
   if (lo !== null) {
     events = events.filter(e => { const t = Date.parse(e.ts); return t >= lo && t < hi; });
   }
-  const groups = {};
+  const groups = Object.create(null);
   for (const e of events) {
     const key = e[group_by] || "(none)";
     (groups[key] ||= []).push(e);
@@ -151,8 +154,8 @@ const TOOLS = [
     inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" }, since: { type: "string", default: "7d" }, until: { type: "string" }, limit: { type: "number", default: 20 } } },
     annotations: { title: "Search activity", ...READONLY } },
   { name: "activity_digest",
-    description: "Get pre-summarized digest of activity for a time window: today | yesterday | 7d | since:<26-char ULID> (events at or after that ULID's timestamp).",
-    inputSchema: { type: "object", properties: { window: { type: "string", default: "today", description: "today | yesterday | 7d | since:<ULID>" }, group_by: { type: "string", enum: ["scope", "agent", "kind"], default: "scope" } } },
+    description: "Get pre-summarized digest of activity for a time window: today | yesterday | <N>h | <N>d | since:<26-char ULID> (events at or after that ULID's timestamp).",
+    inputSchema: { type: "object", properties: { window: { type: "string", default: "today", description: "today | yesterday | <N>h | <N>d | since:<ULID>" }, group_by: { type: "string", enum: ["scope", "agent", "kind"], default: "scope" } } },
     annotations: { title: "Activity digest", ...READONLY } },
 ];
 
@@ -171,14 +174,23 @@ async function dispatchTool(name, args) {
 }
 
 async function readResource(uri) {
-  const m = uri.match(/^activity:\/\/(recent|digest)\/(.+)$/);
+  const m = typeof uri === "string" ? uri.match(/^activity:\/\/(recent|digest)\/(.+)$/) : null;
   if (!m) throw new Error(`unsupported uri: ${uri}`);
-  const [, kind, val] = m;
+  const kind = m[1];
+  const val = decodeURIComponent(m[2]);
   if (kind === "recent") return { uri, mimeType: "application/json", text: JSON.stringify(await activityRecent({ scope: val }), null, 2) };
   return { uri, mimeType: "text/markdown", text: (await activityDigest({ window: val })).markdown };
 }
 
+class RpcError extends Error {
+  constructor(code, message) { super(message); this.rpcCode = code; }
+}
+
 async function handle(req) {
+  if (!req || typeof req !== "object" || Array.isArray(req) || typeof req.method !== "string") {
+    const rid = req?.id;
+    return { jsonrpc: "2.0", id: typeof rid === "string" || typeof rid === "number" ? rid : null, error: { code: -32600, message: "invalid request" } };
+  }
   const { id, method, params } = req;
   try {
     if (method === "initialize") {
@@ -189,7 +201,15 @@ async function handle(req) {
     if (method === "initialized" || method === "notifications/initialized") return null;
     if (method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
     if (method === "tools/call") {
-      const data = await dispatchTool(params?.name, params?.arguments);
+      const name = params?.name;
+      if (!TOOLS.some(t => t.name === name)) throw new RpcError(-32602, `unknown tool: ${name}`);
+      let data;
+      try {
+        data = await dispatchTool(name, params?.arguments);
+      } catch (e) {
+        log("err:", name, e.message);
+        return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: e.message }], isError: true } };
+      }
       return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }], isError: false } };
     }
     if (method === "resources/list") return { jsonrpc: "2.0", id, result: { resources: [], resourceTemplates: RESOURCE_TEMPLATES } };
@@ -203,7 +223,7 @@ async function handle(req) {
   } catch (e) {
     log("err:", method, e.message);
     if (id === undefined || id === null) return null;
-    return { jsonrpc: "2.0", id, error: { code: -32000, message: e.message } };
+    return { jsonrpc: "2.0", id, error: { code: e instanceof RpcError ? e.rpcCode : -32000, message: e.message } };
   }
 }
 
@@ -221,7 +241,9 @@ async function main() {
   }
 }
 
-const entry = fileURLToPath(import.meta.url);
-if (entry === process.argv[1] || entry === resolve(process.argv[1] || "")) main().catch(e => { log("fatal:", e.stack); process.exit(1); });
+const isMain = (() => {
+  try { return realpathSync(process.argv[1] || "") === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; }
+})();
+if (isMain) main().catch(e => { log("fatal:", e.stack); process.exit(1); });
 
 export { resolveBin, run, parseJsonl, activityRecent, activitySearch, activityDigest, TOOLS, RESOURCE_TEMPLATES, handle };
