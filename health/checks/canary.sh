@@ -18,7 +18,7 @@ awake=$(( now - $(am_last_wake) ))
 stats=$(grep -aE '"kind"[[:space:]]*:[[:space:]]*"canary"' "$F" 2>/dev/null | tail -n 2000 | "$AM_JQ" -nrR --argjson cutoff $(( now - 86400 )) "$AM_JQ_DEFS"'
     [inputs | fromjson? | select(type == "object" and .kind == "canary")
      | {t: ev_ts,
-        ok: ((.summary // "") | test("ok=1"))}]
+        ok: ((.summary // "" | tostring) | test("ok=1"))}]
     | (map(select(.t >= $cutoff))) as $day
     | "\($day | length) \($day | map(select(.ok | not)) | length) \(map(.t) | max // 0)"')
 read -r count bad last <<< "${stats:-0 0 0}"

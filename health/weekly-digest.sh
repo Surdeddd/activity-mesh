@@ -44,8 +44,8 @@ stats=$(for h in $hosts; do awk -v h="$h" '{ print h "\t" $0 }' "$SYNC/events-$h
        agents: ($w | top3(.agent // "?")),
        hosts: ($hosts | split(" ") | map(select(length > 0)) | map(. as $h | {k: $h, n: ($w | map(select(._h == $h)) | length)})),
        canary_total: ($c | length),
-       canary_bad: ($c | map(select((.summary // "") | test("ok=0") and (test("busy=1") | not))) | length),
-       canary_busy: ($c | map(select((.summary // "") | test("ok=0") and test("busy=1"))) | length)}')
+       canary_bad: ($c | map(select((.summary // "" | tostring) | test("ok=0") and (test("busy=1") | not))) | length),
+       canary_busy: ($c | map(select((.summary // "" | tostring) | test("ok=0") and test("busy=1"))) | length)}')
 [ -n "$stats" ] || stats='{"events":0,"prev":0,"self":0,"scopes":[],"agents":[],"hosts":[],"canary_total":0,"canary_bad":0,"canary_busy":0}'
 
 read -r events_now events_prev events_self canary_total canary_bad canary_busy <<< "$(printf '%s' "$stats" | "$AM_JQ" -r \

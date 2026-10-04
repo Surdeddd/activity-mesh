@@ -156,6 +156,14 @@ run_check canary
 expect '.tier == 1 and .status == "ok"' "valid canaries are still seen next to lines with a non-string ts"
 end_case
 
+begin_case "canary: a canary line with a non-string summary does not blind the check"
+gen "$SYNC/$LOCAL" 5 $((NOW - 3600)) 600 heartbeat canary activity-mesh "hourly heartbeat ok=1" ns
+printf '{"v":1,"id":"num-summary","ts":"%s","host":"h","agent":"heartbeat","kind":"canary","scope":"activity-mesh","summary":5}\n' "$(isotime $((NOW - 60)))" >> "$SYNC/$LOCAL"
+LAST_WAKE=$((NOW - 6 * 3600))
+run_check canary
+expect '.tier == 1 and .status == "ok"' "a numeric summary must not abort the jq program and read as no canary at all"
+end_case
+
 begin_case "canary: no canary yet right after boot is not a failure"
 gen "$SYNC/$LOCAL" 5 $((NOW - 600)) 60 cli note memory "plain note" z
 LAST_WAKE=$((NOW - 600))
@@ -504,6 +512,15 @@ printf '%s' "$OUT" | grep -q '• alerts: 3$' || err "English digest: expected 3
 printf '%s' "$OUT" | grep -q 'canary: 5/155 without an answer' || err "English digest: conclusive canary failures: $OUT"
 printf '%s' "$OUT" | grep -q 'avg 266/500 per fire, max 700/2000 per session' || err "English digest: token budget: $OUT"
 printf '%s' "$OUT" | grep -q 'weekly digest' || err "English digest: title: $OUT"
+end_case
+
+begin_case "weekly-digest: a canary line with a non-string summary does not zero the digest"
+gen "$SYNC/$LOCAL" 10 $((NOW - 3 * 86400)) 3600 heartbeat canary activity-mesh "hourly heartbeat ok=1" wn
+printf '{"v":1,"id":"wn-num","ts":"%s","host":"h","agent":"heartbeat","kind":"canary","scope":"activity-mesh","summary":5}\n' "$(isotime $((NOW - 3600)))" >> "$SYNC/$LOCAL"
+OUT=$(env HOME="$C/home" ACTIVITY_MESH_SYNC="$SYNC" ACTIVITY_MESH_STATE="$STATE" ACTIVITY_MESH_HOME="$STORE" \
+    ACTIVITY_MESH_LANG=en bash "$HEALTH/weekly-digest.sh" --dry-run 2>"$C/stderr")
+printf '%s' "$OUT" | grep -q '• events: 11 ' || err "all 11 events must be counted: $OUT"
+printf '%s' "$OUT" | grep -q 'canary: 0/11 without an answer' || err "all 11 canaries must be counted, none as a failure: $OUT"
 end_case
 
 begin_case "heartbeat: the alert is plain text in one language"
