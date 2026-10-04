@@ -244,7 +244,7 @@ write_config() {
 }
 
 test_sync_protection() {
-    local default_store
+    local default_store tilde='~'
     echo "== every sync dir is protected, whichever of env, config.json or the default names it =="
     new_sandbox syncs
     default_store="$U_HOME/.local/share/activity-mesh"
@@ -287,6 +287,17 @@ test_sync_protection() {
     uninstall_run "$S/out-bad2.txt" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync" -- --purge --dry-run
     [ "$RC" -eq 0 ] || { cat "$S/out-bad2.txt" >&2; fail "ACTIVITY_MESH_SYNC must let an undecodable config.json through, got $RC"; }
     pass "JSON escapes in sync_dir are decoded; an undecodable one stops the uninstall unless ACTIVITY_MESH_SYNC says where the sync dir is"
+
+    printf '{"sync_dir": "~/Dropbox/activity"}\n' > "$default_store/config.json"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Dropbox/activity"
+    uninstall_run "$S/out-tilde.txt" -- --purge --dry-run
+    grep -qF "$U_HOME/Dropbox/activity alone" "$S/out-tilde.txt" || fail "a ~ in sync_dir was not expanded: $(grep -i alone "$S/out-tilde.txt")"
+    uninstall_run "$S/out-tilde-env.txt" ACTIVITY_MESH_SYNC="$tilde/Elsewhere/sync" -- --purge --dry-run
+    grep -qF "$U_HOME/Elsewhere/sync alone" "$S/out-tilde-env.txt" || fail "a ~ in ACTIVITY_MESH_SYNC was not expanded: $(grep -i alone "$S/out-tilde-env.txt")"
+    printf '{"sync_dir": "rel/dir"}\n' > "$default_store/config.json"
+    uninstall_run "$S/out-rel.txt" -- --purge --dry-run
+    grep -qF "/rel/dir alone" "$S/out-rel.txt" || fail "a relative sync_dir was not made absolute: $(grep -i alone "$S/out-rel.txt")"
+    pass "a ~ or a relative path in sync_dir or ACTIVITY_MESH_SYNC is read the way the CLI reads it"
 
     rm -f "$default_store/config.json"
     mkdir -p "$U_HOME/Sync"
