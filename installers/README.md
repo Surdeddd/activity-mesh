@@ -137,7 +137,7 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
     `--no-services`, needs no marker, passes the checks above like any other
     and is removed with `rmdir`, never `rm -rf`: if something has appeared in it
     since the check, `rmdir` fails, the uninstall says so and stops, and nothing
-    is deleted.
+    in it is deleted.
 
   Without `--purge` only `<store>/dist` is held to this: it may hold only
   version dirs (`0.4.0`, `v0.4.0-rc.7`, `dev-local`) and `current`. A directory
@@ -148,11 +148,12 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   your home directory or one of its parents, a sync dir, one of its parents or
   anything inside it, or a directory that holds the default `activity-mesh`
   store, state or config dirs (`~/.local/share`, `~/.config`, ...). Those are
-  compared by resolved name
-  and by device and inode (on macOS also through the `/System/Volumes/Data`
-  spelling of each protected path and its parents), and the uninstall stops when
-  it cannot read an identity (no `stat`, a HOME that does not exist, a name that
-  resolves to another directory than the one it names, no `/bin/pwd` on macOS).
+  compared by resolved name and by device and inode (on macOS also through the
+  `/System/Volumes/Data` spelling of each protected path and its parents),
+  except "anything inside a sync dir", which compares resolved names only. The
+  uninstall stops when it cannot read an identity (no `stat`, a HOME that does
+  not exist, a name that resolves to another directory than the one it names,
+  on macOS neither `/bin/pwd` nor `/usr/bin/pwd`).
 
   What is removed is the resolved path. A symlink you named it by is removed as
   well, and so is every link of a chain (`link1 -> link2 -> dir`, a trailing

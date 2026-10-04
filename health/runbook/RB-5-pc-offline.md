@@ -1,4 +1,4 @@
-# RB-5 — PC machine offline >48h
+# RB-5 — PC machine offline >12h
 
 ## Symptoms
 - `silence` at tier 3 with `host=pc`: `events-pc.jsonl` has not changed for

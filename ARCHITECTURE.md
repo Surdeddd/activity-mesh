@@ -121,7 +121,7 @@ auto-installed by the watcher — run it once per repo you want tracked.
 | layer | trigger | ambient toks | per-fire toks | how |
 |---|---|---|---|---|
 | **L1** schema | always | 48 | — | one-line in CLAUDE.md/AGENTS.md: "you have access to activity log via tool X" |
-| **L2** SessionStart digest | session boot | 0 if no new events | 0-250 | hook reads delta `since last_seen_ulid`, injects ≤8 events with P1+ always shown |
+| **L2** SessionStart digest | session boot | 0 if no new events | 0-250 | hook (sessions with a tty only) injects ≤8 events of the last 24 h without canary/heartbeat, plus ≤5 `--kind error` events of the last 30 days, capped at 1000 chars |
 | **L3** UserPromptSubmit ⭐ | regex match on prompt | 0 if no match | 0-500 | THE BREAKTHROUGH — fetches scoped slice automatically before LLM sees prompt |
 | **L4** lazy MCP tool | agent autonomous call | 0 | +1500 on call | for deeper drill-down |
 | **L5** Telegram push | severity ≥ P1 | 0 | 0 (out-of-band) | for P0 incidents when no session active |
@@ -150,7 +150,7 @@ Claude responds naturally with awareness
 | status / current | `статус`, `чё там`, `что (в работе\|пендинг)` ; `status`, `pending`, `active tasks`, `what's going on` | active sessions + tasks + last 10 events |
 | scope-named | known scopes from the generated `scopes-cache` (e.g. `demo-app`, `infra`, ...) | last 15 events in that scope |
 | agent-named | agent aliases from the generated `agents-cache` (e.g. "what did <agent> do", any language) | last 10 events for that agent |
-| incident | `incident`, `авария`, `падал`, `сломал`, `crashed`, `failed` | P0/P1 events last 7 days |
+| incident | `incident`, `авария`, `падал`, `сломал`, `crashed`, `failed` | ≤5 `--kind error` events of the last 30 days |
 
 **Anti-triggers** (suppress injection): `что такое X`, `как сделать X`, `напиши X` — these are definition / how-to / creation, not recall.
 
@@ -161,7 +161,7 @@ Claude responds naturally with awareness
 ```
 activity_recent(scope?, agent?, host?, since?, limit=20) → events[]
 activity_search(query, since?, until?, limit=20) → events[]
-activity_digest(window="today" | "yesterday" | "7d" | "since:ULID", group_by="scope") → markdown
+activity_digest(window="today" | "yesterday" | "<N>h" | "<N>d" | "since:ULID", group_by="scope") → markdown
 ```
 
 ## Token budget proof (tiktoken cl100k_base)
@@ -376,7 +376,7 @@ wrong.
 - RB-2: secret leaked into log (urgent)
 - RB-3: Syncthing wholesale failure
 - RB-4: hook auto-disabled, fallback growing
-- RB-5: PC machine offline >48h
+- RB-5: PC machine offline >12h
 - RB-6: launchd plist won't load
 - RB-7: schema drift unbounded
 - RB-8: search latency runaway

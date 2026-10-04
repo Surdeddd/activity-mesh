@@ -20,9 +20,10 @@ MCP server and uninstall are hardened.
   event is now redacted first and the summary capped afterwards; redaction
   markers can no longer push it past 500 characters, and the audit log also
   records hits beyond the cap.
-- **Redaction catches more.** Home paths with a non-ASCII user name
-  (`/Users/josé`, `C:\Users\Максим`) are redacted, and so is every
-  occurrence of every configured home, nested or overlapping ones included.
+- **Redaction catches more.** Your home directory and the homes listed in
+  `ACTIVITY_MESH_REDACT_HOMES` are redacted even with a non-ASCII user name
+  (`/Users/josé`, `C:\Users\Максим`), every occurrence of each, nested or
+  overlapping ones included; other users' home paths are not redacted.
   Hex secrets longer than 64 digits, hex values behind a quoted name
   (`"SLACK_SIGNING_SECRET": "…"`), `SECRET_KEY_BASE`, and hex string values
   under a secret-named key of a structured `/push` field are caught too.
@@ -38,7 +39,9 @@ MCP server and uninstall are hardened.
   always the oldest 100 lines. Both now scan whole shard files, Syncthing
   conflict copies included, since a copy is replicated like a live shard. A
   historical hit keeps `secrets-bypass` critical until the line is scrubbed
-  (RB-2).
+  (RB-2). `redactor-coverage` does not count the `git@host:owner/repo`
+  remotes the redactor keeps, so a commit message naming a remote no longer
+  pages.
 - **`uninstall.sh` follows `ACTIVITY_MESH_HOME` and `ACTIVITY_MESH_STATE`, and
   `--purge` removes only directories that positively look like
   activity-mesh's own.** Honouring the variables lets a typo point `rm -rf`
@@ -50,11 +53,14 @@ MCP server and uninstall are hardened.
   something has appeared in it since the check, the uninstall stops and
   deletes nothing more. A value that is your home or one of its parents, a
   sync dir, a parent of one or anything inside one, or a parent of the default
-  dirs is refused, compared by resolved name and by device and inode (on macOS
-  also through the `/System/Volumes/Data` spelling), and the uninstall stops
-  when it cannot read an identity. Blanks around a sync dir value are trimmed,
-  and a purge through a chain of links removes every link of the chain. A
-  refusal names what is in the way; see
+  dirs is refused, compared by resolved name and, except for "inside a sync
+  dir", by device and inode (on macOS also through the `/System/Volumes/Data`
+  spelling), and the uninstall stops when it cannot read an identity. Blanks
+  around a sync dir value are trimmed. A purge through a chain of links
+  removes the links that lead to the purged dir and no other, so a path that
+  leads to a file or to nothing loses no link, and a dir that was not there
+  at the check is left alone even if it appears during the run. A refusal
+  names what is in the way; see
   [installers/README.md](installers/README.md#uninstall).
 
 ### Fixed
@@ -81,9 +87,10 @@ MCP server and uninstall are hardened.
 - **Health alerts stop paging for check bugs.** Since mid-September an alert
   went out almost every run, about four a day, and each cause was a bug in a
   check; the items below fix them. On top of that, the same set of failing
-  checks is sent at most once per 24 hours (`ACTIVITY_MESH_ALERT_REPEAT_S`), a
-  new failure goes out at once, an all-clear resets it, and every alert sent
-  is recorded in `alerts.log`.
+  checks is sent at most once per 24 hours (`ACTIVITY_MESH_ALERT_REPEAT_S`; a
+  value that is not a positive number means 24 hours), a new failure goes out
+  at once, an all-clear resets it, and every alert sent is recorded in
+  `alerts.log`.
 - **A health run cannot be stalled by one check.** Checks forked a process per
   line, and a run took 5 to 21 minutes; the checks now read shards and logs in
   one pass. `master.sh` enforces its own per-check timeout
@@ -91,6 +98,9 @@ MCP server and uninstall are hardened.
   which macOS lacks, and reports a check past it at tier 2 as "timed out".
   Without `lib.sh` it exits with a message instead of crashing, and the
   snapshot is saved before the notifier runs.
+- **Health is not silent without `jq`.** The checks printed nothing and
+  `master.sh` exited without a snapshot or an alert. Every check now reports
+  itself failed ("jq not found"), and the run sends an alert that it failed.
 - **`adoption-ratio` is informational.** It counted the heartbeat as a writing
   agent and paged on the ratio. It now leaves self-monitoring out, looks at 7
   days, reports a fractional ratio and stays at tier 1.
@@ -99,7 +109,8 @@ MCP server and uninstall are hardened.
   failure. It now fails only when the newest canary is older than
   `ACTIVITY_MESH_CANARY_STALE_S` (2 h) while the machine has been awake longer
   than that, and a burst of other events can no longer push the canaries out
-  of the lines it reads.
+  of the lines it reads. A canary line whose summary is not a string no
+  longer makes it, or the weekly digest, read as if there were no canaries.
 - **`silence` and `sync-lag` stop blaming the network for sleep.** silence
   waits `ACTIVITY_MESH_WAKE_GRACE_S` (30 min) after boot or wake before
   judging, and sync-lag counts delivery from the wake when the file arrived
@@ -179,12 +190,12 @@ MCP server and uninstall are hardened.
 - **`curl | bash` no longer downgrades and half-installs.** GitHub's
   `releases/latest` skips prereleases and pointed at v0.3.2, so the
   documented install replaced 0.4.0-rc binaries with 0.3.2 ones and then
-  failed on the missing `health/`. `bootstrap.sh` (and `bootstrap.ps1`) now
-  take the newest release including prereleases and refuse an archive without
-  the full runtime layout before anything changes. The binaries are staged
-  first (any `sudo` prompt happens there), `dist/current` is switched, and
-  only then are the binaries renamed into place, so a bad archive or a refused
-  password changes nothing.
+  failed on the missing `health/`. `bootstrap.sh` and `bootstrap.ps1` now
+  take the newest release including prereleases, and `bootstrap.sh` refuses
+  an archive without the full runtime layout before anything changes. The
+  binaries are staged first (the first step that may ask for `sudo`),
+  `dist/current` is switched, and only then are the binaries renamed into
+  place, so a bad archive or a refused password changes nothing.
 - **A bootstrap re-run keeps the configured sync dir.** Every run reset
   `sync_dir` to `~/Sync/activity`; it is now read from `config.json` with its
   JSON escapes decoded, and a value that cannot be decoded stops bootstrap
@@ -278,8 +289,10 @@ MCP server and uninstall are hardened.
   deleted or the index is rebuilt, and deleting the copy also drops the
   events that daemon re-pointed at it from the index until the next rebuild
   (see "Rebuilding the index" in [installers/UPGRADE.md](installers/UPGRADE.md)).
-- **The first health run after the upgrade may repeat one alert**, because the
-  stored alert signature now covers only tier 2 and above.
+- **The first health run after the upgrade sends any standing alert once.**
+  rc.7 stored no alert signature, so a failure at tier 2 or above that is
+  already there goes out on that run; from then on the same set of failing
+  checks is sent at most once per 24 hours.
 - **`/push` is stricter.** Clients that sent a non-integer `v`, fractional
   integer fields, a non-string `priority` or trailing data get 400; the hooks
   in this repo write through the CLI and are not affected.
