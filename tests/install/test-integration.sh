@@ -383,12 +383,60 @@ test_no_author_paths() {
     pass "no script hardcodes the author's home"
 }
 
+test_single_helper() {
+    local defs
+    echo "== the write-through helper is defined once, in installers/lib/cfgedit.sh =="
+    defs="$(grep -rl '^write_through()' "$REPO_ROOT/integration" "$REPO_ROOT/hooks" "$REPO_ROOT/mcp" "$REPO_ROOT/installers" 2>/dev/null | sed "s|^$REPO_ROOT/||" | sort | tr '\n' ' ')"
+    [ "$defs" = "installers/lib/cfgedit.sh " ] || fail "write_through is defined in: $defs"
+    pass "no install script carries its own copy of write_through"
+}
+
+test_missing_helper() {
+    local d="$WORK/nolib" settings_sum claude_sum hook_sum out
+    echo "== a script run without installers/lib refuses before touching anything =="
+    mkdir -p "$d/hooks" "$d/integration" "$d/mcp" "$d/home"
+    cp "$REPO_ROOT/hooks/install.sh" "$d/hooks/install.sh"
+    cp "$REPO_ROOT/integration/install.sh" "$d/integration/install.sh"
+    cp "$REPO_ROOT/integration/update-session-end-flush.sh" "$d/integration/update-session-end-flush.sh"
+    cp "$REPO_ROOT/mcp/install.sh" "$d/mcp/install.sh"
+    : > "$d/mcp/server.mjs"
+    printf '{"hooks":{}}\n' > "$d/settings.json"
+    printf '# my rules\n' > "$d/CLAUDE.md"
+    printf '#!/bin/bash\nSTAGE_OUT=a\nOUT=b\nmv "$STAGE_OUT" "$OUT"\n' > "$d/hook.sh"
+    settings_sum="$(sum_of "$d/settings.json")"
+    claude_sum="$(sum_of "$d/CLAUDE.md")"
+    hook_sum="$(sum_of "$d/hook.sh")"
+    HOME_UNDER_TEST="$d/home"; RUN_PATH="$SHIM:$BASE_PATH"
+
+    run_capture "$d/out-hooks.txt" sandbox CLAUDE_SETTINGS="$d/settings.json" bash "$d/hooks/install.sh"
+    [ "$RC" -ne 0 ] && grep -q 'cfgedit.sh' "$d/out-hooks.txt" || fail "hooks/install.sh did not refuse without its helper (rc=$RC): $(cat "$d/out-hooks.txt")"
+    [ "$(sum_of "$d/settings.json")" = "$settings_sum" ] || fail "hooks/install.sh touched settings.json without its helper"
+
+    run_capture "$d/out-integration.txt" sandbox CLAUDE_MD="$d/CLAUDE.md" bash "$d/integration/install.sh"
+    [ "$RC" -ne 0 ] && grep -q 'cfgedit.sh' "$d/out-integration.txt" || fail "integration/install.sh did not refuse without its helper (rc=$RC): $(cat "$d/out-integration.txt")"
+    [ "$(sum_of "$d/CLAUDE.md")" = "$claude_sum" ] || fail "integration/install.sh touched CLAUDE.md without its helper"
+
+    run_capture "$d/out-flush.txt" sandbox SESSION_END_HOOK="$d/hook.sh" bash "$d/integration/update-session-end-flush.sh"
+    [ "$RC" -ne 0 ] && grep -q 'cfgedit.sh' "$d/out-flush.txt" || fail "update-session-end-flush.sh did not refuse without its helper (rc=$RC): $(cat "$d/out-flush.txt")"
+    [ "$(sum_of "$d/hook.sh")" = "$hook_sum" ] || fail "update-session-end-flush.sh touched the hook without its helper"
+
+    run_capture "$d/out-mcp.txt" sandbox bash "$d/mcp/install.sh"
+    [ "$RC" -ne 0 ] && grep -q 'cfgedit.sh' "$d/out-mcp.txt" || fail "mcp/install.sh did not refuse without its helper (rc=$RC): $(cat "$d/out-mcp.txt")"
+    [ ! -e "$d/home/.codex" ] && [ ! -e "$d/home/.claude.json" ] || fail "mcp/install.sh wrote configuration without its helper"
+
+    out="$(sandbox bash "$d/hooks/install.sh" --help 2>&1)"
+    case "$out" in usage:*) ;; *) fail "--help must work without the helper: $out" ;; esac
+    pass "every install script names the missing helper and changes nothing; --help still works"
+}
+
 if have python3; then test_integration_install; else skip "python3 not found — integration/install.sh needs it"; fi
 if have jq; then test_hooks_install; else skip "jq not found — hooks/install.sh needs it"; fi
 if have python3; then test_session_end_flush; else skip "python3 not found — update-session-end-flush.sh needs it"; fi
 if have node; then test_mcp_install; else skip "node not found — mcp/install.sh needs it"; fi
 test_conflict_free
 test_no_author_paths
+test_single_helper
+test_missing_helper
 
 echo
 echo "ALL INTEGRATION INSTALL TESTS PASSED"

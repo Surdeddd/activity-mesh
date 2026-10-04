@@ -512,6 +512,23 @@ JSON
     pass "a missing jq produces a warning and the rest of the uninstall still runs"
 }
 
+test_missing_helper() {
+    local d
+    echo "== uninstall.sh run without installers/lib refuses before touching anything =="
+    new_sandbox nolib
+    fake_store "$U_HOME/.local/share/activity-mesh" "$U_HOME/.local/state/activity-mesh"
+    d="$S/copy/installers"
+    mkdir -p "$d"
+    cp "$REPO_ROOT/installers/uninstall.sh" "$d/uninstall.sh"
+    set +e
+    env -i HOME="$U_HOME" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" bash "$d/uninstall.sh" --purge > "$S/out.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -ne 0 ] && grep -q 'cfgedit.sh' "$S/out.txt" || fail "uninstall.sh did not refuse without its helper (rc=$RC): $(cat "$S/out.txt")"
+    [ -d "$U_HOME/.local/share/activity-mesh/dist" ] && [ -e "$U_PREFIX/activity-log" ] || fail "something was removed before the refusal"
+    pass "uninstall.sh names the missing helper and changes nothing"
+}
+
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
@@ -525,6 +542,7 @@ test_codex_mcp
 test_hermes_warning
 test_registrations_dry_run
 test_without_jq
+test_missing_helper
 
 echo
 echo "ALL UNINSTALL TESTS PASSED"

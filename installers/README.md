@@ -147,6 +147,19 @@ substituted by bootstrap: `{{BIN_PATH}}`, `{{WATCHER_BIN}}`, `{{DAEMON_BIN}}`,
 `{{TELEGRAM_ENV}}`, `{{ASSETS_DIR}}` (→ `dist/current`), `{{HOME}}`, `{{USER}}`.
 An unresolved placeholder aborts the install.
 
+## Shared helper
+
+The scripts that edit your configuration files (`hooks/install.sh`,
+`mcp/install.sh`, `integration/install.sh`,
+`integration/update-session-end-flush.sh`, `installers/uninstall.sh`) all source
+`installers/lib/cfgedit.sh`, found relative to their own location (`lib/` from
+`installers/`, `../installers/lib/` from `hooks/`, `integration/` and `mcp/`).
+It holds the write-through-symlinks, mode-preserving writer, so there is one
+copy to fix. It ships in the release archive and under
+`dist/<version>/installers/lib/`; `bootstrap.sh` refuses an archive whose
+scripts need it but lack it. A script started without it prints the missing
+path and changes nothing.
+
 ## Testing
 
 `make test-install` runs a hermetic end-to-end install: builds the binaries,

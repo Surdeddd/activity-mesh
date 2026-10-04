@@ -28,6 +28,12 @@ err()  { printf '%b✗%b %s\n' "$R" "$N" "$*" >&2; }
 run()  { if [[ $DRY_RUN -eq 1 ]]; then printf '%bDRY%b %s\n' "$Y" "$N" "$*" >&2; else eval "$*"; fi; }
 run_argv() { if [[ $DRY_RUN -eq 1 ]]; then printf '%bDRY%b %s\n' "$Y" "$N" "$*" >&2; else "$@"; fi; }
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CFGEDIT="$HERE/lib/cfgedit.sh"
+[[ -f "$CFGEDIT" ]] || { err "missing helper $CFGEDIT"; exit 1; }
+# shellcheck source=lib/cfgedit.sh
+. "$CFGEDIT"
+
 UNAME_S="$(uname -s)"
 case "$UNAME_S" in
     Darwin) OS="darwin" ;;
@@ -149,22 +155,6 @@ def prune: if type == "array" then
   then del(.hooks) else . end'
 
 dry() { printf '%bDRY%b %s\n' "$Y" "$N" "$*" >&2; }
-
-write_through() {
-    local real="$1" n=0 t mode tmp
-    while [[ -L "$real" && $n -lt 20 ]]; do
-        t="$(readlink "$real")"
-        case "$t" in /*) real="$t" ;; *) real="$(dirname "$real")/$t" ;; esac
-        n=$((n + 1))
-    done
-    mode="$(stat -c %a "$real" 2>/dev/null || stat -f %Lp "$real" 2>/dev/null)" || mode=""
-    tmp="$(mktemp "$real.XXXXXX")" || return 1
-    if cat > "$tmp" && { [[ -z "$mode" ]] || chmod "$mode" "$tmp"; } && mv -f "$tmp" "$real"; then
-        return 0
-    fi
-    rm -f "$tmp"
-    return 1
-}
 
 edit_config() {
     local f="$1" new="$2" bak

@@ -58,6 +58,7 @@ archives:
       - installers/*.sh
       - installers/*.ps1
       - installers/*.md
+      - installers/lib/*
       - installers/templates/*
       - health/*.sh
       - health/checks/*

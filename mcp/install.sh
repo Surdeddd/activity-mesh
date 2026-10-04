@@ -16,26 +16,14 @@ SERVER="$REPO/mcp/server.mjs"
 NODE_BIN="$(command -v node || true)"
 
 if [[ ! -f "$SERVER" ]]; then echo "ERR: $SERVER not found" >&2; exit 1; fi
+CFGEDIT="$REPO/installers/lib/cfgedit.sh"
+if [[ ! -f "$CFGEDIT" ]]; then echo "ERR: missing helper $CFGEDIT" >&2; exit 1; fi
+# shellcheck source=../installers/lib/cfgedit.sh
+. "$CFGEDIT"
 if [[ -z "$NODE_BIN" ]]; then echo "ERR: node not on PATH (need 20+)" >&2; exit 1; fi
 
 say() { printf '%s\n' "$*"; }
 plan() { if [[ $DRY_RUN -eq 1 ]]; then say "  [dry-run] $*"; else say "  $*"; fi; }
-
-write_through() {
-  local real="$1" n=0 t mode tmp
-  while [[ -L "$real" && $n -lt 20 ]]; do
-    t="$(readlink "$real")"
-    case "$t" in /*) real="$t" ;; *) real="$(dirname "$real")/$t" ;; esac
-    n=$((n + 1))
-  done
-  mode="$(stat -c %a "$real" 2>/dev/null || stat -f %Lp "$real" 2>/dev/null)" || mode=""
-  tmp="$(mktemp "$real.XXXXXX")" || return 1
-  if cat > "$tmp" && { [[ -z "$mode" ]] || chmod "$mode" "$tmp"; } && mv -f "$tmp" "$real"; then
-    return 0
-  fi
-  rm -f "$tmp"
-  return 1
-}
 
 wire_claude() {
   # `claude mcp add` is the only supported way to register a user-scoped server:

@@ -160,6 +160,10 @@ verify_signature() {
     fi
 }
 
+helper_missing() {
+    grep -qF 'lib/cfgedit.sh' "$1/installers/uninstall.sh" 2>/dev/null && [[ ! -f "$1/installers/lib/cfgedit.sh" ]]
+}
+
 RELEASE_DIR=""
 RESOLVED_VERSION=""
 BIN_SRC=""
@@ -201,6 +205,7 @@ install_release() {
     for p in VERSION health/master.sh health/lib.sh hooks configs/watcher.yaml registries/kinds.yaml installers/templates/launchd-daemon.plist.tmpl; do
         [[ -e "$tmp/x/$p" ]] || die "release archive lacks $p — refusing to install"
     done
+    if helper_missing "$tmp/x"; then die "release archive lacks installers/lib/cfgedit.sh — refusing to install"; fi
     RELEASE_DIR="$tmp/x"
     BIN_SRC="$tmp/x"
 }
@@ -263,6 +268,7 @@ install_assets() {
         [[ -f "$req" ]] || die "required asset missing after install: $req"
     done
     [[ -n "$(ls "$dest/health/checks/" 2>/dev/null)" ]] || die "health/checks is empty in installed assets"
+    if helper_missing "$dest"; then die "required asset missing after install: $dest/installers/lib/cfgedit.sh"; fi
     ln -sfn "$dest" "$ASSETS_LINK" || die "cannot update $ASSETS_LINK symlink"
     ok "runtime assets installed → $dest (current → $ASSETS_LINK)"
 }

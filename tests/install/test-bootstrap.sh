@@ -227,6 +227,35 @@ grep -q "required asset missing" "$WORK/bootstrap-bad.out" || fail "unexpected f
 [ "$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")" = "$CURRENT_BEFORE" ] || fail "dist/current switched by a failed install"
 pass "a failure after staging leaves no staged binaries behind"
 
+echo "== the installer helper must ship with the scripts that source it =="
+NOLIB_STAGE="$WORK/stage-nolib"
+cp -R "$STAGE" "$NOLIB_STAGE"
+rm -r "$NOLIB_STAGE/installers/lib"
+NOLIB_ARCHIVE="activity-mesh_0.0.7_${OS}_${ARCH}.tar.gz"
+(cd "$NOLIB_STAGE" && tar -czf "$RELEASE/$NOLIB_ARCHIVE" .)
+(cd "$RELEASE" && sum256 "$NOLIB_ARCHIVE" >> checksums.txt)
+NOLIB_HOME="$WORK/home-nolib"
+mkdir -p "$NOLIB_HOME"
+HOME="$NOLIB_HOME" PREFIX="$WORK/bin-nolib" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version v0.0.7 --no-services > "$WORK/bootstrap-nolib.out" 2>&1 && RC_NOLIB=0 || RC_NOLIB=$?
+[ "$RC_NOLIB" -ne 0 ] || fail "bootstrap must refuse an archive whose uninstall.sh needs installers/lib but lacks it"
+grep -q "installers/lib/cfgedit.sh" "$WORK/bootstrap-nolib.out" || fail "no diagnostics naming the missing helper: $(tail -2 "$WORK/bootstrap-nolib.out")"
+[ ! -e "$WORK/bin-nolib" ] && [ ! -e "$NOLIB_HOME/.local/share/activity-mesh/dist/current" ] || fail "something was installed from an archive that lacks its helper"
+OLDGEN_STAGE="$WORK/stage-oldgen"
+cp -R "$STAGE" "$OLDGEN_STAGE"
+rm -r "$OLDGEN_STAGE/installers/lib"
+printf '#!/bin/sh\nexit 0\n' > "$OLDGEN_STAGE/installers/uninstall.sh"
+OLDGEN_ARCHIVE="activity-mesh_0.0.6_${OS}_${ARCH}.tar.gz"
+(cd "$OLDGEN_STAGE" && tar -czf "$RELEASE/$OLDGEN_ARCHIVE" .)
+(cd "$RELEASE" && sum256 "$OLDGEN_ARCHIVE" >> checksums.txt)
+OLDGEN_HOME="$WORK/home-oldgen"
+mkdir -p "$OLDGEN_HOME"
+HOME="$OLDGEN_HOME" PREFIX="$WORK/bin-oldgen" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version v0.0.6 --no-services > "$WORK/bootstrap-oldgen.out" 2>&1 && RC_OLDGEN=0 || RC_OLDGEN=$?
+[ "$RC_OLDGEN" -eq 0 ] || { cat "$WORK/bootstrap-oldgen.out" >&2; fail "an archive that predates the helper must still install, or rollback to it breaks"; }
+grep -q "bootstrap complete" "$WORK/bootstrap-oldgen.out" || fail "no 'bootstrap complete' for an archive that predates the helper"
+pass "an archive that needs the helper but lacks it is refused; one that predates it still installs"
+
 echo "== a re-run keeps the configured sync dir =="
 CUSTOM_SYNC="$FAKE_HOME/Dropbox/activity"
 HOME="$FAKE_HOME" "$PREFIX_DIR/activity-log" init --sync-dir "$CUSTOM_SYNC" --yes >/dev/null

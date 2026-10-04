@@ -16,21 +16,11 @@ for arg in "$@"; do
     esac
 done
 
-write_through() {
-    local real="$1" n=0 t mode tmp
-    while [ -L "$real" ] && [ "$n" -lt 20 ]; do
-        t="$(readlink "$real")"
-        case "$t" in /*) real="$t" ;; *) real="$(dirname "$real")/$t" ;; esac
-        n=$((n + 1))
-    done
-    mode="$(stat -c %a "$real" 2>/dev/null || stat -f %Lp "$real" 2>/dev/null)" || mode=""
-    tmp="$(mktemp "$real.XXXXXX")" || return 1
-    if cat > "$tmp" && { [ -z "$mode" ] || chmod "$mode" "$tmp"; } && mv -f "$tmp" "$real"; then
-        return 0
-    fi
-    rm -f "$tmp"
-    return 1
-}
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CFGEDIT="$HERE/../installers/lib/cfgedit.sh"
+[ -f "$CFGEDIT" ] || { err "missing helper $CFGEDIT"; exit 1; }
+# shellcheck source=../installers/lib/cfgedit.sh
+. "$CFGEDIT"
 
 [ -f "$HOOK" ] || { err "hook not found: $HOOK"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { err "python3 required"; exit 1; }
