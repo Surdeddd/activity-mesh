@@ -158,6 +158,31 @@ grep -rqF "$CUSTOM_SYNC" "$UNITS_DIR" || fail "units re-rendered without the con
 [ -f "$CUSTOM_SYNC/kinds.yaml" ] || fail "registries not seeded into the configured sync dir"
 pass "a re-run keeps the configured sync dir"
 
+echo "== linux services path (supervisors shimmed) =="
+SHIM="$WORK/shim"
+mkdir -p "$SHIM"
+for c in systemctl loginctl launchctl sudo; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s"\n' "$c" "$WORK/supervisor.log" > "$SHIM/$c"
+    chmod +x "$SHIM/$c"
+done
+printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exec /usr/bin/uname "$@" ;; esac\n' > "$SHIM/uname"
+chmod +x "$SHIM/uname"
+LINUX_ARCHIVE="activity-mesh_${VER}_linux_amd64.tar.gz"
+if [ ! -f "$RELEASE/$LINUX_ARCHIVE" ]; then
+    cp "$RELEASE/$ARCHIVE" "$RELEASE/$LINUX_ARCHIVE"
+    (cd "$RELEASE" && sum256 "$LINUX_ARCHIVE" >> checksums.txt)
+fi
+LINUX_HOME="$WORK/home-linux"
+mkdir -p "$LINUX_HOME"
+HOME="$LINUX_HOME" PREFIX="$WORK/bin-linux" PATH="$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" > "$WORK/bootstrap-linux.out" 2>&1 && RC_LINUX=0 || RC_LINUX=$?
+[ "$RC_LINUX" -eq 0 ] || { cat "$WORK/bootstrap-linux.out" >&2; fail "linux services install exited $RC_LINUX"; }
+for unit in watcher daemon; do
+    grep -qx "systemctl --user restart activity-mesh-$unit.service" "$WORK/supervisor.log" \
+        || fail "activity-mesh-$unit.service not restarted: $(tr '\n' ';' < "$WORK/supervisor.log")"
+done
+pass "linux install restarts both units, so an upgrade runs the new binaries"
+
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'
 import sys, pathlib

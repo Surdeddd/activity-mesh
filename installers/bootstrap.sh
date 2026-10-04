@@ -288,7 +288,9 @@ install_linux_units() {
         systemctl --user daemon-reload || die "systemctl daemon-reload failed"
         systemctl --user enable --now "activity-mesh-${unit}.service" \
             || die "systemctl enable failed for activity-mesh-${unit}"
-        ok "systemd enabled+started activity-mesh-${unit}"
+        systemctl --user restart "activity-mesh-${unit}.service" \
+            || die "systemctl restart failed for activity-mesh-${unit}"
+        ok "systemd enabled+restarted activity-mesh-${unit}"
     done
     info "periodic jobs (health/heartbeat/compact/weekly-digest) run from $ASSETS_LINK/health/ — schedule them with systemd timers or cron (see installers/README.md)"
     if [[ $NO_SERVICES -eq 0 ]]; then
