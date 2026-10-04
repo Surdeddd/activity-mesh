@@ -67,7 +67,8 @@ Signature verification is not implemented on Windows — the script says so.
 | `--require-signature` | off | fail unless the cosign signature of checksums.txt verifies |
 
 Env overrides: `ACTIVITY_MESH_REPO`, `ACTIVITY_MESH_BASE_URL` (custom download
-base; requires `--version`), `ACTIVITY_MESH_SYNC`, `TELEGRAM_ENV`, `PREFIX`, `VERSION`.
+base; requires `--version`), `ACTIVITY_MESH_SYNC`, `ACTIVITY_MESH_HOME`,
+`ACTIVITY_MESH_STATE`, `TELEGRAM_ENV`, `PREFIX`, `VERSION`.
 
 ## Linux periodic jobs
 

@@ -50,8 +50,8 @@ info "host=$HOST os=$OS arch=$ARCH version=$VERSION dry_run=$DRY_RUN local=$LOCA
 LOG_BIN="$PREFIX/activity-log"
 WATCHER_BIN="$PREFIX/activity-watcher"
 DAEMON_BIN="$PREFIX/activity-mesh-daemon"
-STORE_DIR="$HOME/.local/share/activity-mesh"
-STATE_DIR="$HOME/.local/state/activity-mesh"
+STORE_DIR="${ACTIVITY_MESH_HOME:-$HOME/.local/share/activity-mesh}"
+STATE_DIR="${ACTIVITY_MESH_STATE:-$HOME/.local/state/activity-mesh}"
 SYNC_DIR="${ACTIVITY_MESH_SYNC:-$HOME/Sync/activity}"
 if [[ -z "${ACTIVITY_MESH_SYNC:-}" && -f "$STORE_DIR/config.json" ]]; then
     prev="$(sed -n 's/.*"sync_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STORE_DIR/config.json" | head -1)"
@@ -61,6 +61,7 @@ CONFIG_DIR="$HOME/.config/activity-mesh"
 ASSETS_ROOT="$STORE_DIR/dist"
 ASSETS_LINK="$ASSETS_ROOT/current"
 TELEGRAM_ENV="${TELEGRAM_ENV:-$CONFIG_DIR/telegram.env}"
+export ACTIVITY_MESH_HOME="$STORE_DIR" ACTIVITY_MESH_SYNC="$SYNC_DIR" ACTIVITY_MESH_STATE="$STATE_DIR"
 
 ensure_prefix() {
     [[ -d "$PREFIX" ]] && return 0

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset ACTIVITY_MESH_SYNC ACTIVITY_MESH_HOME ACTIVITY_MESH_STATE ACTIVITY_MESH_CONFIG
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -202,6 +203,20 @@ grep -qxF "Environment=ACTIVITY_MESH_BIN=$WORK/bin-linux/activity-log" "$LINUX_H
 grep -q "another activity-log at ~/.local/bin shadows" "$WORK/bootstrap-linux.out" \
     || fail "no warning about the stale ~/.local/bin/activity-log"
 pass "systemd watcher unit carries ACTIVITY_MESH_BIN; a stale ~/.local/bin/activity-log is flagged"
+
+echo "== ACTIVITY_MESH_HOME / ACTIVITY_MESH_STATE steer bootstrap and the binaries alike =="
+ENV_HOME="$WORK/home-env"
+mkdir -p "$ENV_HOME"
+ACTIVITY_MESH_HOME="$WORK/env-store" ACTIVITY_MESH_STATE="$WORK/env-state" \
+    HOME="$ENV_HOME" PREFIX="$WORK/bin-env" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-env.out" 2>&1 && RC_ENV=0 || RC_ENV=$?
+[ "$RC_ENV" -eq 0 ] || { cat "$WORK/bootstrap-env.out" >&2; fail "bootstrap with ACTIVITY_MESH_HOME/STATE exited $RC_ENV"; }
+[ -L "$WORK/env-store/dist/current" ] || fail "runtime assets not installed under ACTIVITY_MESH_HOME"
+grep -qF "\"store_dir\": \"$WORK/env-store\"" "$WORK/env-store/config.json" 2>/dev/null \
+    || fail "activity-log init did not write config.json under ACTIVITY_MESH_HOME"
+[ ! -e "$ENV_HOME/.local/share/activity-mesh" ] || fail "bootstrap and the binaries disagree on the store dir"
+[ -d "$WORK/env-state" ] || fail "ACTIVITY_MESH_STATE ignored"
+pass "ACTIVITY_MESH_HOME / ACTIVITY_MESH_STATE steer bootstrap and the binaries alike"
 
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'
