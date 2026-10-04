@@ -476,6 +476,19 @@ for bad in abc 0 08 -5; do
 done
 end_case
 
+begin_case "master: an invalid alert repeat window falls back to 24 h instead of re-sending every run"
+mkdir -p "$C/h/checks"
+cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit flaky 2 warn "something off"' > "$C/h/checks/flaky.sh"
+for bad in abc 0 -5; do
+    rm -f "$STATE/health-last-alert" "$C/notified"
+    run_master ACTIVITY_MESH_ALERT_REPEAT_S="$bad"
+    run_master ACTIVITY_MESH_ALERT_REPEAT_S="$bad"
+    sent=$(grep -o 'flaky=warn' "$C/notified" 2>/dev/null | wc -l | tr -d ' ')
+    [ "$sent" = 1 ] || err "repeat window [$bad]: the same alert went out $sent times in two runs, want 1"
+done
+end_case
+
 begin_case "master: the health snapshot is saved before the notifier runs"
 mkdir -p "$C/h/checks"
 cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
