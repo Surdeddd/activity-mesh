@@ -155,10 +155,15 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   resolves to another directory than the one it names, no `/bin/pwd` on macOS).
 
   What is removed is the resolved path. A symlink you named it by is removed as
-  well, and so is every link of a chain (`link1 -> link2 -> dir`) that led to
-  it, so a purge leaves no dangling link behind; a link that only leads to the
-  parent of the dir stays. Registrations are matched under both the spelling you
-  gave and the resolved one.
+  well, and so is every link of a chain (`link1 -> link2 -> dir`, a trailing
+  slash in a link target included) that led to it, so a purge leaves no
+  dangling link behind. Only a link that resolves to the removed dir goes: a
+  link that leads to the parent of the dir, or anywhere else, stays, and a
+  chain that ends at a file or at nothing is not touched at all. A store,
+  state, config or `dist` dir that was not there when the checks ran is left
+  alone even if it appears during the uninstall, and a line says so.
+  Registrations are matched under both the spelling you gave and the resolved
+  one.
 - **The sync dir** is never removed, and every candidate is protected:
   `ACTIVITY_MESH_SYNC`, the `sync_dir` in `<store>/config.json` (of the store
   you name and of the default store, read the way bootstrap reads it) and

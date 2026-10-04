@@ -1013,6 +1013,59 @@ test_link_chains() {
     pass "a link that points at the parent of the purged dir, not at the dir, stays"
 }
 
+test_chain_targets() {
+    echo "== --purge removes a link only when it leads to the dir it purged =="
+    new_sandbox chainfile
+    mkdir -p "$U_HOME/dotfiles"
+    printf 'export EDITOR=vi\n' > "$U_HOME/dotfiles/zshrc"
+    ln -s dotfiles/zshrc "$U_HOME/.zshrc"
+    ln -s "$U_HOME/.zshrc" "$S/l1"
+    ln -s d2 "$S/d1"
+    ln -s gone "$S/d2"
+    uninstall_run "$S/out.txt" ACTIVITY_MESH_STATE="$S/l1" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge exited $RC with a state path that leads to a file"; }
+    [ -L "$S/l1" ] && [ -L "$U_HOME/.zshrc" ] && [ -f "$U_HOME/dotfiles/zshrc" ] || fail "a chain of links that ends at a file was touched: $(cat "$S/out.txt")"
+    uninstall_run "$S/out-dangling.txt" ACTIVITY_MESH_STATE="$S/d1" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out-dangling.txt" >&2; fail "--purge exited $RC with a state path that leads nowhere"; }
+    [ -L "$S/d1" ] && [ -L "$S/d2" ] || fail "a chain of links that ends at nothing was touched: $(cat "$S/out-dangling.txt")"
+    pass "a chain of links that ends at a file or at nothing is left as it is"
+
+    new_sandbox chainslash
+    mkdir -p "$S/real-store/dist/0.1"
+    : > "$S/real-store/index.db"
+    ln -s "$S/real-store" "$S/l2"
+    ln -s l2/ "$S/l1"
+    uninstall_run "$S/out.txt" ACTIVITY_MESH_HOME="$S/l1" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge exited $RC through a link whose target ends in a slash"; }
+    [ ! -e "$S/real-store" ] || fail "--purge left the store behind"
+    [ ! -L "$S/l1" ] && [ ! -L "$S/l2" ] || fail "a link of the chain was left dangling: $(cat "$S/out.txt")"
+    pass "a link whose target ends in a slash still leads the walk to the next link"
+}
+
+test_late_dirs() {
+    local late shimdir c
+    echo "== a dir that appears during the uninstall is left alone =="
+    new_sandbox late
+    late="$S/later"
+    shimdir="$WORK/shim-late"
+    mkdir -p "$shimdir" "$U_HOME/Library/LaunchAgents"
+    : > "$U_HOME/Library/LaunchAgents/com.activity-mesh.watcher.plist"
+    for c in launchctl systemctl; do
+        printf '%s\n' '#!/bin/sh' "mkdir -p '$late/Documents' '$late/dist/1.0.0'" "echo precious > '$late/Documents/thesis.txt'" "echo keep > '$late/dist/1.0.0/keep'" 'exit 0' > "$shimdir/$c"
+        chmod +x "$shimdir/$c"
+    done
+    set +e
+    env -i HOME="$U_HOME" PATH="$shimdir:$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" ACTIVITY_MESH_HOME="$late" \
+        bash "$REPO_ROOT/installers/uninstall.sh" --purge > "$S/out.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge exited $RC"; }
+    [ -f "$late/Documents/thesis.txt" ] || fail "a store dir that appeared after the checks was purged: $(cat "$S/out.txt")"
+    [ -f "$late/dist/1.0.0/keep" ] || fail "a dist dir that appeared after the checks was removed: $(cat "$S/out.txt")"
+    grep -qF "left $(cd -P "$S" && /bin/pwd -P)/later alone" "$S/out.txt" || fail "no line says the late store dir was left alone: $(cat "$S/out.txt")"
+    pass "a store or dist dir that did not exist at the check is left alone when it appears during the run, and a line says so"
+}
+
 test_residuals() {
     local box
     echo "== names that resolve to something else, and padded sync dirs =="
@@ -1207,6 +1260,8 @@ test_foreign_dirs
 test_real_shapes
 test_empty_dirs
 test_link_chains
+test_chain_targets
+test_late_dirs
 test_residuals
 test_fail_closed
 

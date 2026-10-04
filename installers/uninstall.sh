@@ -258,7 +258,9 @@ shape_scan() {
 identify_dir() {
     local name="$1" raw="$2" kind="$3" dir="$4" what shown="" n
     IDENT_EMPTY=0
+    IDENT_PRESENT=0
     [[ -d "$dir" && ! -L "$dir" ]] || return 0
+    IDENT_PRESENT=1
     case "$kind" in
         store) what="an activity-mesh store dir" ;;
         state) what="an activity-mesh state dir" ;;
@@ -282,19 +284,28 @@ identify_dir() {
 }
 
 IDENT_EMPTY=0
+IDENT_PRESENT=0
 DIST_EMPTY=0
 STORE_EMPTY=0
 STATE_EMPTY=0
 CONFIG_EMPTY=0
+DIST_PRESENT=0
+STORE_PRESENT=0
+STATE_PRESENT=0
+CONFIG_PRESENT=0
 identify_dir ACTIVITY_MESH_HOME "$STORE_DIR" dist "$STORE_CANON/dist"
 DIST_EMPTY=$IDENT_EMPTY
+if [[ -d "$STORE_CANON/dist" ]]; then DIST_PRESENT=1; fi
 if [[ $PURGE -eq 1 ]]; then
     identify_dir ACTIVITY_MESH_HOME "$STORE_DIR" store "$STORE_CANON"
     STORE_EMPTY=$IDENT_EMPTY
+    STORE_PRESENT=$IDENT_PRESENT
     identify_dir ACTIVITY_MESH_STATE "$STATE_DIR" state "$STATE_CANON"
     STATE_EMPTY=$IDENT_EMPTY
+    STATE_PRESENT=$IDENT_PRESENT
     identify_dir CONFIG_DIR "$CONFIG_DIR" config "$CONFIG_CANON"
     CONFIG_EMPTY=$IDENT_EMPTY
+    CONFIG_PRESENT=$IDENT_PRESENT
 fi
 
 uninstall_macos() {
@@ -467,39 +478,49 @@ remove_empty() {
     ok "removed the empty dir $1"
 }
 
-if [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
+left_late() { warn "left $1 alone — it appeared after the checks, so it was never identified"; }
+
+if [[ $DIST_PRESENT -eq 1 || $DRY_RUN -eq 1 ]]; then
     if [[ $DIST_EMPTY -eq 1 ]]; then
         remove_empty "$DIST_B"
     else
         run_argv rm -rf "$DIST_B"
         ok "removed runtime assets $DIST_B"
     fi
+elif [[ -d "$DIST_B" ]]; then
+    left_late "$DIST_B"
 fi
 
 purge_dir() {
-    local p="$2" hops=0 target base
-    if [[ -d "$1" ]]; then
-        if [[ "$3" -eq 1 ]]; then
-            remove_empty "$1"
-        else
-            run_argv rm -rf "$1"
-            ok "purged $1"
-        fi
+    local canon="$1" p="$2" empty="$3" present="$4" hops=0 target base link links=()
+    if [[ "$present" -ne 1 ]]; then
+        if [[ -d "$canon" ]]; then left_late "$canon"; fi
+        return 0
     fi
-    while [[ -L "$p" && $hops -lt 20 ]]; do
+    while [[ -L "$p" && $hops -lt 20 && "$(canon_path "$p")" == "$canon" ]]; do
+        links[${#links[@]}]="$p"
         target="$(readlink "$p")"
+        while [[ "$target" == */ && "$target" != / ]]; do target="${target%/}"; done
         base="$(cd -P "$(dirname "$p")" 2>/dev/null && pwd)" || break
-        run_argv rm -f "$p"
-        ok "removed the link $p"
         case "$target" in /*) p="$target" ;; *) p="$base/$target" ;; esac
         hops=$((hops + 1))
+    done
+    if [[ "$empty" -eq 1 ]]; then
+        remove_empty "$canon"
+    else
+        run_argv rm -rf "$canon"
+        ok "purged $canon"
+    fi
+    for link in ${links[@]+"${links[@]}"}; do
+        run_argv rm -f "$link"
+        ok "removed the link $link"
     done
 }
 
 if [[ $PURGE -eq 1 ]]; then
-    purge_dir "$STORE_CANON" "$STORE_LEX" "$STORE_EMPTY"
-    purge_dir "$STATE_CANON" "$STATE_LEX" "$STATE_EMPTY"
-    purge_dir "$CONFIG_CANON" "$CONFIG_LEX" "$CONFIG_EMPTY"
+    purge_dir "$STORE_CANON" "$STORE_LEX" "$STORE_EMPTY" "$STORE_PRESENT"
+    purge_dir "$STATE_CANON" "$STATE_LEX" "$STATE_EMPTY" "$STATE_PRESENT"
+    purge_dir "$CONFIG_CANON" "$CONFIG_LEX" "$CONFIG_EMPTY" "$CONFIG_PRESENT"
     warn "left $SYNC_EFFECTIVE alone — it's the cross-host source-of-truth, delete by hand if intended"
 elif [[ $KEEP_DATA -eq 1 ]]; then
     ok "preserved data: $STORE_CANON $STATE_CANON $SYNC_EFFECTIVE $CONFIG_CANON"
