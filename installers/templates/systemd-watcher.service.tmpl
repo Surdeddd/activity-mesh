@@ -13,6 +13,7 @@ StandardOutput=append:{{STATE_DIR}}/watcher.log
 StandardError=append:{{STATE_DIR}}/watcher.err
 Environment=ACTIVITY_MESH_HOME={{STORE_DIR}}
 Environment=ACTIVITY_MESH_SYNC={{SYNC_DIR}}
+Environment=ACTIVITY_MESH_BIN={{BIN_PATH}}
 WorkingDirectory={{HOME}}
 Nice=5
 # soft hardening — keep universal across distros

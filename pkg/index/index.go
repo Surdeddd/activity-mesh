@@ -21,6 +21,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/Surdeddd/activity-mesh/pkg/event"
+	"github.com/Surdeddd/activity-mesh/pkg/shard"
 )
 
 type Event struct {
@@ -315,6 +316,30 @@ WHERE events.payload != excluded.payload
    OR events.raw_byte_offset != excluded.raw_byte_offset
    OR events.raw_jsonl_path != excluded.raw_jsonl_path`
 
+const maxIndexJSONDepth = 512
+
+func JSONDepth(v any) int { return jsonDepth(v, 0) }
+
+func jsonDepth(v any, d int) int {
+	deepest := d
+	visit := func(c any) {
+		if n := jsonDepth(c, d+1); n > deepest {
+			deepest = n
+		}
+	}
+	switch t := v.(type) {
+	case map[string]any:
+		for _, c := range t {
+			visit(c)
+		}
+	case []any:
+		for _, c := range t {
+			visit(c)
+		}
+	}
+	return deepest
+}
+
 func (i *Index) IngestJSONL(path string) (int, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -396,6 +421,10 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 		if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 			continue
 		}
+		if JSONDepth(raw) > maxIndexJSONDepth {
+			skipped++
+			continue
+		}
 		ulid, _ := raw["id"].(string)
 		ts, _ := raw["ts"].(string)
 		host, _ := raw["host"].(string)
@@ -415,6 +444,10 @@ func (i *Index) IngestJSONL(path string) (int, error) {
 		priority, _ := raw["priority"].(string)
 		res, err := stmt.Exec(ulid, ts, tsUnix, host, agent, scope, kind, priority, abs, lineOffset, trimmed)
 		if err != nil {
+			if strings.Contains(err.Error(), "malformed JSON") {
+				skipped++
+				continue
+			}
 			return count, fmt.Errorf("upsert ulid=%s: %w", ulid, err)
 		}
 		if fullScan {
@@ -451,35 +484,43 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	matches, err := filepath.Glob(filepath.Join(absDir, "events-*.jsonl"))
+	shards, err := shard.List(absDir)
 	if err != nil {
 		return 0, err
 	}
 	total := 0
 	known := map[string]bool{}
-	for _, m := range matches {
+	var errs []error
+	for _, m := range shards {
 		if abs, err := filepath.Abs(m); err == nil {
 			known[abs] = true
 		}
 		n, err := i.IngestJSONL(m)
 		if err != nil {
-			return total, fmt.Errorf("ingest %s: %w", m, err)
+			errs = append(errs, fmt.Errorf("ingest %s: %w", m, err))
+			continue
 		}
 		total += n
 	}
+	if err := i.sweepVanished(absDir, known); err != nil {
+		errs = append(errs, err)
+	}
+	return total, errors.Join(errs...)
+}
 
+func (i *Index) sweepVanished(absDir string, known map[string]bool) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	rows, err := i.db.Query(`SELECT DISTINCT raw_jsonl_path FROM events`)
 	if err != nil {
-		return total, fmt.Errorf("sweep: list indexed paths: %w", err)
+		return fmt.Errorf("sweep: list indexed paths: %w", err)
 	}
 	var vanished []string
 	for rows.Next() {
 		var p string
 		if err := rows.Scan(&p); err != nil {
 			_ = rows.Close()
-			return total, fmt.Errorf("sweep: scan path: %w", err)
+			return fmt.Errorf("sweep: scan path: %w", err)
 		}
 		// `known` is a snapshot of the glob taken before the ingest loop; a shard
 		// created (and indexed by the watcher) since then is absent from it, so
@@ -490,18 +531,18 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return total, fmt.Errorf("sweep: iterate paths: %w", err)
+		return fmt.Errorf("sweep: iterate paths: %w", err)
 	}
 	_ = rows.Close()
 	for _, p := range vanished {
 		if _, err := i.db.Exec(`DELETE FROM events WHERE raw_jsonl_path = ?`, p); err != nil {
-			return total, fmt.Errorf("sweep: delete rows for %s: %w", p, err)
+			return fmt.Errorf("sweep: delete rows for %s: %w", p, err)
 		}
 	}
 
 	cursors, err := i.loadCursors()
 	if err != nil {
-		return total, fmt.Errorf("sweep: load cursors: %w", err)
+		return fmt.Errorf("sweep: load cursors: %w", err)
 	}
 	dirty := false
 	for path := range cursors.Files {
@@ -512,10 +553,10 @@ func (i *Index) IngestDir(syncDir string) (int, error) {
 	}
 	if dirty {
 		if err := i.saveCursors(cursors); err != nil {
-			return total, fmt.Errorf("sweep: save cursors: %w", err)
+			return fmt.Errorf("sweep: save cursors: %w", err)
 		}
 	}
-	return total, nil
+	return nil
 }
 
 func fileExists(path string) bool {
@@ -565,7 +606,7 @@ func (i *Index) QueryContext(ctx context.Context, f QueryFilter) ([]Event, error
 		sb.WriteString(` AND ulid = ?`)
 		args = append(args, f.ULID)
 	}
-	sb.WriteString(` ORDER BY ts_unix DESC`)
+	sb.WriteString(` ORDER BY ts_unix DESC, ts DESC, ulid DESC`)
 	if f.Limit > 0 {
 		sb.WriteString(` LIMIT ?`)
 		args = append(args, f.Limit)

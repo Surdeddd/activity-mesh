@@ -5,7 +5,7 @@
 1. **Per-host shards** — each machine writes to `events-<host>.jsonl`. Single writer per file = zero Syncthing conflicts ever.
 2. **Universal CLI is primary contract** — any agent/SDK works via shell-out. MCP/skills are optimizations on top.
 3. **Local-first reads, daemon-as-cache** — the CLI, the hooks, and the stdio MCP server read the replicated JSONL shards directly and never touch the daemon. The HTTP daemon (`:7459`) is an optional query cache for HTTP-only consumers. Daemon down ⇒ primary contract unaffected (see "Daemon dependence" below). No SPOF.
-4. **Open registries** — kinds.yaml, scopes.yaml, agents.yaml: adding a kind/scope/agent = YAML edit in the sync dir, enforced at emit time (archived scopes reject new events; unknown bare kinds are rejected when kinds.yaml is published; `org/name` extension kinds are always allowed). Exception: redaction rules are **compiled into the binary** — `redaction.yaml` documents them, so a synced (attacker- or typo-writable) file can never weaken redaction.
+4. **Open registries** — kinds.yaml, scopes.yaml, agents.yaml: adding a kind/scope/agent = YAML edit in the sync dir, enforced at emit time (archived scopes reject new events; unknown bare kinds are rejected when kinds.yaml is published; `org/name` extension kinds are always allowed). A `kinds.yaml` or `scopes.yaml` that is present but invalid — unreadable, not valid YAML, or rejected by the loader's checks (a name declared twice, an unknown status or severity, an unsupported `schema_version`) — blocks emit and `/push` (fail-closed); an absent file means no check. Exception: redaction rules are **compiled into the binary** — `redaction.yaml` documents them, so a synced (attacker- or typo-writable) file can never weaken redaction.
 5. **Forced visibility** — failures must be **noisy**. Silence ≠ "all OK". Weekly green-light digest + dead-man heartbeat (independent process).
 
 ## Storage layout
@@ -121,7 +121,7 @@ auto-installed by the watcher — run it once per repo you want tracked.
 | layer | trigger | ambient toks | per-fire toks | how |
 |---|---|---|---|---|
 | **L1** schema | always | 48 | — | one-line in CLAUDE.md/AGENTS.md: "you have access to activity log via tool X" |
-| **L2** SessionStart digest | session boot | 0 if no new events | 0-250 | hook reads delta `since last_seen_ulid`, injects ≤8 events with P1+ always shown |
+| **L2** SessionStart digest | session boot | 0 if no new events | 0-250 | hook (sessions with a tty only) injects ≤8 events of the last 24 h without canary/heartbeat, plus ≤5 `--kind error` events of the last 30 days, capped at 1000 chars |
 | **L3** UserPromptSubmit ⭐ | regex match on prompt | 0 if no match | 0-500 | THE BREAKTHROUGH — fetches scoped slice automatically before LLM sees prompt |
 | **L4** lazy MCP tool | agent autonomous call | 0 | +1500 on call | for deeper drill-down |
 | **L5** Telegram push | severity ≥ P1 | 0 | 0 (out-of-band) | for P0 incidents when no session active |
@@ -150,7 +150,7 @@ Claude responds naturally with awareness
 | status / current | `статус`, `чё там`, `что (в работе\|пендинг)` ; `status`, `pending`, `active tasks`, `what's going on` | active sessions + tasks + last 10 events |
 | scope-named | known scopes from the generated `scopes-cache` (e.g. `demo-app`, `infra`, ...) | last 15 events in that scope |
 | agent-named | agent aliases from the generated `agents-cache` (e.g. "what did <agent> do", any language) | last 10 events for that agent |
-| incident | `incident`, `авария`, `падал`, `сломал`, `crashed`, `failed` | P0/P1 events last 7 days |
+| incident | `incident`, `авария`, `падал`, `сломал`, `упал`, `crashed`, `failed`, `broken`, `outage` | ≤5 `--kind error` events of the last 30 days |
 
 **Anti-triggers** (suppress injection): `что такое X`, `как сделать X`, `напиши X` — these are definition / how-to / creation, not recall.
 
@@ -161,7 +161,7 @@ Claude responds naturally with awareness
 ```
 activity_recent(scope?, agent?, host?, since?, limit=20) → events[]
 activity_search(query, since?, until?, limit=20) → events[]
-activity_digest(window="today" | "yesterday" | "7d" | "since:ULID", group_by="scope") → markdown
+activity_digest(window="today" | "yesterday" | "<N>h" | "<N>d" | "since:ULID", group_by="scope") → markdown
 ```
 
 ## Token budget proof (tiktoken cl100k_base)
@@ -237,17 +237,23 @@ What actually talks to the daemon versus reading the JSONL shards directly:
 
 The daemon binds `127.0.0.1:7459` by default (it serves the full history and
 accepts unauthenticated `/push` writes); exposing it LAN-wide is an explicit
-`--bind 0.0.0.0` / `ACTIVITY_MESH_BIND` decision.
+`--bind 0.0.0.0` / `ACTIVITY_MESH_BIND` decision. Every route answers 421
+unless the `Host` header is `localhost` or an IP literal, so a DNS-rebound
+page cannot reach it; remote clients use the IP address, not a host name.
 
 `/push` contract: the event's `host` **must equal the daemon's own host** —
 each shard has exactly one writer, so a client can never append to another
-host's shard through HTTP (403 otherwise). The payload is validated (`v` must
-be the supported schema version; `id` a strict ULID; `ts` parseable; `agent`,
-`kind`, `scope` mandatory and label-safe; `priority` P0–P3; body ≤64KiB →
-413 above), summaries are truncated to 500 chars with `truncated: true`, the
-whole tree runs through the same write-time redaction as CLI emit, and
-redaction hits land in the same local audit log. HTTP pushes are not a side
-door around any write-path invariant.
+host's shard through HTTP (403 otherwise). The payload is validated (`v`, when
+present, must be the integer schema version; `id` a strict ULID; `ts`
+parseable, stored as canonical UTC and within years 0000–9999; `agent`,
+`kind`, `scope` mandatory and label-safe; `priority` P0–P3; optional fields of
+their declared types; nesting ≤32 levels; only numbers the index can read
+back; body ≤64KiB → 413 above) and checked against the registries like a CLI
+emit. The whole tree runs through the same write-time redaction as CLI emit,
+then the summary is capped at 500 chars with `truncated: true`, and redaction
+hits land in the same local audit log. Pushes are serialized, so a retried
+ULID is appended once (`duplicate: true`). HTTP pushes are not a side door
+around any write-path invariant.
 
 **Index ↔ shard consistency**: the SQLite cache indexes exactly the live
 shards. The ingest cursor stores a sha256 of the file prefix it has consumed;
@@ -261,32 +267,107 @@ converges to a fresh rebuild.
 
 There is no client-side "auto-failover" logic, because the primary contract (CLI + hooks + stdio MCP) is local-first by construction and needs none — since the data layer is Syncthing-replicated JSONL, every host already holds every shard. The daemon is purely a cache/index for HTTP-only consumers; when it dies those consumers fail until the independent dead-man heartbeat alerts (RB-6 in the runbook). An earlier draft described a `daemon-config.yaml` primary/fallback chain with auto-failover — that was never implemented and is superseded by this table.
 
-## Health checks (19) + dead-man heartbeat
+## Health checks (20) + dead-man heartbeat
 
-20 checks across categories:
-- silence (per-host event freshness)
-- conflict (Syncthing `.sync-conflict-*`)
-- schema (drift in kinds/scopes vs registry)
-- secrets (post-tier1 entropy/regex re-scan)
-- size (>500MB warning)
-- decay (compactor last-run age)
-- launchd (daemon status)
-- hook health (error rate)
-- canary (per-host hourly heartbeat write)
-- digest freshness (`generated_at` vs current event tail)
-- token budget (ambient cost telemetry)
-- adoption ratio (events per writer)
-- redactor coverage (sampled NER cross-check)
-- ULID collision detection
-- sync lag per-host
-- ingester error rate
-- index integrity (FTS5 verify)
-- archive size (>30d compression)
-- runtime drift (Claude/Codex/Hermes version vs known)
+`health/master.sh` runs the 20 checks in `health/checks/` four times a day
+(launchd calendar at 00:44, 06:44, 12:44 and 18:44, never at login; cron or a
+systemd timer on Linux). The checks run in parallel; those that read shards or
+logs do it in one pass, not with a process per line. Each check prints one
+JSON line with a tier: 0–1 ok or informational, 2 warn, 3 fail, 4 critical. A
+check still running after `ACTIVITY_MESH_CHECK_TIMEOUT_S` (default 120 s) is
+stopped and reported at tier 2 as "timed out". The run is saved to
+`last-health.json` before anything is sent.
 
-**Dead-man heartbeat**: independent process (NOT same daemon) pings `/health` every hour. If 3 misses → tier-1 alert via Telegram bot using independent path. **Catches the case where the daemon itself is dead.**
+**Alerts**: when any check is at tier 2 or above, one alert lists every check
+that is not ok. The same set of tier ≥ 2 checks is sent at most once per
+`ACTIVITY_MESH_ALERT_REPEAT_S` (default 24 h); a different set goes out at
+once, and a run with nothing at tier 2 or above resets it. Every alert sent by
+the health runner or the heartbeat is appended to `alerts.log` in the state
+dir, which the weekly digest counts. Alerts are plain text in one language:
+Russian by default, English with `ACTIVITY_MESH_LANG=en`.
 
-**Weekly "all OK" digest**: every Sunday push to Telegram "system OK, X events captured, 0 incidents, last 5 P1 resolved". So **silence is not ambiguous** — if you don't see the weekly green, something's wrong.
+Checks that treat shard files as hosts or event streams read only live
+shards; Syncthing conflict copies are the `conflict` check's business, except
+in the two data-at-rest scans (`secrets-bypass`, `redactor-coverage`), which
+read them too. A check whose input is missing says so: tier 2 when that is a
+fault (no sync dir, no own shard, no `decay-state.json`), tier 0 when it is
+normal (no archive yet, no digest on a secondary host).
+
+- `adoption-ratio`: agent events per writer over 7 days
+  (`ACTIVITY_MESH_ADOPTION_WINDOW_S`), with self-monitoring left out (the
+  heartbeat agent, the `canary` and `heartbeat` kinds, the `activity-mesh`
+  scope). Informational: always tier 1, `warn` for a single writer, no agent
+  events or a top writer above 5:1.
+- `archive-size`: uncompressed `.jsonl` older than 30 days in `<sync>/archive`
+  → tier 2.
+- `canary`: age of this host's newest heartbeat canary. Tier 3 when it is older
+  than `ACTIVITY_MESH_CANARY_STALE_S` (2 h), or there is none, while the machine
+  has been awake longer than that, so a night of sleep never fails it; the
+  message carries the 24 h count and how many canaries got no daemon answer.
+- `conflict`: Syncthing conflict files in the sync dir → tier 4.
+- `decay-daemon`: last `compact` run (`decay-state.json`): tier 2 after 32 days,
+  tier 3 after 40.
+- `deploy-drift`: the source working copy (`ACTIVITY_MESH_SRC_DIR`) against
+  `dist/current`, comparing `VERSION` and the shipped files of installers,
+  health, registries, configs, hooks and mcp: tier 2 for one or two drifted
+  areas at the same version, tier 3 otherwise; skipped without a checkout.
+- `digest-freshness`: age of `last-digest.json`: tier 2 after 7.5 days, tier 3
+  after 8.
+- `hook-health`: error lines in the three hook logs (`session-start.log`,
+  `user-prompt-router.log`, `redactor.log`) within the last 6 h
+  (`ACTIVITY_MESH_HEALTH_WINDOW_S`, the run cadence): tier 2 for 1–5, tier 3
+  above.
+- `index-integrity`: `PRAGMA integrity_check` on `index.db` → tier 4 when it
+  fails (tier 2 without `sqlite3`).
+- `ingester-error`: within the same 6 h, daemon ingest errors in `daemon.err`
+  (initial, periodic, pre- and post-push ingest) and watcher events lost in
+  `watcher.err` (failed emits plus the events of dropped rollups); the worse of
+  the two gives tier 2 above 2 and tier 3 above 10.
+- `launchd-jobs`: on macOS, whether the six `com.activity-mesh.*` units are
+  loaded: one missing is tier 2, more is tier 3.
+- `redactor-coverage`: every line of every shard file re-scanned for PII the
+  write path should have redacted (emails, JWTs, URLs with credentials,
+  `/Users/<name>/`, LAN IPs): tier 2 for 1–2 lines, tier 3 above.
+- `runtime-drift`: versions of the tools listed in `<sync>/compat-versions.txt`
+  against the installed ones → tier 2 on drift.
+- `schema-drift`: kinds and scopes of the last 24 h against `kinds.yaml` and
+  `scopes.yaml`; `org/name` kinds and `ns:sub` scopes of a registered `ns` are
+  allowed. Tier 2 for 1–4 unknown values, tier 3 from 5.
+- `secrets-bypass`: every line of every shard file scanned for credentials that
+  must never reach a shard (API keys and tokens, private key blocks) → tier 4,
+  RB-2.
+- `silence`: age of each host's shard: tier 3 above
+  `ACTIVITY_MESH_SILENCE_MAX_S` (12 h, the same for every host). It does not
+  judge within `ACTIVITY_MESH_WAKE_GRACE_S` (30 min) of boot or wake, and it
+  lists hosts the owner switched off (the offline registry) at tier 1.
+- `size-guard`: size of the sync dir: tier 2 above 400 MB, tier 3 above 500 MB.
+- `sync-lag`: delivery lag `ctime − mtime` of each remote shard changed in the
+  last day, counted from the wake when the file arrived after one: tier 2 above
+  5 min, tier 3 above 10.
+- `token-budget`: router injections (`injections.log`) and session totals:
+  tier 2 when the largest injection exceeds the 500-token per-fire cap or a
+  session exceeds 2000, tier 3 when the p95 does.
+- `ulid-collision`: every ULID in every live shard → tier 4 on a duplicate.
+
+**Dead-man heartbeat**: an independent job (launchd calendar, hourly at :20;
+not part of the daemon) requests `/health` (`ACTIVITY_MESH_HEALTH_URL`, default
+`http://127.0.0.1:7459/health`) and records the result as a `canary` event:
+`ok=1`, or `ok=0` with `why=<cause>` and `busy=<0|1>`. After 3 misses in a row
+(`HEARTBEAT_THRESHOLD`) it sends a fail alert through the same notifier as the
+health runner, never through the daemon, at most once an hour
+(`HEARTBEAT_COOLDOWN`). A timeout or empty reply while the load average is
+above `CANARY_BUSY_LOAD` (12) is inconclusive and does not count as a miss.
+**Catches the case where the daemon itself is dead.**
+
+**Weekly digest**: on Sundays at 06:00 (launchd; cron on Linux), one message
+with the week's events and the trend against the week before, how many of them
+were self-monitoring, the canary failure share (timeouts on a busy machine are
+listed but not counted), top scopes and agents, the alerts sent (from
+`alerts.log`), the router's tokens per injection and per session against the
+500 and 2000 caps, and events per host. The verdict comes from the last health
+snapshot and drops to DEGRADED when more than 10% of the week's canaries failed.
+So **silence is not ambiguous** — if you don't see the weekly digest, something's
+wrong.
 
 ## Recovery runbook
 
@@ -295,7 +376,7 @@ There is no client-side "auto-failover" logic, because the primary contract (CLI
 - RB-2: secret leaked into log (urgent)
 - RB-3: Syncthing wholesale failure
 - RB-4: hook auto-disabled, fallback growing
-- RB-5: PC machine offline >48h
+- RB-5: PC machine offline >12h
 - RB-6: launchd plist won't load
 - RB-7: schema drift unbounded
 - RB-8: search latency runaway

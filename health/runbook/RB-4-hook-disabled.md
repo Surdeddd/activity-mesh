@@ -1,7 +1,12 @@
 # RB-4 — hook auto-disabled, fallback growing
 
 ## Symptoms
-- `hook-health` tier ≥ 2 with errors > 5/hour
+- `hook-health` at tier 2 (1–5 error lines) or tier 3 (more than 5). It reads
+  only the three hook logs in `~/.local/state/activity-mesh/` —
+  `session-start.log`, `user-prompt-router.log` and `redactor.log` — and counts
+  the lines stamped within the last `ACTIVITY_MESH_HEALTH_WINDOW_S` (default
+  21600 s = 6 h, the health cadence) that mention error, fail, no binary, not
+  found or no jq
 - `~/.local/state/activity-mesh/redactor.log` shows fail-closed refusals
 - session-start-digest log shows repeated "binary missing" or "exec format error"
 
@@ -10,6 +15,7 @@
 ls -la ~/.local/state/activity-mesh/
 tail -100 ~/.local/state/activity-mesh/session-start.log
 tail -100 ~/.local/state/activity-mesh/user-prompt-router.log
+tail -100 ~/.local/state/activity-mesh/redactor.log
 file $(command -v activity-log)            # binary intact?
 jq '.hooks' ~/.claude/settings.json        # hook entries still present?
 ```

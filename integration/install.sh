@@ -4,11 +4,32 @@ set -uo pipefail
 
 TARGET="${CLAUDE_MD:-$HOME/.claude/CLAUDE.md}"
 
-DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
-
 err() { echo "install: $*" >&2; }
 say() { echo "install: $*"; }
+
+DRY_RUN=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) echo "usage: install.sh [--dry-run]   (CLAUDE_MD=<file> overrides ~/.claude/CLAUDE.md)"; exit 0 ;;
+        *) err "unknown argument: $arg"; exit 2 ;;
+    esac
+done
+
+SELF="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$SELF" ] && [ "$hops" -lt 20 ]; do
+    link="$(readlink "$SELF")"
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$link" ;; esac
+    hops=$((hops + 1))
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+HERE_P="$(cd -P "$(dirname "$SELF")" && pwd)"
+if [ "$(cd -P "$HERE" && pwd)" != "$HERE_P" ]; then HERE="$HERE_P"; fi
+CFGEDIT="$HERE/../installers/lib/cfgedit.sh"
+[ -f "$CFGEDIT" ] || { err "missing helper $CFGEDIT"; exit 1; }
+# shellcheck source=../installers/lib/cfgedit.sh
+. "$CFGEDIT"
 
 [ -f "$TARGET" ] || { err "target not found: $TARGET"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { err "python3 required"; exit 1; }
@@ -42,6 +63,8 @@ read -r -d '' BLOCK <<'EOF' || true
 <!-- activity-mesh:integration:end -->
 EOF
 
+MEMORY_KEY="$(printf '%s' "$HOME" | sed 's/[^A-Za-z0-9]/-/g')"
+
 TMP=$(mktemp)
 python3 - "$TARGET" "$TMP" <<PYEOF "$BLOCK"
 import sys, re
@@ -55,7 +78,7 @@ m = header_re.search(src)
 if m is None:
     appended = "\n## Memory canonical sources (не путать)\n\n"
     appended += "| что | где | роль |\n|---|---|---|\n"
-    appended += "| **state truth** (active rules, current preferences, infrastructure facts) | \`~/.claude/projects/-Users-maksimkravcov/memory/MEMORY.md\` + .md files | always-on |\n"
+    appended += "| **state truth** (active rules, current preferences, infrastructure facts) | \`~/.claude/projects/${MEMORY_KEY}/memory/MEMORY.md\` + .md files | always-on |\n"
     appended += "| **compoundable patterns / decisions** | \`~/Obsidian/llm-wiki/\` | wiki growth |\n"
     appended += block + "\n"
     out = src.rstrip() + "\n" + appended
@@ -98,12 +121,12 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="${TARGET}.bak-${STAMP}"
 cp "$TARGET" "$BACKUP" || { err "backup failed"; rm -f "$TMP"; exit 1; }
 
-if mv "$TMP" "$TARGET"; then
+if write_through "$TARGET" < "$TMP"; then
+    rm -f "$TMP"
     say "applied. backup at $BACKUP"
     exit 0
 else
-    err "write failed; restoring backup"
-    mv "$BACKUP" "$TARGET" 2>/dev/null
+    err "write failed; $TARGET is untouched (backup at $BACKUP)"
     rm -f "$TMP"
     exit 1
 fi

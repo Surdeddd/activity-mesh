@@ -2,15 +2,35 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$SELF" ] && [ "$hops" -lt 20 ]; do
+    link="$(readlink "$SELF")"
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$link" ;; esac
+    hops=$((hops + 1))
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+HERE_P="$(cd -P "$(dirname "$SELF")" && pwd)"
+if [ "$(cd -P "$HERE" && pwd)" != "$HERE_P" ]; then HERE="$HERE_P"; fi
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 SESSION_HOOK="$HERE/session-start-digest.sh"
 PROMPT_HOOK="$HERE/user-prompt-router.sh"
 
-DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
-
 err() { echo "install: $*" >&2; }
+
+DRY_RUN=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) echo "usage: install.sh [--dry-run]   (CLAUDE_SETTINGS=<file> overrides ~/.claude/settings.json)"; exit 0 ;;
+        *) err "unknown argument: $arg"; exit 2 ;;
+    esac
+done
+
+CFGEDIT="$HERE/../installers/lib/cfgedit.sh"
+[ -f "$CFGEDIT" ] || { err "missing helper $CFGEDIT"; exit 1; }
+# shellcheck source=../installers/lib/cfgedit.sh
+. "$CFGEDIT"
 
 [ -f "$SETTINGS" ] || { err "settings.json not found at $SETTINGS"; exit 1; }
 command -v jq >/dev/null 2>&1 || { err "jq required"; exit 1; }
@@ -57,13 +77,12 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="${SETTINGS}.bak-${STAMP}"
 cp "$SETTINGS" "$BACKUP" || { err "backup failed"; rm -f "$TMP_OLD" "$TMP_NEW"; exit 1; }
 
-if printf '%s\n' "$PATCHED" > "${SETTINGS}.tmp" && mv "${SETTINGS}.tmp" "$SETTINGS"; then
+if printf '%s\n' "$PATCHED" | write_through "$SETTINGS"; then
     rm -f "$TMP_OLD" "$TMP_NEW"
     echo "install: applied. backup at $BACKUP"
     exit 0
 else
-    err "write failed; restoring backup"
-    mv "$BACKUP" "$SETTINGS" 2>/dev/null
-    rm -f "$TMP_OLD" "$TMP_NEW" "${SETTINGS}.tmp"
+    err "write failed; $SETTINGS is untouched (backup at $BACKUP)"
+    rm -f "$TMP_OLD" "$TMP_NEW"
     exit 1
 fi

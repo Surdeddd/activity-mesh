@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"hash/fnv"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -19,12 +20,17 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/oklog/ulid/v2"
 )
 
 const (
 	defaultDebounceWindow = 5 * time.Second
 	defaultActivityLog    = "activity-log"
 )
+
+var emitTimeout = 10 * time.Minute
+
+var rootPoll = time.Second
 
 type Source struct {
 	Name            string `yaml:"name"`
@@ -56,6 +62,9 @@ type Config struct {
 }
 
 func (c *Config) fillDefaults() {
+	if env := os.Getenv("ACTIVITY_MESH_BIN"); env != "" {
+		c.ActivityLogBin = env
+	}
 	if c.ActivityLogBin == "" {
 		c.ActivityLogBin = defaultActivityLog
 	}
@@ -292,14 +301,23 @@ func runEmit(ctx context.Context, bin string, src Source, req emitReq) error {
 	}
 	args = append(args, "--ref", "file://"+ev.Name)
 
-	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, emitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, bin, args...)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("activity-log emit failed (%v): %s", err, strings.TrimSpace(string(out)))
+	text := strings.TrimSpace(string(out))
+	id := text
+	if i := strings.LastIndexByte(text, '\n'); i >= 0 {
+		id = strings.TrimSpace(text[i+1:])
 	}
-	log.Printf("emit ok src=%q kind=%s scope=%s id=%s", src.Name, kind, scope, strings.TrimSpace(string(out)))
+	if err != nil {
+		if _, perr := ulid.ParseStrict(id); perr == nil {
+			log.Printf("emit ok src=%q kind=%s scope=%s id=%s (late exit: %v)", src.Name, kind, scope, id, err)
+			return nil
+		}
+		return fmt.Errorf("activity-log emit failed (%v): %s", err, text)
+	}
+	log.Printf("emit ok src=%q kind=%s scope=%s id=%s", src.Name, kind, scope, id)
 	return nil
 }
 
@@ -368,14 +386,14 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	if err != nil {
 		return fmt.Errorf("new watcher: %w", err)
 	}
-	defer w.Close()
+	defer func() { w.Close() }()
 
 	info, err := os.Stat(src.Path)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", src.Path, err)
 	}
 
-	addRoot := src.Path
+	addRoot := filepath.Clean(src.Path)
 	effectivePattern := src.Pattern
 	if !info.IsDir() {
 		// A file path means "watch its directory"; without a pattern that would
@@ -386,9 +404,10 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 		}
 	}
 	src.Pattern = effectivePattern
+	recursive := src.Recursive && info.IsDir()
 
 	added, failed := 0, 0
-	if src.Recursive && info.IsDir() {
+	if recursive {
 		added, failed = addTree(w, addRoot, src.Name)
 	} else if err := w.Add(addRoot); err != nil {
 		return fmt.Errorf("watch %q: %w", addRoot, err)
@@ -424,6 +443,48 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 	rollup := time.NewTicker(deb.window)
 	defer rollup.Stop()
 
+	handle := func(ev fsnotify.Event) {
+		if !matchOp(src.Op, ev) || !matchPattern(src.Pattern, ev.Name) {
+			return
+		}
+		key := hashKey(src.Name, ev.Name)
+		now := time.Now()
+		if !deb.hit(key, now) {
+			return
+		}
+		if !budget.take(now) {
+			coalesced++
+			return
+		}
+		select {
+		case emitCh <- emitReq{ev: ev}:
+		default:
+			coalesced++
+		}
+	}
+	announce := func(dir string) {
+		_ = filepath.WalkDir(dir, func(p string, de fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if de.IsDir() {
+				if p != dir && (!recursive || skipWatchDir(de.Name())) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if de.Type()&fs.ModeSymlink != 0 {
+				if fi, serr := os.Stat(p); serr == nil && fi.IsDir() {
+					return nil
+				}
+			}
+			handle(fsnotify.Event{Name: p, Op: fsnotify.Create})
+			return nil
+		})
+	}
+	rootGone, reattachFailing := false, false
+	var reattach <-chan time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -432,41 +493,51 @@ func watchSource(ctx context.Context, src Source, deb *debouncer, bin string) er
 			if !ok {
 				return nil
 			}
-			// Re-watch BEFORE the filters: a new subdirectory never matches a file
-			// pattern like "*.md", so filtering first made every recursive source
-			// blind to any directory created after startup.
-			isDir := false
+			if rootGone {
+				continue
+			}
+			if ev.Name == addRoot && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				rootGone = true
+				reattach = time.After(rootPoll)
+				log.Printf("source=%q root %q went away, waiting for it to return", src.Name, addRoot)
+				continue
+			}
 			if ev.Op&fsnotify.Create != 0 {
 				if fi, serr := os.Stat(ev.Name); serr == nil && fi.IsDir() {
-					isDir = true
-					if src.Recursive {
+					if recursive && !skipWatchDir(filepath.Base(ev.Name)) {
 						addTree(w, ev.Name, src.Name)
+						announce(ev.Name)
 					}
+					continue
 				}
 			}
-			if isDir {
-				continue // directories are watch targets, never events themselves
-			}
-			if !matchOp(src.Op, ev) {
+			handle(ev)
+		case <-reattach:
+			reattach = time.After(rootPoll)
+			if fi, serr := os.Stat(addRoot); serr != nil || !fi.IsDir() {
 				continue
 			}
-			if !matchPattern(src.Pattern, ev.Name) {
+			fresh, err := fsnotify.NewWatcher()
+			if err == nil {
+				if err = fresh.Add(addRoot); err != nil {
+					fresh.Close()
+				}
+			}
+			if err != nil {
+				if !reattachFailing {
+					reattachFailing = true
+					log.Printf("source=%q re-attach %q failed: %v", src.Name, addRoot, err)
+				}
 				continue
 			}
-			key := hashKey(src.Name, ev.Name)
-			now := time.Now()
-			if !deb.hit(key, now) {
-				continue
+			if recursive {
+				addTree(fresh, addRoot, src.Name)
 			}
-			if !budget.take(now) {
-				coalesced++
-				continue
-			}
-			select {
-			case emitCh <- emitReq{ev: ev}:
-			default:
-				coalesced++
-			}
+			w.Close()
+			w = fresh
+			rootGone, reattachFailing, reattach = false, false, nil
+			announce(addRoot)
+			log.Printf("source=%q root %q re-attached", src.Name, addRoot)
 		case <-rollup.C:
 			if coalesced == 0 {
 				continue

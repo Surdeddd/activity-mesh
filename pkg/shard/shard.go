@@ -6,11 +6,32 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 )
 
 var hostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 var ErrBadHost = errors.New("invalid host label")
+
+func IsShardName(name string) bool {
+	return strings.HasPrefix(name, "events-") && strings.HasSuffix(name, ".jsonl") && !strings.Contains(name, ".sync-conflict-")
+}
+
+func List(dir string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, "events-*.jsonl"))
+	if err != nil {
+		return nil, err
+	}
+	var shards []string
+	for _, m := range matches {
+		if IsShardName(filepath.Base(m)) {
+			shards = append(shards, m)
+		}
+	}
+	sort.Strings(shards)
+	return shards, nil
+}
 
 func ValidHost(host string) bool {
 	return hostRe.MatchString(host) && !containsDotDot(host)

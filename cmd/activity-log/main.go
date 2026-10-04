@@ -276,10 +276,6 @@ func emitCmd() *cobra.Command {
 			if err := enforceRegistry(cfg.SyncDir, kind, scope); err != nil {
 				return err
 			}
-			summary, truncated := event.NormalizeSummary(summary)
-			if truncated {
-				fmt.Fprintf(os.Stderr, "warn: summary truncated to %d chars (truncated=true recorded)\n", event.MaxSummaryRunes)
-			}
 			opts := []event.Option{}
 			if ref != "" {
 				opts = append(opts, event.WithRef(ref))
@@ -302,12 +298,12 @@ func emitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if truncated {
-				ev.Truncated = true
-			}
 			line, hits, err := ev.Marshal()
 			if err != nil {
 				return err
+			}
+			if ev.Truncated {
+				fmt.Fprintf(os.Stderr, "warn: summary truncated to %d chars (truncated=true recorded)\n", event.MaxSummaryRunes)
 			}
 			if err := shard.AppendLocked(cfg.SyncDir, ev.Host, line); err != nil {
 				return err
@@ -400,12 +396,7 @@ func queryCmd() *cobra.Command {
 				}
 				filtered = append(filtered, e)
 			}
-			sort.SliceStable(filtered, func(i, j int) bool {
-				if filtered[i].TS == filtered[j].TS {
-					return filtered[i].MonotonicSeq < filtered[j].MonotonicSeq
-				}
-				return filtered[i].TS < filtered[j].TS
-			})
+			sortOldestFirst(filtered)
 			if limit > 0 && len(filtered) > limit {
 				filtered = filtered[len(filtered)-limit:]
 			}
@@ -434,13 +425,37 @@ func parseDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
+func sortOldestFirst(events []event.Event) {
+	type stamped struct {
+		event.Event
+		at time.Time
+	}
+	s := make([]stamped, len(events))
+	for i, e := range events {
+		s[i].Event = e
+		s[i].at, _ = event.ParseTS(e.TS)
+	}
+	sort.SliceStable(s, func(i, j int) bool {
+		if !s[i].at.Equal(s[j].at) {
+			return s[i].at.Before(s[j].at)
+		}
+		if s[i].MonotonicSeq != s[j].MonotonicSeq {
+			return s[i].MonotonicSeq < s[j].MonotonicSeq
+		}
+		return s[i].ID < s[j].ID
+	})
+	for i := range s {
+		events[i] = s[i].Event
+	}
+}
+
 func readEvents(syncDir string) ([]event.Event, error) {
-	matches, err := filepath.Glob(filepath.Join(syncDir, "events-*.jsonl"))
+	shards, err := shard.List(syncDir)
 	if err != nil {
 		return nil, err
 	}
 	var events []event.Event
-	for _, p := range matches {
+	for _, p := range shards {
 		f, err := os.Open(p)
 		if err != nil {
 			return nil, err
@@ -497,16 +512,16 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			matches, err := filepath.Glob(filepath.Join(cfg.SyncDir, "events-*.jsonl"))
+			shards, err := shard.List(cfg.SyncDir)
 			if err != nil {
 				return err
 			}
-			if len(matches) == 0 {
+			if len(shards) == 0 {
 				fmt.Println("no per-host shards yet")
 				return nil
 			}
 			now := time.Now().UTC()
-			for _, p := range matches {
+			for _, p := range shards {
 				host := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(p), "events-"), ".jsonl")
 				last, count, err := lastEvent(p)
 				if err != nil {

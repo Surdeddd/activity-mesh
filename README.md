@@ -141,10 +141,21 @@ the old payloads from the SQLite index and the FTS table as well.
 ## Building
 
 ```bash
-make build         # cross-compile CLI + watcher + daemon for all targets (no cgo)
+make build         # cross-compile into bin/ (no cgo), see the matrix below
 make build-daemon  # daemon for the current host only
-make verify        # vet + test + shellcheck
+make verify        # vet + test + shellcheck + the MCP, hook and health suites
 ```
+
+`make build` is the cross-compile smoke check CI runs, not the release matrix:
+
+| binary | targets built by `make build` |
+|---|---|
+| CLI (`activity-log`) | darwin arm64, darwin amd64, linux amd64, linux arm64, windows amd64 |
+| watcher (`activity-watcher`) | darwin arm64, linux amd64 |
+| daemon (`activity-mesh-daemon`) | darwin arm64, darwin amd64, linux amd64 |
+
+Releases (GoReleaser, `.goreleaser.yaml`) build the full set: all three
+binaries for linux and darwin on amd64 and arm64, plus the Windows CLI.
 
 All three binaries are **cgo-free** — SQLite (with FTS5) is provided by
 [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite), a pure-Go port —

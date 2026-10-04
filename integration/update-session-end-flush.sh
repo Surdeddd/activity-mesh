@@ -3,11 +3,33 @@
 set -uo pipefail
 
 HOOK="${SESSION_END_HOOK:-$HOME/.claude/hooks/session-end-flush.sh}"
-DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
 err() { echo "update-flush: $*" >&2; }
 say() { echo "update-flush: $*"; }
+
+DRY_RUN=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) echo "usage: update-session-end-flush.sh [--dry-run]   (SESSION_END_HOOK=<file> overrides ~/.claude/hooks/session-end-flush.sh)"; exit 0 ;;
+        *) err "unknown argument: $arg"; exit 2 ;;
+    esac
+done
+
+SELF="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$SELF" ] && [ "$hops" -lt 20 ]; do
+    link="$(readlink "$SELF")"
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(cd -P "$(dirname "$SELF")" && pwd)/$link" ;; esac
+    hops=$((hops + 1))
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
+HERE_P="$(cd -P "$(dirname "$SELF")" && pwd)"
+if [ "$(cd -P "$HERE" && pwd)" != "$HERE_P" ]; then HERE="$HERE_P"; fi
+CFGEDIT="$HERE/../installers/lib/cfgedit.sh"
+[ -f "$CFGEDIT" ] || { err "missing helper $CFGEDIT"; exit 1; }
+# shellcheck source=../installers/lib/cfgedit.sh
+. "$CFGEDIT"
 
 [ -f "$HOOK" ] || { err "hook not found: $HOOK"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { err "python3 required"; exit 1; }
@@ -75,12 +97,11 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="${HOOK}.bak-${STAMP}"
 cp "$HOOK" "$BACKUP" || { err "backup failed"; rm -f "$TMP"; exit 1; }
 
-if mv "$TMP" "$HOOK"; then
-    chmod +x "$HOOK" 2>/dev/null || true
+if write_through "$HOOK" < "$TMP"; then
+    rm -f "$TMP"
     say "applied. backup at $BACKUP"
     exit 0
 else
-    err "write failed; restoring backup"
-    mv "$BACKUP" "$HOOK" 2>/dev/null
+    err "write failed; $HOOK is untouched (backup at $BACKUP)"
     rm -f "$TMP"; exit 1
 fi

@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type Hit struct {
@@ -27,7 +29,13 @@ type rule struct {
 	// in place — used by context rules like `AUTH_TOKEN=<hex>`, where the name
 	// is the useful part and only the value is the secret.
 	group int
+	skip  func(s string, lo, hi int) bool
+	find  func(s string) []span
 }
+
+type span struct{ lo, hi int }
+
+const secretNames = `secret|token|passwd|password|api[_-]?key|auth|privkey|key(?:[_-]?base)?`
 
 var rules = []*rule{
 	{
@@ -130,7 +138,7 @@ var rules = []*rule{
 		name:    "hex_secret",
 		kind:    "credential",
 		repType: "hex_secret",
-		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:secret|token|passwd|password|api[_-]?key|auth|privkey|key)\s*[:=]\s*["']?([0-9a-fA-F]{32,64})\b`),
+		re:      regexp.MustCompile(`(?i)[a-z0-9_\-]*(?:` + secretNames + `)["']?\s*[:=]\s*["']?([0-9a-fA-F]{32,})\b`),
 		group:   1,
 	},
 	{
@@ -150,12 +158,13 @@ var rules = []*rule{
 		kind:    "pii",
 		repType: "email",
 		re:      regexp.MustCompile(`\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b`),
+		skip:    isGitRemote,
 	},
 	{
 		name:    "user_path",
 		kind:    "env",
 		repType: "user_path",
-		re:      userPathRe(),
+		find:    homeSpans(userHomes()),
 	},
 	{
 		name:    "lan_ip",
@@ -165,7 +174,7 @@ var rules = []*rule{
 	},
 }
 
-func userPathRe() *regexp.Regexp {
+func userHomes() []string {
 	var homes []string
 	if h, err := os.UserHomeDir(); err == nil && len(h) > 1 {
 		homes = append(homes, h)
@@ -175,14 +184,71 @@ func userPathRe() *regexp.Regexp {
 			homes = append(homes, h)
 		}
 	}
-	if len(homes) == 0 {
-		return regexp.MustCompile(`\bactivity-mesh-no-home-configured\b`)
+	var out []string
+	for _, h := range homes {
+		if h = strings.TrimRight(h, "/\\"); h != "" {
+			out = append(out, h)
+		}
 	}
-	quoted := make([]string, len(homes))
-	for i, h := range homes {
-		quoted[i] = regexp.QuoteMeta(strings.TrimRight(h, "/\\"))
+	return out
+}
+
+func homeSpans(homes []string) func(s string) []span {
+	return func(s string) []span {
+		var found []span
+		for _, h := range homes {
+			if h == "" {
+				continue
+			}
+			for from := 0; ; {
+				k := strings.Index(s[from:], h)
+				if k < 0 {
+					break
+				}
+				lo, hi := from+k, from+k+len(h)
+				if !continuesHome(s, lo, hi) {
+					found = append(found, span{lo, hi})
+				}
+				from = lo + 1
+			}
+		}
+		return mergeOverlapping(found)
 	}
-	return regexp.MustCompile(`(?:` + strings.Join(quoted, "|") + `)\b`)
+}
+
+func mergeOverlapping(spans []span) []span {
+	sort.Slice(spans, func(i, j int) bool { return spans[i].lo < spans[j].lo })
+	var merged []span
+	for _, sp := range spans {
+		if n := len(merged); n > 0 && sp.lo < merged[n-1].hi {
+			if sp.hi > merged[n-1].hi {
+				merged[n-1].hi = sp.hi
+			}
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	return merged
+}
+
+func continuesHome(s string, lo, hi int) bool {
+	last, _ := utf8.DecodeLastRuneInString(s[lo:hi])
+	next, _ := utf8.DecodeRuneInString(s[hi:])
+	switch {
+	case isASCIIWord(last):
+		return isASCIIWord(next)
+	case isLetterOrNumber(last):
+		return isLetterOrNumber(next) || next == '_'
+	}
+	return false
+}
+
+func isLetterOrNumber(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r)
+}
+
+func isASCIIWord(r rune) bool {
+	return r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }
 
 var (
@@ -203,14 +269,7 @@ func Apply(input string) (string, []Hit) {
 	var hits []Hit
 
 	for _, r := range rules {
-		if r.group > 0 {
-			out = replaceGroup(out, r, &hits)
-			continue
-		}
-		out = r.re.ReplaceAllStringFunc(out, func(match string) string {
-			hits = append(hits, mkHit(r.kind, r.name, match))
-			return fmt.Sprintf("[REDACTED:%s:%d]", r.repType, len(match))
-		})
+		out = replaceSpans(out, r, &hits)
 	}
 
 	out = base64Re.ReplaceAllStringFunc(out, func(match string) string {
@@ -228,34 +287,73 @@ func Apply(input string) (string, []Hit) {
 	return out, hits
 }
 
-// replaceGroup redacts only rule.group of every match, keeping the surrounding
-// context (the variable name) intact.
-func replaceGroup(s string, r *rule, hits *[]Hit) string {
-	locs := r.re.FindAllStringSubmatchIndex(s, -1)
-	if len(locs) == 0 {
+func replaceSpans(s string, r *rule, hits *[]Hit) string {
+	spans := r.spans(s)
+	if len(spans) == 0 {
 		return s
 	}
 	var b strings.Builder
 	last := 0
-	for _, m := range locs {
-		lo, hi := m[2*r.group], m[2*r.group+1]
-		if lo < 0 || lo < last {
-			continue
-		}
-		secret := s[lo:hi]
-		*hits = append(*hits, mkHit(r.kind, r.name, secret))
-		b.WriteString(s[last:lo])
-		fmt.Fprintf(&b, "[REDACTED:%s:%d]", r.repType, len(secret))
-		last = hi
+	for _, sp := range spans {
+		b.WriteString(s[last:sp.lo])
+		b.WriteString(r.redact(s[sp.lo:sp.hi], hits))
+		last = sp.hi
 	}
 	b.WriteString(s[last:])
 	return b.String()
+}
+
+func (r *rule) spans(s string) []span {
+	if r.find != nil {
+		return r.find(s)
+	}
+	var found []span
+	for _, m := range r.re.FindAllStringSubmatchIndex(s, -1) {
+		lo, hi := m[2*r.group], m[2*r.group+1]
+		if hi <= lo || (r.skip != nil && r.skip(s, lo, hi)) {
+			continue
+		}
+		found = append(found, span{lo, hi})
+	}
+	return found
+}
+
+func (r *rule) redact(secret string, hits *[]Hit) string {
+	*hits = append(*hits, mkHit(r.kind, r.name, secret))
+	return fmt.Sprintf("[REDACTED:%s:%d]", r.repType, len(secret))
+}
+
+var sshRemoteTail = regexp.MustCompile(`^:[A-Za-z0-9_.\-]+/`)
+
+func isGitRemote(s string, lo, hi int) bool {
+	if !strings.HasPrefix(strings.ToLower(s[lo:hi]), "git@") {
+		return false
+	}
+	if lo > 0 && strings.IndexByte("._%+-", s[lo-1]) >= 0 {
+		return false
+	}
+	return sshRemoteTail.MatchString(s[hi:])
 }
 
 func ApplyJSON(v any) (any, []Hit) {
 	var hits []Hit
 	out := walk(v, &hits)
 	return out, hits
+}
+
+var secretKeyRe = regexp.MustCompile(`(?i)(?:` + secretNames + `)$`)
+
+var hexValueRe = regexp.MustCompile(`^[0-9a-fA-F]{32,}$`)
+
+var hexSecretRule = ruleNamed("hex_secret")
+
+func ruleNamed(name string) *rule {
+	for _, r := range rules {
+		if r.name == name {
+			return r
+		}
+	}
+	return nil
 }
 
 func walk(v any, hits *[]Hit) any {
@@ -271,6 +369,9 @@ func walk(v any, hits *[]Hit) any {
 		out := make(map[string]any, len(t))
 		for k, child := range t {
 			cleaned := walk(child, hits)
+			if s, ok := cleaned.(string); ok && secretKeyRe.MatchString(k) && hexValueRe.MatchString(s) {
+				cleaned = hexSecretRule.redact(s, hits)
+			}
 			key, keyHits := Apply(k)
 			if key != k {
 				*hits = append(*hits, keyHits...)

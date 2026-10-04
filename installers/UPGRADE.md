@@ -13,9 +13,22 @@ pwsh installers/bootstrap.ps1
 ```
 
 It re-downloads the release archive (all three binaries on macOS/Linux;
-`activity-log.exe` on Windows), verifies the sha256, installs a fresh
-versioned assets dir (`~/.local/share/activity-mesh/dist/<version>/`),
-re-points `dist/current`, re-renders supervisor units, and restarts services.
+`activity-log.exe` on Windows), verifies the sha256 and refuses an archive that
+lacks the runtime layout before anything is changed. On macOS/Linux the order
+after that is:
+
+1. stage the new binaries beside the installed ones (`<prefix>/.activity-log.new`
+   and the same for the watcher and the daemon). A `sudo` prompt, if the prefix
+   needs one, happens here — before anything has changed, so a refused password
+   leaves the old install intact;
+2. install a fresh versioned assets dir (`~/.local/share/activity-mesh/dist/<version>/`)
+   and re-point `dist/current` at it;
+3. rename the staged binaries into place, re-render supervisor units, and
+   restart services.
+
+A failure before step 3 removes the staged files and leaves the installed
+binaries as they were. On Windows the executable is simply copied over.
+
 It does **not** touch:
 
 - `~/.local/share/activity-mesh/index.db` (rebuildable from JSONL)
@@ -34,6 +47,8 @@ bash installers/bootstrap.sh --version v0.4.0
 
 Downloads the exact `activity-mesh_<ver>_<os>_<arch>` archive attached to
 that release. All binaries and runtime assets are versioned together.
+Without `--version`, bootstrap installs the newest release, prereleases
+included.
 
 ## Semver compatibility
 
@@ -63,11 +78,14 @@ while another host still runs a `v=1`-only build is unsupported.
 ## Rolling back
 
 ```bash
-bash installers/bootstrap.sh --version v0.3.2
+bash installers/bootstrap.sh --version v0.4.0-rc.7
 ```
 
-Binaries are replaced atomically and `dist/current` re-points to the older
-assets; units re-render and restart.
+Roll back only to a release that ships the full runtime layout (v0.4.0-rc.1
+or later). An older archive is refused before the installed binaries or
+`dist/current` are touched. Otherwise the same order applies: the older
+binaries are staged, `dist/current` re-points to the older assets, the staged
+binaries are renamed into place, and units re-render and restart.
 
 ## Rebuilding the index
 
@@ -87,5 +105,13 @@ reconciled automatically.)
 bash installers/uninstall.sh           # keeps data
 bash installers/bootstrap.sh           # fresh install, re-uses preserved data
 ```
+
+The uninstall removes the units, the binaries (from `--prefix` and from
+`~/.local/bin`), `dist/`, and the Claude Code hooks / MCP registrations that
+point into that `dist/` — re-register them after the fresh install with
+`bash ~/.local/share/activity-mesh/dist/current/hooks/install.sh` (or
+`hooks/install.sh` from a checkout) and `bash mcp/install.sh` from a checkout
+(see `mcp/README.md`). It follows `ACTIVITY_MESH_HOME` and
+`ACTIVITY_MESH_STATE` like bootstrap does.
 
 `--purge` is destructive — only use it to wipe state/config on purpose.

@@ -3,7 +3,7 @@
 # shellcheck source=../lib.sh
 . "$(dirname "$0")/../lib.sh"
 am_start
-NAME=token-budget
+NAME="token-budget"
 
 INJ_LOG="$ACTIVITY_MESH_STATE/injections.log"
 PER_FIRE_CAP=500

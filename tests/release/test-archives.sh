@@ -31,7 +31,7 @@ for t in "${TARBALLS[@]}"; do
     for b in activity-log activity-watcher activity-mesh-daemon; do
         echo "$listing" | grep -qx "$b" || fail "$(basename "$t"): missing binary $b"
     done
-    for asset in VERSION health/master.sh configs/watcher.yaml registries/kinds.yaml hooks/user-prompt-router.sh mcp/server.mjs installers/bootstrap.sh installers/templates/launchd-daemon.plist.tmpl; do
+    for asset in VERSION health/master.sh configs/watcher.yaml registries/kinds.yaml hooks/user-prompt-router.sh hooks/install.sh mcp/server.mjs installers/bootstrap.sh installers/uninstall.sh installers/lib/cfgedit.sh installers/templates/launchd-daemon.plist.tmpl; do
         echo "$listing" | grep -qx "$asset" || fail "$(basename "$t"): missing asset $asset"
     done
 done

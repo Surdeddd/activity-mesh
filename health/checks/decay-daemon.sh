@@ -10,7 +10,7 @@ if [ ! -f "$STATE" ]; then
     am_emit "$NAME" 2 warn "decay-state.json missing — compactor has not run yet"; exit 0
 fi
 
-last=$(/usr/bin/jq -r '.last_run_ts // 0' "$STATE" 2>/dev/null || echo 0)
+last=$("$AM_JQ" -r '.last_run_ts // 0' "$STATE" 2>/dev/null || echo 0)
 case "$last" in ''|*[!0-9]*) last=0 ;; esac
 now=$(date +%s); age=$(( now - last ))
 

@@ -51,13 +51,16 @@ shellcheck: ## Run shellcheck across all bash scripts
 test-mcp: ## Run MCP server tests (node)
 	node --test mcp/server_test.mjs
 
-test-install: ## Hermetic bootstrap install test (temp HOME, local fake release)
+test-install: ## Hermetic bootstrap + integration/hooks/mcp installer + uninstall tests (temp HOME, local fake release, PATH shims)
 	bash tests/install/test-bootstrap.sh
+	bash tests/install/test-cfgedit.sh
+	bash tests/install/test-integration.sh
+	bash tests/install/test-uninstall.sh
 
 test-archives: ## Release archive content test (needs goreleaser; skips otherwise)
 	bash tests/release/test-archives.sh
 
-verify: vet test shellcheck test-mcp test-hooks ## Full verification — vet + test + shellcheck + mcp + hooks (CI parity)
+verify: vet test shellcheck test-mcp test-hooks test-health ## Full verification — vet + test + shellcheck + mcp + hooks + health (CI parity)
 
 install: ## Install binaries to /usr/local/bin (requires sudo)
 	$(GO) build $(GOFLAGS) -o /usr/local/bin/activity-log $(CMD)
@@ -71,3 +74,7 @@ clean: ## Remove built binaries
 .PHONY: test-hooks
 test-hooks: ## Run Claude Code hook regression tests (plain bash, no deps)
 	bash tests/hooks/run-tests.sh
+
+.PHONY: test-health
+test-health: ## Run health check regression tests (bash + jq, temp dirs only)
+	bash tests/health/run-tests.sh

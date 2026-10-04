@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -u patsub_replacement 2>/dev/null || true
 
 REPO="${ACTIVITY_MESH_REPO:-Surdeddd/activity-mesh}"
 VERSION="${VERSION:-latest}"
@@ -9,7 +10,7 @@ DRY_RUN=0
 NO_SERVICES=0
 LOCAL_MODE=0
 REQUIRE_SIG=0
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -25,6 +26,7 @@ while [[ $# -gt 0 ]]; do
         *) printf '\033[31m✗\033[0m unknown arg: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+case "$PREFIX" in /*) ;; *) PREFIX="$PWD/$PREFIX" ;; esac
 
 if [[ -t 1 ]]; then
     G='\033[32m'; R='\033[31m'; Y='\033[33m'; B='\033[34m'; N='\033[0m'
@@ -33,6 +35,22 @@ ok()   { printf '%b✓%b %s\n' "$G" "$N" "$*" >&2; }
 warn() { printf '%b⚠%b %s\n' "$Y" "$N" "$*" >&2; }
 info() { printf '%bi%b %s\n' "$B" "$N" "$*" >&2; }
 die()  { printf '%b✗%b %s\n' "$R" "$N" "$*" >&2; printf '%b✗%b bootstrap FAILED — installation is incomplete\n' "$R" "$N" >&2; exit 1; }
+json_unescape() {
+    local s="$1" out=""
+    while [[ "$s" == *\\* ]]; do
+        out="$out${s%%\\*}"
+        s="${s#*\\}"
+        case "$s" in
+            \"*) out="$out\""; s="${s:1}" ;;
+            \\*) out="$out\\"; s="${s:1}" ;;
+            u0026*) out="$out&"; s="${s:5}" ;;
+            u003[cC]*) out="$out<"; s="${s:5}" ;;
+            u003[eE]*) out="$out>"; s="${s:5}" ;;
+            *) return 1 ;;
+        esac
+    done
+    printf '%s' "$out$s"
+}
 
 case "$(uname -s)" in
     Darwin) OS="darwin" ;;
@@ -50,13 +68,21 @@ info "host=$HOST os=$OS arch=$ARCH version=$VERSION dry_run=$DRY_RUN local=$LOCA
 LOG_BIN="$PREFIX/activity-log"
 WATCHER_BIN="$PREFIX/activity-watcher"
 DAEMON_BIN="$PREFIX/activity-mesh-daemon"
-STORE_DIR="$HOME/.local/share/activity-mesh"
-STATE_DIR="$HOME/.local/state/activity-mesh"
+STORE_DIR="${ACTIVITY_MESH_HOME:-$HOME/.local/share/activity-mesh}"
+STATE_DIR="${ACTIVITY_MESH_STATE:-$HOME/.local/state/activity-mesh}"
 SYNC_DIR="${ACTIVITY_MESH_SYNC:-$HOME/Sync/activity}"
+if [[ -z "${ACTIVITY_MESH_SYNC:-}" && -f "$STORE_DIR/config.json" ]]; then
+    prev="$(sed -n -E 's/.*"sync_dir"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' "$STORE_DIR/config.json" | head -1)"
+    if [[ -n "$prev" ]]; then
+        SYNC_DIR="$(json_unescape "$prev")" \
+            || die "cannot decode sync_dir in $STORE_DIR/config.json — set ACTIVITY_MESH_SYNC to the sync dir and re-run"
+    fi
+fi
 CONFIG_DIR="$HOME/.config/activity-mesh"
 ASSETS_ROOT="$STORE_DIR/dist"
 ASSETS_LINK="$ASSETS_ROOT/current"
 TELEGRAM_ENV="${TELEGRAM_ENV:-$CONFIG_DIR/telegram.env}"
+export ACTIVITY_MESH_HOME="$STORE_DIR" ACTIVITY_MESH_SYNC="$SYNC_DIR" ACTIVITY_MESH_STATE="$STATE_DIR"
 
 ensure_prefix() {
     [[ -d "$PREFIX" ]] && return 0
@@ -65,16 +91,43 @@ ensure_prefix() {
     sudo mkdir -p "$PREFIX" || die "cannot create prefix dir $PREFIX"
 }
 
-install_bin() {
-    local src="$1" dest="$2"
-    ensure_prefix
-    if [[ ! -w "$(dirname "$dest")" ]]; then
-        info "elevating: sudo install -m 0755 $src $dest"
-        sudo install -m 0755 "$src" "$dest" || die "install $dest failed"
+as_prefix_owner() {
+    if [[ -w "$PREFIX" ]]; then
+        "$@"
     else
-        install -m 0755 "$src" "$dest" || die "install $dest failed"
+        info "elevating: sudo $*"
+        sudo "$@"
     fi
-    ok "binary installed → $dest"
+}
+
+stage_bins() {
+    local b
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        [[ -f "$BIN_SRC/$b" ]] || continue
+        ensure_prefix
+        as_prefix_owner install -m 0755 "$BIN_SRC/$b" "$PREFIX/.$b.new" || die "cannot stage $PREFIX/.$b.new"
+    done
+}
+
+commit_bins() {
+    local b
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        [[ -f "$BIN_SRC/$b" ]] || continue
+        as_prefix_owner mv -f "$PREFIX/.$b.new" "$PREFIX/$b" || die "cannot move $PREFIX/$b into place"
+        ok "binary installed → $PREFIX/$b"
+    done
+}
+
+cleanup() {
+    local b
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        if [[ -e "$PREFIX/.$b.new" ]]; then
+            as_prefix_owner rm -f "$PREFIX/.$b.new" >/dev/null 2>&1 || true
+        fi
+    done
+    if [[ -n "$WORK_DIR" ]]; then
+        rm -rf "$WORK_DIR" || true
+    fi
 }
 
 verify_signature() {
@@ -94,27 +147,34 @@ verify_signature() {
         info "signature NOT verified (no .pem in release); sha256 checksum was verified"
         return 0
     }
-    if cosign verify-blob \
+    local cosign_err
+    if cosign_err="$(cosign verify-blob \
         --certificate "$dir/checksums.txt.pem" \
         --signature "$dir/checksums.txt.sig" \
-        --certificate-identity-regexp "^https://github.com/${REPO}/" \
+        --certificate-identity-regexp "^https://github\\.com/${REPO}/\\.github/workflows/release\\.yml@refs/tags/v" \
         --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-        "$dir/checksums.txt" >/dev/null 2>&1; then
+        "$dir/checksums.txt" 2>&1 >/dev/null)"; then
         ok "cosign signature verified (checksums.txt)"
     else
-        die "cosign signature verification FAILED for checksums.txt"
+        die "cosign signature verification FAILED for checksums.txt: $cosign_err"
     fi
+}
+
+helper_missing() {
+    grep -qF 'lib/cfgedit.sh' "$1/installers/uninstall.sh" 2>/dev/null && [[ ! -f "$1/installers/lib/cfgedit.sh" ]]
 }
 
 RELEASE_DIR=""
 RESOLVED_VERSION=""
+BIN_SRC=""
+WORK_DIR=""
 
 install_release() {
     command -v curl >/dev/null 2>&1 || die "curl required"
     local tag="$VERSION"
     if [[ -z "$BASE_URL" ]]; then
         if [[ "$tag" == "latest" ]]; then
-            tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=1" \
                     | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
             [[ -n "$tag" ]] || die "cannot resolve latest release tag from GitHub API"
         fi
@@ -124,12 +184,13 @@ install_release() {
     fi
     RESOLVED_VERSION="${tag#v}"
     local archive="activity-mesh_${RESOLVED_VERSION}_${OS}_${ARCH}.tar.gz"
-    local tmp; tmp="$(mktemp -d)"
+    WORK_DIR="$(mktemp -d)" || die "mktemp failed"
+    local tmp="$WORK_DIR"
     info "fetching $BASE_URL/$archive"
     curl -fsSL "$BASE_URL/$archive"      -o "$tmp/$archive"      || die "archive download failed: $archive"
     curl -fsSL "$BASE_URL/checksums.txt" -o "$tmp/checksums.txt" || die "checksums.txt download failed"
     local want got
-    want="$(grep " $archive\$" "$tmp/checksums.txt" | awk '{print $1}')"
+    want="$(awk -v f="$archive" '$2==f{print $1}' "$tmp/checksums.txt")"
     [[ -n "$want" ]] || die "no checksum entry for $archive"
     if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$tmp/$archive" | awk '{print $1}')"
     else got="$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')"; fi
@@ -140,9 +201,13 @@ install_release() {
     tar -xzf "$tmp/$archive" -C "$tmp/x" || die "archive extraction failed"
     for b in activity-log activity-watcher activity-mesh-daemon; do
         [[ -f "$tmp/x/$b" ]] || die "$b missing from release archive"
-        install_bin "$tmp/x/$b" "$PREFIX/$b"
     done
+    for p in VERSION health/master.sh health/lib.sh hooks configs/watcher.yaml registries/kinds.yaml installers/templates/launchd-daemon.plist.tmpl; do
+        [[ -e "$tmp/x/$p" ]] || die "release archive lacks $p — refusing to install"
+    done
+    if helper_missing "$tmp/x"; then die "release archive lacks installers/lib/cfgedit.sh — refusing to install"; fi
     RELEASE_DIR="$tmp/x"
+    BIN_SRC="$tmp/x"
 }
 
 install_local() {
@@ -151,10 +216,8 @@ install_local() {
     RESOLVED_VERSION="$(tr -d '[:space:]' < "$root/VERSION" 2>/dev/null || echo dev)-local"
     RELEASE_DIR="$(cd "$root" && pwd)"
     # Private build dir: a predictable /tmp path lets any local user pre-create
-    # the target and have `install_bin` (often sudo) install their binary.
-    local build
-    build="$(mktemp -d "${TMPDIR:-/tmp}/am-bootstrap-build.XXXXXX")" || die "mktemp failed"
-    trap 'rm -rf "$build"' RETURN
+    # the target and have `stage_bins` (often sudo) install their binary.
+    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/am-bootstrap-build.XXXXXX")" || die "mktemp failed"
     # Rebuild first, keep-existing only as a fallback. The other order made
     # --local a no-op for binaries while still re-pointing dist/current and
     # re-rendering every unit: assets at version N, binaries at N-1, and a green
@@ -164,14 +227,14 @@ install_local() {
             local src="./cmd/$b"
             [[ "$b" == "activity-mesh-daemon" ]] && src="./server"
             info "building $b from source"
-            (cd "$RELEASE_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$RESOLVED_VERSION" -o "$build/$b" "$src") || die "go build $b failed"
-            install_bin "$build/$b" "$PREFIX/$b"
+            (cd "$RELEASE_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$RESOLVED_VERSION" -o "$WORK_DIR/$b" "$src") || die "go build $b failed"
         elif [[ -x "$PREFIX/$b" ]]; then
             warn "no Go toolchain — keeping existing $PREFIX/$b (may be older than $RESOLVED_VERSION)"
         else
             die "$b not in $PREFIX and Go toolchain unavailable"
         fi
     done
+    BIN_SRC="$WORK_DIR"
 }
 
 install_assets() {
@@ -205,25 +268,27 @@ install_assets() {
         [[ -f "$req" ]] || die "required asset missing after install: $req"
     done
     [[ -n "$(ls "$dest/health/checks/" 2>/dev/null)" ]] || die "health/checks is empty in installed assets"
+    if helper_missing "$dest"; then die "required asset missing after install: $dest/installers/lib/cfgedit.sh"; fi
     ln -sfn "$dest" "$ASSETS_LINK" || die "cannot update $ASSETS_LINK symlink"
     ok "runtime assets installed → $dest (current → $ASSETS_LINK)"
 }
 
 render_template() {
-    local tmpl="$1" dest="$2"
+    local tmpl="$1" dest="$2" c kv k v
     [[ -f "$tmpl" ]] || die "template not found: $tmpl"
-    local c; c="$(cat "$tmpl")"
-    c="${c//\{\{BIN_PATH\}\}/$LOG_BIN}"
-    c="${c//\{\{WATCHER_BIN\}\}/$WATCHER_BIN}"
-    c="${c//\{\{DAEMON_BIN\}\}/$DAEMON_BIN}"
-    c="${c//\{\{STORE_DIR\}\}/$STORE_DIR}"
-    c="${c//\{\{STATE_DIR\}\}/$STATE_DIR}"
-    c="${c//\{\{SYNC_DIR\}\}/$SYNC_DIR}"
-    c="${c//\{\{CONFIG_DIR\}\}/$CONFIG_DIR}"
-    c="${c//\{\{TELEGRAM_ENV\}\}/$TELEGRAM_ENV}"
-    c="${c//\{\{ASSETS_DIR\}\}/$ASSETS_LINK}"
-    c="${c//\{\{HOME\}\}/$HOME}"
-    c="${c//\{\{USER\}\}/${USER:-$(id -un)}}"
+    c="$(cat "$tmpl")"
+    for kv in "BIN_PATH=$LOG_BIN" "WATCHER_BIN=$WATCHER_BIN" "DAEMON_BIN=$DAEMON_BIN" \
+        "STORE_DIR=$STORE_DIR" "STATE_DIR=$STATE_DIR" "SYNC_DIR=$SYNC_DIR" "CONFIG_DIR=$CONFIG_DIR" \
+        "TELEGRAM_ENV=$TELEGRAM_ENV" "ASSETS_DIR=$ASSETS_LINK" "HOME=$HOME" "USER=${USER:-$(id -un)}"; do
+        k="${kv%%=*}"
+        v="${kv#*=}"
+        if [[ "$tmpl" == *.plist.tmpl ]]; then
+            v="${v//&/&amp;}"
+            v="${v//</&lt;}"
+            v="${v//>/&gt;}"
+        fi
+        c="${c//\{\{$k\}\}/$v}"
+    done
     if printf '%s' "$c" | grep -q '{{[A-Z_]*}}'; then
         die "unresolved placeholder in $tmpl: $(printf '%s' "$c" | grep -o '{{[A-Z_]*}}' | sort -u | tr '\n' ' ')"
     fi
@@ -232,6 +297,9 @@ render_template() {
 
 install_macos_units() {
     local agents="$HOME/Library/LaunchAgents"
+    if [[ $NO_SERVICES -eq 1 ]]; then
+        agents="$ASSETS_ROOT/$RESOLVED_VERSION/units"
+    fi
     mkdir -p "$agents" || die "mkdir $agents failed"
     local tdir="$ASSETS_LINK/installers/templates"
     for unit in watcher daemon health heartbeat compact weekly-digest; do
@@ -280,11 +348,13 @@ install_linux_units() {
         systemctl --user daemon-reload || die "systemctl daemon-reload failed"
         systemctl --user enable --now "activity-mesh-${unit}.service" \
             || die "systemctl enable failed for activity-mesh-${unit}"
-        ok "systemd enabled+started activity-mesh-${unit}"
+        systemctl --user restart "activity-mesh-${unit}.service" \
+            || die "systemctl restart failed for activity-mesh-${unit}"
+        ok "systemd enabled+restarted activity-mesh-${unit}"
     done
     info "periodic jobs (health/heartbeat/compact/weekly-digest) run from $ASSETS_LINK/health/ — schedule them with systemd timers or cron (see installers/README.md)"
     if [[ $NO_SERVICES -eq 0 ]]; then
-        loginctl enable-linger "$USER" 2>/dev/null \
+        loginctl enable-linger "${USER:-$(id -un)}" 2>/dev/null \
             || warn "enable-linger failed (services pause when logged out)"
     fi
 }
@@ -303,11 +373,13 @@ if [[ $DRY_RUN -eq 1 ]]; then
     exit 0
 fi
 
+trap cleanup EXIT
 if [[ $LOCAL_MODE -eq 1 ]]; then
     install_local
 else
     install_release
 fi
+stage_bins
 
 for d in "$STORE_DIR" "$STATE_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
     mkdir -p "$d" || die "mkdir $d failed"
@@ -315,6 +387,16 @@ for d in "$STORE_DIR" "$STATE_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
 done
 
 install_assets "$RELEASE_DIR"
+commit_bins
+wins="$(command -v activity-log 2>/dev/null || true)"
+if [[ -z "$wins" && -x "$HOME/.local/bin/activity-log" ]]; then
+    wins="$HOME/.local/bin/activity-log"
+fi
+if [[ -z "$wins" ]]; then
+    warn "no activity-log on PATH — shells and hooks will not find $LOG_BIN (add $PREFIX to PATH)"
+elif [[ ! "$wins" -ef "$LOG_BIN" ]]; then
+    warn "shells and hooks resolve activity-log to $wins, not $LOG_BIN"
+fi
 
 if [[ ! -f "$CONFIG_DIR/watcher.yaml" ]]; then
     cp "$ASSETS_LINK/configs/watcher.yaml" "$CONFIG_DIR/watcher.yaml" || die "install watcher.yaml failed"

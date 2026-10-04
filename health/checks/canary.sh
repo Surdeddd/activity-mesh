@@ -5,6 +5,7 @@
 am_start
 NAME=canary
 SYNC="$ACTIVITY_MESH_SYNC"
+STALE_S="${ACTIVITY_MESH_CANARY_STALE_S:-7200}"
 host=$(am_host)
 F="$SYNC/events-$host.jsonl"
 
@@ -12,21 +13,28 @@ if [ ! -f "$F" ]; then
     am_emit "$NAME" 2 warn "host shard $F missing"; exit 0
 fi
 
-now=$(date +%s); cutoff=$(( now - 86400 ))
-count=0
-while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    kind=$(printf '%s' "$line" | /usr/bin/jq -r '.kind // empty' 2>/dev/null)
-    [ "$kind" = canary ] || continue
-    ts=$(printf '%s' "$line" | /usr/bin/jq -r '.ts // empty' 2>/dev/null)
-    ts_epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "${ts%%.*}" +%s 2>/dev/null \
-              || date -u -d "$ts" +%s 2>/dev/null || echo 0)
-    [ "$ts_epoch" -lt "$cutoff" ] && continue
-    count=$((count+1))
-done < <(tail -n 500 "$F" 2>/dev/null)
+now=$(date +%s)
+awake=$(( now - $(am_last_wake) ))
+stats=$(grep -aE '"kind"[[:space:]]*:[[:space:]]*"canary"' "$F" 2>/dev/null | tail -n 2000 | "$AM_JQ" -nrR --argjson cutoff $(( now - 86400 )) "$AM_JQ_DEFS"'
+    [inputs | fromjson? | select(type == "object" and .kind == "canary")
+     | {t: ev_ts,
+        ok: ((.summary // "" | tostring) | test("ok=1"))}]
+    | (map(select(.t >= $cutoff))) as $day
+    | "\($day | length) \($day | map(select(.ok | not)) | length) \(map(.t) | max // 0)"')
+read -r count bad last <<< "${stats:-0 0 0}"
 
-if   [ "$count" -ge 20 ]; then am_emit "$NAME" 1 ok "$count canary events / 24h"
-elif [ "$count" -ge 10 ]; then am_emit "$NAME" 2 warn "$count canary events (expected ≥20)"
-else am_emit "$NAME" 3 fail "$count canary events / 24h (writer/launchd issue)"
+if [ "$last" -eq 0 ]; then
+    if [ "$awake" -gt "$STALE_S" ]; then
+        am_emit "$NAME" 3 fail "no canary events in $F, awake ${awake}s (writer/launchd issue)"
+    else
+        am_emit "$NAME" 1 ok "no canary yet, awake ${awake}s"
+    fi
+    exit 0
+fi
+age=$(( now - last ))
+if [ "$age" -gt "$STALE_S" ] && [ "$awake" -gt "$STALE_S" ]; then
+    am_emit "$NAME" 3 fail "last canary ${age}s ago, awake ${awake}s (writer/launchd issue)"
+else
+    am_emit "$NAME" 1 ok "last canary ${age}s ago; $count in 24h, $bad without a daemon answer"
 fi
 exit 0

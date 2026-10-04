@@ -6,48 +6,41 @@ am_start
 
 NAME=silence
 SYNC="$ACTIVITY_MESH_SYNC"
+TH="${ACTIVITY_MESH_SILENCE_MAX_S:-43200}"
+GRACE="${ACTIVITY_MESH_WAKE_GRACE_S:-1800}"
 
 if [ ! -d "$SYNC" ]; then
     am_emit "$NAME" 2 warn "sync dir missing: $SYNC"; exit 0
 fi
 
 now=$(date +%s)
-worst_age=0; worst_host=""; worst_threshold=0; status_overall=ok
-offline_hosts=""; offline_seen=""
-
+since_wake=$(( now - $(am_last_wake) ))
+worst_age=0; worst_host=""
 offline_hosts="$(am_offline_hosts)"
+offline_seen=""; pending=""
 
-is_offline() { am_host_is_offline "$1" "$offline_hosts"; }
-
-for f in "$SYNC"/events-*.jsonl; do
-    [ -f "$f" ] || continue
-    base=$(basename "$f" .jsonl); host=${base#events-}
-    case "$host" in
-        macbook)  th=21600 ;;   # 6h
-        mac-mini) th=7200 ;;    # 2h
-        pc)       th=86400 ;;   # 24h
-        *)        th=43200 ;;   # 12h
-    esac
-    # GNU `stat -f` means "filesystem status" and prints the mount point with
-    # exit 0, so the BSD form must be tried SECOND — otherwise every Linux host
-    # gets a path here and the age arithmetic silently reads zero.
+while IFS= read -r f; do
+    base=${f##*/}; base=${base%.jsonl}; host=${base#events-}
     mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo "$now")
     age=$(( now - mtime ))
-    if [ "$age" -gt "$th" ]; then
-        if is_offline "$host"; then
-            offline_seen="$offline_seen $host($(( age / 3600 ))h)"
-            continue
-        fi
-        if [ "$age" -gt "$worst_age" ]; then
-            worst_age=$age; worst_host=$host; worst_threshold=$th; status_overall=fail
-        fi
+    [ "$age" -gt "$TH" ] || continue
+    if am_host_is_offline "$host" "$offline_hosts"; then
+        offline_seen="$offline_seen $host($(( age / 3600 ))h)"
+    elif [ "$since_wake" -lt "$GRACE" ]; then
+        pending="$pending $host"
+    elif [ "$age" -gt "$worst_age" ]; then
+        worst_age=$age; worst_host=$host
     fi
-done
+done < <(am_shards)
 
-if [ "$status_overall" = fail ]; then
-    am_emit "$NAME" 3 fail "host=$worst_host age=${worst_age}s threshold=${worst_threshold}s"
+if [ -n "$worst_host" ]; then
+    am_emit "$NAME" 3 fail "host=$worst_host age=${worst_age}s threshold=${TH}s"
+elif [ -n "$pending" ]; then
+    am_emit "$NAME" 1 ok "$(am_t "woke ${since_wake}s ago, not judging yet:$pending" \
+        "проснулись ${since_wake} с назад, молчание пока не оцениваю:$pending")"
 elif [ -n "$offline_seen" ]; then
-    am_emit "$NAME" 1 ok "молчат выключенные хосты:$offline_seen (вернуть — ben-engine online <хост>)"
+    am_emit "$NAME" 1 ok "$(am_t "owner-disabled hosts are silent:$offline_seen (re-enable: ben-engine online <host>)" \
+        "молчат выключенные хосты:$offline_seen (вернуть — ben-engine online <хост>)")"
 else
     am_emit "$NAME" 1 ok "all hosts fresh"
 fi

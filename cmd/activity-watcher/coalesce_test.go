@@ -108,3 +108,58 @@ func TestRunEmitRollupReplacesPerFileSummary(t *testing.T) {
 		t.Errorf("rollup summary missing: %q", string(data))
 	}
 }
+
+func writeShimScript(t *testing.T, body string) string {
+	t.Helper()
+	shim := filepath.Join(t.TempDir(), "emit.sh")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return shim
+}
+
+func runEmitWith(shim string) error {
+	src := Source{Name: "emit", Path: "/x", Emit: Emit{Kind: "note", Scope: "test", SummaryTemplate: "x"}}
+	req := emitReq{ev: fsnotify.Event{Name: "/x/f.md", Op: fsnotify.Write}}
+	return runEmit(context.Background(), shim, src, req)
+}
+
+func TestRunEmitCountsAPrintedULIDAsWritten(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shim := writeShimScript(t, "printf '01ARZ3NDEKTSV4RRFFQ69G5FAV\\n'\nexec sleep 10\n")
+	old := emitTimeout
+	emitTimeout = 2 * time.Second
+	t.Cleanup(func() { emitTimeout = old })
+	if err := runEmitWith(shim); err != nil {
+		t.Fatalf("emit printed its ULID, so the event is in the shard; got error %v", err)
+	}
+}
+
+func TestRunEmitFailsWhenNoULIDWasPrinted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shim := writeShimScript(t, "printf 'boom\\n'\nexit 1\n")
+	err := runEmitWith(shim)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("an emit that failed without printing a ULID wrote nothing and must report an error with its output, got %v", err)
+	}
+}
+
+func TestRunEmitReadsTheULIDFromTheLastLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("integration uses POSIX shell shim")
+	}
+	shim := writeShimScript(t, "printf 'warn: x\\n01ARZ3NDEKTSV4RRFFQ69G5FAV\\n'\nexit 1\n")
+	if err := runEmitWith(shim); err != nil {
+		t.Fatalf("a ULID on the last line counts as written even after a warning line, got %v", err)
+	}
+}
+
+func TestEmitTimeoutOutlastsALoadedMachine(t *testing.T) {
+	if emitTimeout < 5*time.Minute {
+		t.Fatalf("emitTimeout=%s: under load emit took 78s and 4.7min in production; a short timeout kills writes that would succeed", emitTimeout)
+	}
+}

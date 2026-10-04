@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,8 @@ type daemon struct {
 	host              string
 	port              int
 	m                 metrics
+	pushMu            sync.Mutex
+	ingestDir         func(string) (int, error)
 }
 
 func main() {
@@ -97,47 +100,18 @@ func main() {
 	defer idx.Close()
 	d := &daemon{idx: idx, syncDir: syncDir, stateDir: stateDir, host: event.HostName(), port: *port}
 	d.m.startedAt = time.Now().UTC()
-	if n, err := d.idx.IngestDir(syncDir); err != nil {
-		d.m.errors.Add(1)
-		log.Printf("initial ingest failed: %v", err)
-	} else if n > 0 {
-		d.m.ingested.Add(uint64(n))
-		log.Printf("initial ingest: %d events", n)
-	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	wg := sync.WaitGroup{}
-	wg.Add(2)
-	go func() { defer wg.Done(); d.watchSync(ctx) }()
-	go func() { defer wg.Done(); d.periodicRebuild(ctx, defaultRebuild) }()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", d.handleHealth)
-	mux.HandleFunc("/recent", d.handleRecent)
-	mux.HandleFunc("/search", d.handleSearch)
-	mux.HandleFunc("/digest", d.handleDigest)
-	mux.HandleFunc("/push", d.handlePush)
-	mux.HandleFunc("/metrics", d.handleMetrics)
 	srv := &http.Server{
-		Addr: net.JoinHostPort(bindAddr, strconv.Itoa(*port)), Handler: mux,
+		Addr: net.JoinHostPort(bindAddr, strconv.Itoa(*port)), Handler: d.routes(),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second,
 		WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
 	}
-	// Bind before announcing: ListenAndServe's failure used to be logged and
-	// swallowed, leaving a live process with no listener that no supervisor
-	// would ever restart (port already held by a stale daemon is the common one).
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", srv.Addr, err)
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, ln.Addr(), syncDir, stateDir)
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("server error: %v", err)
-			cancel() // a dead listener must take the process down, not run headless
-		}
-	}()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	wg := d.start(ctx, cancel, ln, srv)
 	<-ctx.Done()
 	log.Printf("shutdown received, draining...")
 	shutdownCtx, sc := context.WithTimeout(context.Background(), 10*time.Second)
@@ -145,6 +119,67 @@ func main() {
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
 	log.Printf("daemon exited cleanly")
+}
+
+func (d *daemon) start(ctx context.Context, cancel context.CancelFunc, ln net.Listener, srv *http.Server) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		log.Printf("activity-mesh-daemon %s listening on %s (sync=%s state=%s)", version, ln.Addr(), d.syncDir, d.stateDir)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("server error: %v", err)
+			cancel()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		ingest := d.ingestDir
+		if ingest == nil {
+			ingest = d.idx.IngestDir
+		}
+		n, err := ingest(d.syncDir)
+		if n > 0 {
+			d.m.ingested.Add(uint64(n))
+			log.Printf("initial ingest: %d events", n)
+		}
+		if err != nil {
+			d.m.errors.Add(1)
+			log.Printf("initial ingest failed: %v", err)
+		}
+		var bg sync.WaitGroup
+		bg.Add(2)
+		go func() { defer bg.Done(); d.watchSync(ctx) }()
+		go func() { defer bg.Done(); d.periodicRebuild(ctx, defaultRebuild) }()
+		bg.Wait()
+	}()
+	return &wg
+}
+
+func (d *daemon) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", d.handleHealth)
+	mux.HandleFunc("/recent", d.handleRecent)
+	mux.HandleFunc("/search", d.handleSearch)
+	mux.HandleFunc("/digest", d.handleDigest)
+	mux.HandleFunc("/push", d.handlePush)
+	mux.HandleFunc("/metrics", d.handleMetrics)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !loopbackOrIPHost(r.Host) {
+			writeErr(w, http.StatusMisdirectedRequest, "host header must be localhost or an IP literal")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+}
+
+func loopbackOrIPHost(hostport string) bool {
+	h := hostport
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		h = host
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	return strings.EqualFold(h, "localhost") || net.ParseIP(h) != nil
 }
 
 func (d *daemon) watchSync(ctx context.Context) {
@@ -169,8 +204,7 @@ func (d *daemon) watchSync(ctx context.Context) {
 			if !ok {
 				return
 			}
-			base := filepath.Base(ev.Name)
-			if !strings.HasPrefix(base, "events-") || !strings.HasSuffix(base, ".jsonl") {
+			if !shard.IsShardName(filepath.Base(ev.Name)) {
 				continue
 			}
 			if ev.Op&(fsnotify.Write|fsnotify.Create) != 0 {
@@ -208,11 +242,12 @@ func (d *daemon) periodicRebuild(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 			n, err := d.idx.IngestDir(d.syncDir)
+			if n > 0 {
+				d.m.ingested.Add(uint64(n))
+			}
 			if err != nil {
 				log.Printf("periodic ingest: %v", err)
 				d.m.errors.Add(1)
-			} else if n > 0 {
-				d.m.ingested.Add(uint64(n))
 			}
 		}
 	}
@@ -335,7 +370,10 @@ func (d *daemon) handleDigest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const maxPushBody = 64 * 1024
+const (
+	maxPushBody      = 64 * 1024
+	maxPushJSONDepth = 32
+)
 
 var labelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
@@ -394,13 +432,27 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p map[string]any
-	if err := json.Unmarshal(body, &p); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&p); err != nil || p == nil || dec.Decode(new(json.RawMessage)) != io.EOF {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if v, ok := p["v"].(float64); ok && int(v) != event.SchemaVersion {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("unsupported schema version %v (this daemon writes v%d)", v, event.SchemaVersion))
+	if depth := index.JSONDepth(p); depth > maxPushJSONDepth {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("payload nested %d levels deep (max %d)", depth, maxPushJSONDepth))
 		return
+	}
+	if n, bad := outOfRangeNumber(p); bad {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("number %s is out of the float64 range the index can read", n))
+		return
+	}
+	if raw, present := p["v"]; present {
+		n, ok := raw.(json.Number)
+		v, err := n.Int64()
+		if !ok || err != nil || v != event.SchemaVersion {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("unsupported schema version %v (this daemon writes v%d)", raw, event.SchemaVersion))
+			return
+		}
 	}
 	p["v"] = event.SchemaVersion
 	str := func(k string) string { s, _ := p[k].(string); return s }
@@ -422,10 +474,17 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "id must be a 26-char ULID")
 		return
 	}
-	if _, err := event.ParseTS(ts); err != nil {
+	at, err := event.ParseTS(ts)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, "ts must be RFC3339 or canonical event layout")
 		return
 	}
+	canonicalTS := at.UTC().Format("2006-01-02T15:04:05.000000Z")
+	if _, err := event.ParseTS(canonicalTS); err != nil {
+		writeErr(w, http.StatusBadRequest, "ts must fall within years 0000-9999 once converted to UTC")
+		return
+	}
+	p["ts"] = canonicalTS
 	if !labelRe.MatchString(kind) || !labelRe.MatchString(scope) || !labelRe.MatchString(agent) {
 		writeErr(w, http.StatusBadRequest, "kind/scope/agent must match ^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 		return
@@ -449,11 +508,6 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, bad)
 		return
 	}
-	summary, truncated := event.NormalizeSummary(str("summary"))
-	p["summary"] = summary
-	if truncated {
-		p["truncated"] = true
-	}
 	// Ordering metadata belongs to this host's writer, not to the client: a
 	// pushed monotonic_seq of 999999 would sort ahead of every subsequent CLI
 	// emit forever.
@@ -461,6 +515,17 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 		delete(p, k)
 	}
 
+	d.pushMu.Lock()
+	defer d.pushMu.Unlock()
+	shardPath := filepath.Join(d.syncDir, "events-"+host+".jsonl")
+	if n, err := d.idx.IngestJSONL(shardPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			d.m.errors.Add(1)
+			log.Printf("pre-push ingest: %v", err)
+		}
+	} else {
+		d.m.ingested.Add(uint64(n))
+	}
 	// Retries after a dropped response used to append a second line with the same
 	// ULID: the CLI (which reads the shard) then double-counts what the index
 	// (keyed by ULID) shows once.
@@ -489,6 +554,10 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	p["monotonic_seq"] = seq
 
 	cleaned, hits := redact.ApplyJSON(p)
+	truncated := false
+	if m, ok := cleaned.(map[string]any); ok {
+		truncated = event.CapSummary(m)
+	}
 	line, err := json.Marshal(cleaned)
 	if err != nil {
 		_ = lock.Release()
@@ -507,7 +576,7 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 	if err := event.AppendAudit(d.stateDir, id, hits); err != nil {
 		log.Printf("push audit append: %v", err)
 	}
-	if n, err := d.idx.IngestJSONL(filepath.Join(d.syncDir, "events-"+host+".jsonl")); err != nil {
+	if n, err := d.idx.IngestJSONL(shardPath); err != nil {
 		d.m.errors.Add(1)
 		log.Printf("post-push ingest: %v", err)
 	} else {
@@ -526,7 +595,14 @@ func (d *daemon) handlePush(w http.ResponseWriter, r *http.Request) {
 // a typed struct field, so a mismatch makes the whole line undecodable.
 func badlyTypedFields(p map[string]any) string {
 	isString := func(v any) bool { _, ok := v.(string); return ok }
-	isNumber := func(v any) bool { _, ok := v.(float64); return ok }
+	isInt := func(v any) bool {
+		n, ok := v.(json.Number)
+		if !ok {
+			return false
+		}
+		_, err := n.Int64()
+		return err == nil
+	}
 	isBool := func(v any) bool { _, ok := v.(bool); return ok }
 	isStringSlice := func(v any) bool {
 		arr, ok := v.([]any)
@@ -545,18 +621,19 @@ func badlyTypedFields(p map[string]any) string {
 		ok   func(any) bool
 		want string
 	}{
-		{"ref", isString, "string"},
-		{"session_id", isString, "string"},
-		{"parent_id", isString, "string"},
-		{"caused_by", isString, "string"},
-		{"actor", isString, "string"},
-		{"originator", isString, "string"},
-		{"tags", isStringSlice, "array of strings"},
-		{"files", isStringSlice, "array of strings"},
-		{"duration_ms", isNumber, "number"},
-		{"exit_code", isNumber, "number"},
-		{"clock_offset_ms", isNumber, "number"},
-		{"truncated", isBool, "boolean"},
+		{"ref", isString, "a string"},
+		{"session_id", isString, "a string"},
+		{"parent_id", isString, "a string"},
+		{"caused_by", isString, "a string"},
+		{"actor", isString, "a string"},
+		{"originator", isString, "a string"},
+		{"priority", isString, "a string"},
+		{"tags", isStringSlice, "an array of strings"},
+		{"files", isStringSlice, "an array of strings"},
+		{"duration_ms", isInt, "an integer"},
+		{"exit_code", isInt, "an integer"},
+		{"clock_offset_ms", isInt, "an integer"},
+		{"truncated", isBool, "a boolean"},
 	}
 	for _, c := range checks {
 		v, present := p[c.key]
@@ -564,10 +641,32 @@ func badlyTypedFields(p map[string]any) string {
 			continue
 		}
 		if !c.ok(v) {
-			return fmt.Sprintf("field %q must be a %s", c.key, c.want)
+			return fmt.Sprintf("field %q must be %s", c.key, c.want)
 		}
 	}
 	return ""
+}
+
+func outOfRangeNumber(v any) (json.Number, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		if _, err := t.Float64(); err != nil {
+			return t, true
+		}
+	case map[string]any:
+		for _, c := range t {
+			if n, bad := outOfRangeNumber(c); bad {
+				return n, true
+			}
+		}
+	case []any:
+		for _, c := range t {
+			if n, bad := outOfRangeNumber(c); bad {
+				return n, true
+			}
+		}
+	}
+	return "", false
 }
 
 // alreadyIndexed reports whether this ULID is already in the index — the cheap
