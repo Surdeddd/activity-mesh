@@ -51,9 +51,10 @@ shellcheck: ## Run shellcheck across all bash scripts
 test-mcp: ## Run MCP server tests (node)
 	node --test mcp/server_test.mjs
 
-test-install: ## Hermetic bootstrap + integration/hooks/mcp installer tests (temp HOME, local fake release, PATH shims)
+test-install: ## Hermetic bootstrap + integration/hooks/mcp installer + uninstall tests (temp HOME, local fake release, PATH shims)
 	bash tests/install/test-bootstrap.sh
 	bash tests/install/test-integration.sh
+	bash tests/install/test-uninstall.sh
 
 test-archives: ## Release archive content test (needs goreleaser; skips otherwise)
 	bash tests/release/test-archives.sh
