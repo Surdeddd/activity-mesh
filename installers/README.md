@@ -107,7 +107,7 @@ directories can be deleted by hand once nothing references them.
 
 ```bash
 bash installers/uninstall.sh            # units + binaries + dist assets + registrations that point into dist; keeps data
-bash installers/uninstall.sh --purge    # also removes the store, state and config dirs; never touches ~/Sync/activity
+bash installers/uninstall.sh --purge    # also removes the store, state and config dirs; never touches the sync dir
 bash installers/uninstall.sh --dry-run  # print the plan, change nothing
 ```
 
@@ -115,14 +115,25 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   `~/.local/bin`, where earlier installs put them.
 - **Store and state dirs** follow `ACTIVITY_MESH_HOME` and `ACTIVITY_MESH_STATE`
   exactly like bootstrap (defaults `~/.local/share/activity-mesh` and
-  `~/.local/state/activity-mesh`). Each value must be an absolute path. It is
-  normalized first (trailing slashes, `.` and `..`, symlinks resolved) and
-  refused, before anything is planned or removed, when it is `/`, your home
-  directory or one of its parents (also through a symlink), the sync dir or one
-  of its parents, or a directory that holds the default `activity-mesh` store,
-  state or config dirs (`~/.local/share`, `~/.config`, ...). What is removed is
-  the normalized path, and registrations are matched under both the spelling you
-  gave and the resolved one.
+  `~/.local/state/activity-mesh`). Each value must be an absolute path without a
+  newline. It is resolved to the name the filesystem stores (symlinks, `.` and
+  `..`, trailing slashes and, on macOS, the case spelling and the `/private`
+  and `/System/Volumes/Data` aliases; a `.` or `..` below something that does
+  not exist cannot be resolved and is refused) and then compared by device and
+  inode as well, so no spelling gets around the check. It is refused, before
+  anything is planned or removed, when it is `/`, your home directory or one of
+  its parents, a sync dir or one of its parents, or a directory that holds the
+  default `activity-mesh` store, state or config dirs (`~/.local/share`,
+  `~/.config`, ...). What is removed is the resolved path plus the symlink you
+  named it by, so a purge leaves no dangling link behind; registrations are
+  matched under both the spelling you gave and the resolved one.
+- **The sync dir** is never removed, and every candidate is protected:
+  `ACTIVITY_MESH_SYNC`, the `sync_dir` in `<store>/config.json` (of the store
+  you name and of the default store, read the way bootstrap reads it) and
+  `~/Sync/activity`. For a symlinked sync dir the parents of the link and the
+  parents of its target are both protected. The line "left ... alone" names the
+  one bootstrap would use. A `sync_dir` that cannot be decoded stops the
+  uninstall unless `ACTIVITY_MESH_SYNC` says where the sync dir is.
 - **Hooks and MCP registrations** that point into `<store>/dist/` would be dead
   once `dist/` is gone, so they are removed first: the Claude Code hooks in
   `~/.claude/settings.json` (`CLAUDE_SETTINGS` overrides the path), the
@@ -157,10 +168,12 @@ The scripts that edit your configuration files (`hooks/install.sh`,
 `integration/update-session-end-flush.sh`, `installers/uninstall.sh`) all source
 `installers/lib/cfgedit.sh`, found relative to their own location (`lib/` from
 `installers/`, `../installers/lib/` from `hooks/`, `integration/` and `mcp/`).
-It holds the write-through-symlinks, mode-preserving writer and the one scanner
+It holds the write-through-symlinks, mode-preserving writer, the one scanner
 for the `[mcp_servers.activity-mesh]` table of a Codex `config.toml`, so
 install and uninstall agree on what that table is and on keeping the comments
-around it. It ships in the release archive and under
+around it, and the path helpers the uninstall guard is built on (resolving a
+path to the name the filesystem stores, device and inode identity, reading
+`sync_dir` from `config.json`). It ships in the release archive and under
 `dist/<version>/installers/lib/`; `bootstrap.sh` refuses an archive whose
 scripts need it but lack it. A script started without it prints the missing
 path and changes nothing.

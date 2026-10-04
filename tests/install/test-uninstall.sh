@@ -46,12 +46,19 @@ run_path() {
     if [ "$WITH_CLAUDE" -eq 1 ]; then echo "$SHIM:$SHIM_CLAUDE:$TOOLS:$BASE_PATH"; else echo "$SHIM:$TOOLS:$BASE_PATH"; fi
 }
 
+fs_id() { stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1"; }
+REAL_HOME_ID="$(fs_id "${HOME:-/nonexistent}" 2>/dev/null || echo none)"
+WORK_CANON="$(cd -P "$WORK" && /bin/pwd -P)"
+SKIPPED_SPELLINGS=0
+
 new_sandbox() {
     local b
     S="$WORK/$1"
     U_HOME="$S/home"
     U_PREFIX="$S/prefix"
     mkdir -p "$U_HOME" "$U_PREFIX"
+    case "$(cd -P "$U_HOME" && /bin/pwd -P)" in "$WORK_CANON"/*) ;; *) fail "sandbox $U_HOME is outside the test's temp dir" ;; esac
+    [ "$(fs_id "$U_HOME")" != "$REAL_HOME_ID" ] || fail "sandbox HOME is the real HOME"
     for b in activity-log activity-watcher activity-mesh-daemon; do
         printf '#!/bin/sh\n' > "$U_PREFIX/$b"
         chmod +x "$U_PREFIX/$b"
@@ -120,8 +127,9 @@ test_env_dirs() {
 
 expect_refused() {
     local name="$1" value="$2" sentinel_before
+    shift 2
     sentinel_before="$(sum_of "$U_HOME/sentinel.txt")"
-    uninstall_run "$S/out-refused.txt" "$name=$value" -- --purge --dry-run
+    uninstall_run "$S/out-refused.txt" "$name=$value" ${@+"$@"} -- --purge --dry-run
     [ "$RC" -ne 0 ] || { cat "$S/out-refused.txt" >&2; fail "$name=$value must be refused"; }
     grep -q "$name" "$S/out-refused.txt" || fail "the refusal of $name=$value does not name the variable: $(cat "$S/out-refused.txt")"
     if grep -q 'DRY' "$S/out-refused.txt"; then fail "$name=$value was refused only after the plan started: $(cat "$S/out-refused.txt")"; fi
@@ -129,13 +137,25 @@ expect_refused() {
     [ -e "$U_PREFIX/activity-log" ] || fail "binaries were removed before the refusal of $name=$value"
 }
 
+expect_refused_alias() {
+    local name="$1" value="$2" target="$3"
+    if [ "$(fs_id "$value" 2>/dev/null)" != "$(fs_id "$target")" ]; then
+        SKIPPED_SPELLINGS=$((SKIPPED_SPELLINGS + 1))
+        return 0
+    fi
+    expect_refused "$name" "$value"
+}
+
 test_unsafe_dirs() {
-    local v homes state_values tilde='~'
+    local v homes state_values tilde='~' nl=$'\n' canon_home upper_home upper_parent
     echo "== a store or state dir that is, or would take, HOME / the sync dir / / with it is refused =="
     new_sandbox unsafe
     printf 'keep\n' > "$U_HOME/sentinel.txt"
-    mkdir -p "$U_HOME/dist" "$S/other" "$U_HOME/.local/share" "$U_HOME/.local/state" "$U_HOME/.config" "$U_HOME/Sync/activity"
+    mkdir -p "$U_HOME/dist" "$S/other" "$U_HOME/.local/share" "$U_HOME/.local/state" "$U_HOME/.config" "$U_HOME/Sync/activity" "$U_HOME/Documents"
+    printf 'precious\n' > "$U_HOME/Documents/thesis.txt"
+    printf 'x\n' > "$U_HOME/afile"
     ln -s "$U_HOME" "$S/homelink"
+    ln -s loop "$S/loop"
     homes=(
         "$U_HOME" "$U_HOME/" "$U_HOME//" "$U_HOME/." "$U_HOME/./" "$S/other/../home" "$S/homelink" "$S/homelink/"
         / // /. /.. "$S" "$U_HOME/.."
@@ -153,9 +173,118 @@ test_unsafe_dirs() {
     done
     pass "HOME, its parents and symlinks to it, the sync dir and its parents, the XDG parents of the default dirs, / and relative values are all refused, in every spelling, before anything is planned"
 
+    canon_home="$(cd -P "$U_HOME" && /bin/pwd -P)"
+    upper_home="$(printf '%s' "$U_HOME" | tr 'a-z' 'A-Z')"
+    upper_parent="$(dirname "$S")/$(basename "$S" | tr 'a-z' 'A-Z')"
+    SKIPPED_SPELLINGS=0
+    for v in "$S/HOME" "$S/HOME/" "$S/Home/." "$upper_home" "$S/HOME/../HOME"; do
+        expect_refused_alias ACTIVITY_MESH_HOME "$v" "$U_HOME"
+    done
+    expect_refused_alias ACTIVITY_MESH_STATE "$S/HOME" "$U_HOME"
+    expect_refused_alias ACTIVITY_MESH_HOME "$upper_parent" "$S"
+    expect_refused_alias ACTIVITY_MESH_HOME "$U_HOME/SYNC/ACTIVITY" "$U_HOME/Sync/activity"
+    expect_refused_alias ACTIVITY_MESH_HOME "$U_HOME/SYNC" "$U_HOME/Sync"
+    expect_refused_alias ACTIVITY_MESH_HOME "$U_HOME/.LOCAL/SHARE" "$U_HOME/.local/share"
+    expect_refused_alias ACTIVITY_MESH_STATE "$U_HOME/.LOCAL/STATE" "$U_HOME/.local/state"
+    if [ -d /System/Volumes/Data ]; then
+        expect_refused_alias ACTIVITY_MESH_HOME "/System/Volumes/Data$canon_home" "$U_HOME"
+        expect_refused_alias ACTIVITY_MESH_STATE "/System/Volumes/Data$canon_home/" "$U_HOME"
+        expect_refused_alias ACTIVITY_MESH_HOME "/System/Volumes/Data$(dirname "$canon_home")" "$S"
+        expect_refused_alias ACTIVITY_MESH_HOME "/System/Volumes/Data$canon_home/.local/share" "$U_HOME/.local/share"
+    fi
+    case "$canon_home" in
+        /private/*) expect_refused_alias ACTIVITY_MESH_HOME "/PRIVATE${canon_home#/private}" "$U_HOME" ;;
+    esac
+    if [ "$SKIPPED_SPELLINGS" -gt 0 ]; then
+        echo "SKIP: $SKIPPED_SPELLINGS case or firmlink spellings do not alias the same directory on this filesystem"
+    else
+        pass "case variants and firmlink spellings of HOME, its parent, the sync dir and the XDG parents are refused (same inode, different name)"
+    fi
+
+    for v in "$U_HOME${nl}/Documents" "$U_HOME/Documents$nl" "$S${nl}/home" "$U_HOME/Documents${nl}/.."; do
+        expect_refused ACTIVITY_MESH_HOME "$v"
+        expect_refused ACTIVITY_MESH_STATE "$v"
+    done
+    [ -f "$U_HOME/Documents/thesis.txt" ] || fail "a value with a newline in it reached the files"
+    pass "a value with a newline is refused instead of being retargeted by command substitution"
+
+    for v in "$U_HOME/nope/.." "$U_HOME/nope/../.." "$S/loop/.." "$U_HOME/afile/.." "$U_HOME/nope/./.."; do
+        expect_refused ACTIVITY_MESH_HOME "$v"
+        expect_refused ACTIVITY_MESH_STATE "$v"
+    done
+    expect_refused ACTIVITY_MESH_HOME "$U_HOME/Documents/.."
+    pass "a path that uses . or .. after something that does not exist cannot be resolved and is refused"
+
+    ln -s "$U_HOME" "$U_HOME/.config/activity-mesh"
+    uninstall_run "$S/out-cfg.txt" -- --purge --dry-run
+    rm -f "$U_HOME/.config/activity-mesh"
+    [ "$RC" -ne 0 ] || fail "a config dir that is a symlink to HOME must be refused"
+    grep -q 'CONFIG_DIR' "$S/out-cfg.txt" || fail "the refusal does not name the config dir: $(cat "$S/out-cfg.txt")"
+    if grep -q 'DRY' "$S/out-cfg.txt"; then fail "the plan started although the config dir points at HOME: $(cat "$S/out-cfg.txt")"; fi
+    pass "a config dir that points at HOME is refused as well"
+
     uninstall_run "$S/out-ok.txt" ACTIVITY_MESH_HOME="$S/not-created-yet" ACTIVITY_MESH_STATE="$S/not-created-either" -- --purge --dry-run
     [ "$RC" -eq 0 ] || { cat "$S/out-ok.txt" >&2; fail "a dedicated directory that does not exist yet was refused"; }
     pass "a dedicated directory is not refused, whether or not it exists yet"
+}
+
+write_config() {
+    mkdir -p "$1"
+    printf '{\n  "sync_dir": "%s",\n  "store_dir": "%s"\n}\n' "$2" "$1" > "$1/config.json"
+}
+
+test_sync_protection() {
+    local default_store
+    echo "== every sync dir is protected, whichever of env, config.json or the default names it =="
+    new_sandbox syncs
+    default_store="$U_HOME/.local/share/activity-mesh"
+    printf 'keep\n' > "$U_HOME/sentinel.txt"
+    mkdir -p "$U_HOME/dist" "$U_HOME/Dropbox/activity" "$U_HOME/Dropbox/photos" "$U_HOME/Elsewhere/sync" "$S/custom-store"
+    printf 'ev\n' > "$U_HOME/Dropbox/activity/events.jsonl"
+
+    write_config "$default_store" "$U_HOME/Dropbox/activity"
+    expect_refused ACTIVITY_MESH_HOME "$U_HOME/Dropbox"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Dropbox/activity"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Dropbox/activity/"
+    uninstall_run "$S/out.txt" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "a plain --purge --dry-run exited $RC"; }
+    grep -qF "$U_HOME/Dropbox/activity alone" "$S/out.txt" || fail "the message does not name the sync dir that config.json sets: $(grep -i alone "$S/out.txt")"
+    if grep -qF "Sync/activity alone" "$S/out.txt"; then fail "the message names the default sync dir although config.json sets another"; fi
+    pass "the sync_dir of the default store's config.json is protected and named"
+
+    write_config "$S/custom-store" "$U_HOME/Elsewhere/sync"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Elsewhere" ACTIVITY_MESH_HOME="$S/custom-store"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Elsewhere/sync" ACTIVITY_MESH_HOME="$S/custom-store"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Dropbox/activity"
+    uninstall_run "$S/out-c.txt" ACTIVITY_MESH_HOME="$S/custom-store" -- --purge --dry-run
+    grep -qF "$U_HOME/Elsewhere/sync alone" "$S/out-c.txt" || fail "the message does not name the sync dir of the given store: $(grep -i alone "$S/out-c.txt")"
+    pass "the sync_dir of the store you name is protected too, next to the default store's"
+
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Elsewhere" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Dropbox/activity" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync"
+    uninstall_run "$S/out-e.txt" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync" -- --purge --dry-run
+    grep -qF "$U_HOME/Elsewhere/sync alone" "$S/out-e.txt" || fail "the message does not name ACTIVITY_MESH_SYNC: $(grep -i alone "$S/out-e.txt")"
+    pass "ACTIVITY_MESH_SYNC wins in the message, and every other sync dir stays protected"
+
+    mkdir -p "$U_HOME/R&D/activity"
+    printf '{"sync_dir": "%s/R\\u0026D/activity"}\n' "$U_HOME" > "$default_store/config.json"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/R&D"
+    printf '{"sync_dir": "%s/a\\tb"}\n' "$U_HOME" > "$default_store/config.json"
+    uninstall_run "$S/out-bad.txt" -- --purge --dry-run
+    [ "$RC" -ne 0 ] || fail "an undecodable sync_dir must stop the uninstall"
+    grep -q 'ACTIVITY_MESH_SYNC' "$S/out-bad.txt" || fail "no hint to set ACTIVITY_MESH_SYNC: $(cat "$S/out-bad.txt")"
+    if grep -q 'DRY' "$S/out-bad.txt"; then fail "the plan started although a sync_dir could not be decoded"; fi
+    uninstall_run "$S/out-bad2.txt" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-bad2.txt" >&2; fail "ACTIVITY_MESH_SYNC must let an undecodable config.json through, got $RC"; }
+    pass "JSON escapes in sync_dir are decoded; an undecodable one stops the uninstall unless ACTIVITY_MESH_SYNC says where the sync dir is"
+
+    rm -f "$default_store/config.json"
+    mkdir -p "$U_HOME/Sync"
+    ln -s "$U_HOME/Dropbox/activity" "$U_HOME/Sync/activity"
+    expect_refused ACTIVITY_MESH_HOME "$U_HOME/Sync"
+    expect_refused ACTIVITY_MESH_HOME "$U_HOME/Dropbox"
+    expect_refused ACTIVITY_MESH_STATE "$U_HOME/Sync/activity"
+    pass "a symlinked sync dir protects its own parents and the parents of what it points to"
 }
 
 test_store_spellings() {
@@ -184,11 +313,14 @@ JSON
     [ -f "$real/index.db" ] && [ -f "$S/real-state/health.log" ] || fail "data was removed without --purge"
     pass "a store given with trailing slashes or through a symlink is matched under both spellings"
 
-    uninstall_run "$S/out-purge.txt" ACTIVITY_MESH_HOME="$S/store-link/" ACTIVITY_MESH_STATE="$S/real-state//" -- --purge
+    ln -s "$S/real-state" "$S/state-link"
+    uninstall_run "$S/out-purge.txt" ACTIVITY_MESH_HOME="$S/store-link/" ACTIVITY_MESH_STATE="$S/state-link" -- --purge
     [ "$RC" -eq 0 ] || { cat "$S/out-purge.txt" >&2; fail "--purge exited $RC"; }
     [ ! -e "$real" ] && [ ! -e "$S/real-state" ] || fail "--purge left the symlinked store or the state dir behind"
+    [ ! -L "$S/store-link" ] && [ ! -L "$S/state-link" ] || fail "--purge left a dangling link behind, which makes the next bootstrap fail at mkdir"
     [ -d "$U_HOME" ] || fail "HOME disappeared"
-    pass "--purge removes the directory a symlinked store points to"
+    mkdir -p "$S/store-link" "$S/state-link"
+    pass "--purge removes the directory a symlinked store or state dir points to, and the link as well"
 }
 
 test_odd_paths() {
@@ -587,6 +719,7 @@ test_missing_helper() {
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
+test_sync_protection
 test_store_spellings
 test_odd_paths
 test_dry_run

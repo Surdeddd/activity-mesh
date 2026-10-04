@@ -313,7 +313,98 @@ TOML
     pass "every copy of the table goes; another server that points into dist is not this scanner's business"
 }
 
+fs_id() { stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1"; }
+
+test_paths() {
+    local d="$WORK/paths" base up fl lp ids
+    echo "== path helpers =="
+    mkdir -p "$d/Real/Sub" "$d/other"
+    ln -s Real "$d/link"
+    base="$(cd -P "$d" && /bin/pwd -P)"
+
+    [ "$(norm_lex "/a//b///")" = "/a/b" ] && [ "$(norm_lex "//")" = "/" ] && [ "$(norm_lex "/a/./b/")" = "/a/./b" ] || fail "norm_lex"
+    pass "norm_lex collapses slashes and strips trailing ones, nothing more"
+
+    [ "$(canon_path "$d/link/Sub/../Sub/")" = "$base/Real/Sub" ] || fail "canon_path through a symlink and dots: $(canon_path "$d/link/Sub/../Sub/")"
+    [ "$(canon_path "$d/link/new/dir")" = "$base/Real/new/dir" ] || fail "canon_path of a missing tail: $(canon_path "$d/link/new/dir")"
+    [ "$(canon_path "/")" = "/" ] || fail "canon_path of /"
+    pass "canon_path resolves symlinks and dots, and keeps the tail of a path that does not exist yet"
+
+    up="$(printf '%s' "$d/Real" | tr 'a-z' 'A-Z')"
+    if [ -d "$up" ] && [ "$(fs_id "$up")" = "$(fs_id "$d/Real")" ]; then
+        [ "$(canon_path "$up")" = "$base/Real" ] || fail "canon_path kept an upper-case spelling: $(canon_path "$up")"
+        [ "$(canon_path "$d/REAL/")" = "$base/Real" ] || fail "canon_path kept a spelling that differs in the last component: $(canon_path "$d/REAL/")"
+        pass "on a case-insensitive filesystem every case spelling canonicalizes to the stored name"
+    else
+        echo "SKIP: case-sensitive filesystem"
+    fi
+
+    fl="/System/Volumes/Data$base/Real"
+    if [ -d "/System/Volumes/Data" ] && [ -d "$fl" ] && [ "$(fs_id "$fl")" = "$(fs_id "$d/Real")" ]; then
+        [ "$(canon_path "$fl")" = "$base/Real" ] || fail "canon_path kept the firmlink spelling: $(canon_path "$fl")"
+        pass "the /System/Volumes/Data spelling canonicalizes to the usual path"
+    else
+        echo "SKIP: no firmlink spelling on this system"
+    fi
+    case "$base" in
+        /private/*)
+            lp="/PRIVATE${base#/private}/Real"
+            if [ -d "$lp" ] && [ "$(fs_id "$lp")" = "$(fs_id "$d/Real")" ]; then
+                [ "$(canon_path "$lp")" = "$base/Real" ] || fail "canon_path kept /PRIVATE: $(canon_path "$lp")"
+                pass "/PRIVATE canonicalizes to /private"
+            fi ;;
+    esac
+
+    [ "$(dir_id "$d/link")" = "$(dir_id "$d/Real")" ] || fail "dir_id does not follow a symlink"
+    [ "$(dir_id "$d/Real")" != "$(dir_id "$d/other")" ] || fail "dir_id equal for two directories"
+    if dir_id "$d/missing" >/dev/null 2>&1; then fail "dir_id succeeded for a missing path"; fi
+    pass "dir_id is the device:inode of what a path resolves to, and fails for what does not exist"
+
+    ids="$(chain_ids "$d/link/Sub")"
+    grep -qxF "$(dir_id "$d")" <<< "$ids" || fail "chain_ids misses a parent"
+    grep -qxF "$(dir_id /)" <<< "$ids" || fail "chain_ids misses /"
+    grep -qxF "$(dir_id "$d/Real/Sub")" <<< "$ids" || fail "chain_ids misses the path itself"
+    ids="$(chain_ids "$d/missing/deeper")"
+    [ "${ids%%$'\n'*}" = "$(dir_id "$d")" ] || fail "chain_ids does not skip components that do not exist"
+    pass "chain_ids lists the identity of a path and of every parent, skipping what does not exist"
+
+    covers / /a && covers /a /a && covers /a /a/b && covers /a/b /a/b/c || fail "covers misses a containment"
+    if covers /a/b /a || covers /a /ab || covers /a/b /a/bc; then fail "covers reports a containment that is not one"; fi
+    pass "covers is path containment, not a string prefix"
+}
+
+test_json() {
+    local d="$WORK/json" out_lib out_boot rc_lib rc_boot input
+    echo "== sync_dir from config.json =="
+    mkdir -p "$d"
+    printf '{\n  "sync_dir": "/Users/x/Dropbox/activity",\n  "store_dir": "/s"\n}\n' > "$d/plain.json"
+    [ "$(config_sync_dir "$d/plain.json")" = "/Users/x/Dropbox/activity" ] || fail "plain sync_dir"
+    printf '{"sync_dir": "/Users/x/R\\u0026D/a\\\\b\\"c", "store_dir": "/s"}\n' > "$d/escaped.json"
+    [ "$(config_sync_dir "$d/escaped.json")" = '/Users/x/R&D/a\b"c' ] || fail "escaped sync_dir: $(config_sync_dir "$d/escaped.json")"
+    printf '{"sync_dir": "", "store_dir": "/s"}\n' > "$d/empty.json"
+    [ -z "$(config_sync_dir "$d/empty.json")" ] || fail "empty sync_dir"
+    printf '{"store_dir": "/s"}\n' > "$d/nokey.json"
+    [ -z "$(config_sync_dir "$d/nokey.json")" ] || fail "missing key"
+    [ -z "$(config_sync_dir "$d/missing.json")" ] || fail "missing file"
+    printf '{"sync_dir": "/a\\tb"}\n' > "$d/tab.json"
+    if config_sync_dir "$d/tab.json" >/dev/null; then fail "an escape that cannot be decoded was accepted"; fi
+    pass "config_sync_dir reads sync_dir, decodes the escapes bootstrap decodes, and refuses the rest"
+
+    sed -n '/^json_unescape() {/,/^}/p' "$REPO_ROOT/installers/bootstrap.sh" > "$d/bootstrap_unescape.sh"
+    [ -s "$d/bootstrap_unescape.sh" ] || fail "could not extract json_unescape from bootstrap.sh"
+    for input in 'plain' '' 'a\\b' 'a\"b' 'R&D' '<x>' 'q\\\"r' '\n' 'tab\t' 'é' 'trailing\' 'x\\' '\\\\'; do
+        set +e
+        out_lib="$(bash -c '. "$1"; json_unescape "$2"' _ "$REPO_ROOT/installers/lib/cfgedit.sh" "$input")"; rc_lib=$?
+        out_boot="$(bash -c '. "$1"; json_unescape "$2"' _ "$d/bootstrap_unescape.sh" "$input")"; rc_boot=$?
+        set -e
+        [ "$rc_lib" = "$rc_boot" ] && [ "$out_lib" = "$out_boot" ] || fail "json_unescape diverges from bootstrap.sh on [$input]: lib rc=$rc_lib [$out_lib], bootstrap rc=$rc_boot [$out_boot]"
+    done
+    pass "json_unescape decodes exactly what bootstrap.sh's own copy decodes"
+}
+
 test_write_through
+test_paths
+test_json
 test_replace
 test_strip
 

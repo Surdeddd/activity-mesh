@@ -25,6 +25,7 @@ fi
 ok()   { printf '%b✓%b %s\n' "$G" "$N" "$*" >&2; }
 warn() { printf '%b⚠%b %s\n' "$Y" "$N" "$*" >&2; }
 err()  { printf '%b✗%b %s\n' "$R" "$N" "$*" >&2; }
+refuse() { err "refusing to uninstall: $*"; exit 1; }
 run()  { if [[ $DRY_RUN -eq 1 ]]; then printf '%bDRY%b %s\n' "$Y" "$N" "$*" >&2; else eval "$*"; fi; }
 run_argv() { if [[ $DRY_RUN -eq 1 ]]; then printf '%bDRY%b %s\n' "$Y" "$N" "$*" >&2; else "$@"; fi; }
 
@@ -41,66 +42,119 @@ case "$UNAME_S" in
     *)      err "unsupported OS: $UNAME_S"; exit 1 ;;
 esac
 
-STORE_DIR="${ACTIVITY_MESH_HOME:-$HOME/.local/share/activity-mesh}"
-STATE_DIR="${ACTIVITY_MESH_STATE:-$HOME/.local/state/activity-mesh}"
-SYNC_DIR="${ACTIVITY_MESH_SYNC:-$HOME/Sync/activity}"
+DEFAULT_STORE="$HOME/.local/share/activity-mesh"
+DEFAULT_STATE="$HOME/.local/state/activity-mesh"
 CONFIG_DIR="$HOME/.config/activity-mesh"
+STORE_DIR="${ACTIVITY_MESH_HOME:-$DEFAULT_STORE}"
+STATE_DIR="${ACTIVITY_MESH_STATE:-$DEFAULT_STATE}"
 
-norm_lex() {
-    local p="$1"
-    while [[ "$p" == *//* ]]; do p="${p//\/\///}"; done
-    while [[ "$p" == */ && "$p" != "/" ]]; do p="${p%/}"; done
-    printf '%s\n' "$p"
+check_value() {
+    case "$2" in
+        *$'\n'*) refuse "$1 contains a newline" ;;
+        /*) ;;
+        *) refuse "$1=$2 is not an absolute path" ;;
+    esac
 }
 
-canon_path() {
-    local p="$1" c
-    if c="$(cd -P -- "$p" 2>/dev/null && pwd -P)"; then
-        printf '%s\n' "$c"
-        return 0
-    fi
-    if [[ "$p" == "/" ]]; then
-        printf '/\n'
-        return 0
-    fi
-    c="$(canon_path "$(dirname -- "$p")")"
-    printf '%s/%s\n' "${c%/}" "$(basename -- "$p")"
+resolve_dir() {
+    check_value "$1" "$2"
+    RES_LEX="$(norm_lex "$2")"
+    RES_CANON="$(canon_path "$RES_LEX")"
+    case "$RES_CANON/" in
+        */./*|*/../*) refuse "$1=$2 uses . or .. below something that does not exist, so it cannot be resolved" ;;
+    esac
 }
 
-covers() { [[ "$1" == "/" || "$2" == "$1" || "$2" == "$1"/* ]]; }
+parent_of() {
+    local p="${1%/*}"
+    printf '%s\n' "${p:-/}"
+}
 
-CANON_HOME="$(canon_path "$(norm_lex "$HOME")")"
-CANON_SYNC="$(canon_path "$(norm_lex "$SYNC_DIR")")"
+in_ids() {
+    [[ -n "$1" ]] || return 1
+    case $'\n'"$2"$'\n' in *$'\n'"$1"$'\n'*) return 0 ;; esac
+    return 1
+}
+
+covers_any() { covers "$1" "$3" || covers "$1" "$4" || covers "$2" "$3" || covers "$2" "$4"; }
+
+P_LEX=()
+P_CANON=()
+P_IDS=()
+P_WHY=()
+protect() {
+    local n="${#P_LEX[@]}"
+    P_LEX[n]="$1"
+    P_CANON[n]="$2"
+    P_IDS[n]="$(chain_ids "$1")"
+    if [[ "$1" != "$2" ]]; then P_IDS[n]="${P_IDS[n]}"$'\n'"$(chain_ids "$2")"; fi
+    P_WHY[n]="$3"
+}
 
 guard_dir() {
-    local name="$1" raw="$2" managed
-    case "$raw" in
-        /*) ;;
-        *) err "refusing to uninstall: $name=$raw is not an absolute path"; exit 1 ;;
-    esac
-    GUARD_LEX="$(norm_lex "$raw")"
-    GUARD_CANON="$(canon_path "$GUARD_LEX")"
-    if covers "$GUARD_CANON" "$CANON_HOME"; then
-        err "refusing to uninstall: $name=$raw is your home directory or one of its parents"
-        exit 1
-    fi
-    if covers "$GUARD_CANON" "$CANON_SYNC"; then
-        err "refusing to uninstall: $name=$raw is the sync dir $CANON_SYNC or one of its parents"
-        exit 1
-    fi
-    for managed in "$HOME/.local/share/activity-mesh" "$HOME/.local/state/activity-mesh" "$CONFIG_DIR"; do
-        managed="$(canon_path "$(norm_lex "$managed")")"
-        if [[ "$GUARD_CANON" != "$managed" ]] && covers "$GUARD_CANON" "$managed"; then
-            err "refusing to uninstall: $name=$raw would take $managed with it"
-            exit 1
+    local name="$1" raw="$2" lex="$3" canon="$4" id i
+    id="$(dir_id "$canon" 2>/dev/null || true)"
+    for ((i = 0; i < ${#P_LEX[@]}; i++)); do
+        if covers_any "$lex" "$canon" "${P_LEX[i]}" "${P_CANON[i]}" || in_ids "$id" "${P_IDS[i]}"; then
+            refuse "$name=$raw ${P_WHY[i]}"
         fi
     done
 }
-guard_dir ACTIVITY_MESH_HOME "$STORE_DIR"
-STORE_LEX="$GUARD_LEX"
-STORE_CANON="$GUARD_CANON"
-guard_dir ACTIVITY_MESH_STATE "$STATE_DIR"
-STATE_CANON="$GUARD_CANON"
+
+SYNC_EFFECTIVE=""
+add_sync() {
+    local label="$1" raw="$2" effective="$3" tilde='~'
+    case "$raw" in
+        "$tilde") raw="$HOME" ;;
+        "$tilde"/*) raw="$HOME/${raw:2}" ;;
+    esac
+    case "$raw" in /*) ;; *) raw="$PWD/$raw" ;; esac
+    resolve_dir "$label" "$raw"
+    protect "$RES_LEX" "$RES_CANON" "is the sync dir $RES_LEX or one of its parents"
+    if [[ "$effective" == 1 && -z "$SYNC_EFFECTIVE" ]]; then SYNC_EFFECTIVE="$RES_LEX"; fi
+}
+
+sync_from_config() {
+    local cfg="$1" effective="$2" v
+    [[ -f "$cfg" ]] || return 0
+    if ! v="$(config_sync_dir "$cfg")"; then
+        if [[ -n "${ACTIVITY_MESH_SYNC:-}" ]]; then
+            warn "cannot decode sync_dir in $cfg — ignored, ACTIVITY_MESH_SYNC names the sync dir"
+            return 0
+        fi
+        refuse "cannot decode sync_dir in $cfg — set ACTIVITY_MESH_SYNC to the sync dir and re-run"
+    fi
+    [[ -z "$v" ]] || add_sync "sync_dir in $cfg" "$v" "$effective"
+}
+
+resolve_dir HOME "$HOME"
+protect "$RES_LEX" "$RES_CANON" "is your home directory or one of its parents"
+
+resolve_dir ACTIVITY_MESH_HOME "$STORE_DIR"
+STORE_LEX="$RES_LEX"
+STORE_CANON="$RES_CANON"
+resolve_dir ACTIVITY_MESH_STATE "$STATE_DIR"
+STATE_LEX="$RES_LEX"
+STATE_CANON="$RES_CANON"
+resolve_dir CONFIG_DIR "$CONFIG_DIR"
+CONFIG_LEX="$RES_LEX"
+CONFIG_CANON="$RES_CANON"
+
+if [[ -n "${ACTIVITY_MESH_SYNC:-}" ]]; then add_sync ACTIVITY_MESH_SYNC "$ACTIVITY_MESH_SYNC" 1; fi
+sync_from_config "$STORE_LEX/config.json" 1
+if [[ "$STORE_CANON" != "$(canon_path "$(norm_lex "$DEFAULT_STORE")")" ]]; then
+    sync_from_config "$DEFAULT_STORE/config.json" 0
+fi
+add_sync "the default sync dir" "$HOME/Sync/activity" 1
+
+for managed in "$DEFAULT_STORE" "$DEFAULT_STATE" "$CONFIG_DIR"; do
+    resolve_dir "the default dir $managed" "$managed"
+    protect "$(parent_of "$RES_LEX")" "$(parent_of "$RES_CANON")" "would take $RES_CANON with it"
+done
+
+guard_dir ACTIVITY_MESH_HOME "$STORE_DIR" "$STORE_LEX" "$STORE_CANON"
+guard_dir ACTIVITY_MESH_STATE "$STATE_DIR" "$STATE_LEX" "$STATE_CANON"
+guard_dir CONFIG_DIR "$CONFIG_DIR" "$CONFIG_LEX" "$CONFIG_CANON"
 
 uninstall_macos() {
     local unit plist
@@ -269,13 +323,24 @@ if [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
     ok "removed runtime assets $DIST_B"
 fi
 
+purge_dir() {
+    if [[ -d "$1" ]]; then
+        run_argv rm -rf "$1"
+        ok "purged $1"
+    fi
+    if [[ -L "$2" ]]; then
+        run_argv rm -f "$2"
+        ok "removed the link $2"
+    fi
+}
+
 if [[ $PURGE -eq 1 ]]; then
-    for d in "$STORE_CANON" "$STATE_CANON" "$CONFIG_DIR"; do
-        [[ -d "$d" ]] && { run_argv rm -rf "$d"; ok "purged $d"; }
-    done
-    warn "left $SYNC_DIR alone — it's the cross-host source-of-truth, delete by hand if intended"
+    purge_dir "$STORE_CANON" "$STORE_LEX"
+    purge_dir "$STATE_CANON" "$STATE_LEX"
+    purge_dir "$CONFIG_CANON" "$CONFIG_LEX"
+    warn "left $SYNC_EFFECTIVE alone — it's the cross-host source-of-truth, delete by hand if intended"
 elif [[ $KEEP_DATA -eq 1 ]]; then
-    ok "preserved data: $STORE_CANON $STATE_CANON $SYNC_DIR $CONFIG_DIR"
+    ok "preserved data: $STORE_CANON $STATE_CANON $SYNC_EFFECTIVE $CONFIG_CANON"
 fi
 
 ok "uninstall complete"
