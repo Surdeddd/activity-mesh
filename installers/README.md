@@ -16,24 +16,28 @@ bash installers/bootstrap.sh --local
 
 What it does — and fails hard (non-zero exit, no "bootstrap complete") if any step breaks:
 
-1. Downloads `activity-mesh_<ver>_<os>_<arch>.tar.gz` + `checksums.txt` from the release.
+1. Downloads `activity-mesh_<ver>_<os>_<arch>.tar.gz` + `checksums.txt` from the release
+   (without `--version`: the newest release, prereleases included).
 2. **Verifies sha256** of the archive. If `cosign` is installed, also verifies the
    keyless signature of `checksums.txt` (`--require-signature` makes that mandatory;
    without cosign the script says plainly that only the checksum was verified).
-3. Installs `activity-log`, `activity-watcher`, `activity-mesh-daemon` to `--prefix`
-   (default `/usr/local/bin`, sudo only if not writable).
+3. Checks that the archive carries the three binaries and the runtime layout
+   (`VERSION`, `health/`, `hooks/`, `configs/`, `registries/`, unit templates) and
+   refuses it otherwise — nothing on the machine has changed at that point.
 4. Installs runtime assets (health scripts, unit templates, registries, default
    `watcher.yaml`, hooks, MCP server) to `~/.local/share/activity-mesh/dist/<version>/`
    and points the `dist/current` symlink at it. **Supervisor units reference
    `dist/current`, never a repo checkout.**
-5. Scaffolds `~/.local/share/activity-mesh`, `~/.local/state/activity-mesh`,
+5. Only then installs `activity-log`, `activity-watcher`, `activity-mesh-daemon` to
+   `--prefix` (default `/usr/local/bin`, sudo only if not writable).
+6. Scaffolds `~/.local/share/activity-mesh`, `~/.local/state/activity-mesh`,
    `~/Sync/activity`, `~/.config/activity-mesh`; seeds missing registries into the
    sync dir; runs `activity-log init --sync-dir ... --yes` and `refresh-caches`.
-6. macOS: renders + bootstraps **6 launchd units** (`watcher`, `daemon`, `health`,
+7. macOS: renders + bootstraps **6 launchd units** (`watcher`, `daemon`, `health`,
    `heartbeat`, `compact`, `weekly-digest`).
    Linux: renders + enables 2 systemd user units (`watcher`, `daemon`) and calls
    `loginctl enable-linger`; periodic jobs are documented below.
-7. Smoke-verifies: `--version`, `status`, one `emit`, then prints `bootstrap complete`.
+8. Smoke-verifies: `--version`, `status`, one `emit`, then prints `bootstrap complete`.
 
 ### Windows (PowerShell 7+) — CLI only
 
@@ -56,7 +60,7 @@ Signature verification is not implemented on Windows — the script says so.
 | flag | default | meaning |
 |---|---|---|
 | `--dry-run` | off | print the plan, do nothing |
-| `--version vX.Y.Z` | `latest` | pin a release tag |
+| `--version vX.Y.Z` | `latest` | pin a release tag (`latest` = newest release, prereleases included) |
 | `--prefix DIR` | `/usr/local/bin` | binary install dir |
 | `--no-services` | off | render units but do not register them (tests, containers) |
 | `--local` | off | use the repo checkout as the asset source and rebuild all three binaries with Go (falls back to the installed binaries only when no toolchain is present) |
@@ -80,8 +84,8 @@ and the weekly digest run from `~/.local/share/activity-mesh/dist/current/health
 
 ## Upgrades
 
-Re-run the same bootstrap command. Binaries are replaced, a new
-`dist/<version>/` is installed and `current` re-pointed, units are re-rendered
+Re-run the same bootstrap command. A new `dist/<version>/` is installed and
+`current` re-pointed, then the binaries are replaced; units are re-rendered
 and re-registered. Config, state, and the sync dir are never reset. Old
 `dist/<version>` directories can be deleted by hand once nothing references them.
 

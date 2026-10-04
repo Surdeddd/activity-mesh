@@ -108,13 +108,15 @@ verify_signature() {
 
 RELEASE_DIR=""
 RESOLVED_VERSION=""
+BIN_SRC=""
+WORK_DIR=""
 
 install_release() {
     command -v curl >/dev/null 2>&1 || die "curl required"
     local tag="$VERSION"
     if [[ -z "$BASE_URL" ]]; then
         if [[ "$tag" == "latest" ]]; then
-            tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=1" \
                     | grep -m1 '"tag_name"' | cut -d'"' -f4 || true)"
             [[ -n "$tag" ]] || die "cannot resolve latest release tag from GitHub API"
         fi
@@ -140,9 +142,12 @@ install_release() {
     tar -xzf "$tmp/$archive" -C "$tmp/x" || die "archive extraction failed"
     for b in activity-log activity-watcher activity-mesh-daemon; do
         [[ -f "$tmp/x/$b" ]] || die "$b missing from release archive"
-        install_bin "$tmp/x/$b" "$PREFIX/$b"
+    done
+    for p in VERSION health/master.sh health/lib.sh hooks configs/watcher.yaml registries/kinds.yaml installers/templates/launchd-daemon.plist.tmpl; do
+        [[ -e "$tmp/x/$p" ]] || die "release archive lacks $p — refusing to install"
     done
     RELEASE_DIR="$tmp/x"
+    BIN_SRC="$tmp/x"
 }
 
 install_local() {
@@ -152,9 +157,8 @@ install_local() {
     RELEASE_DIR="$(cd "$root" && pwd)"
     # Private build dir: a predictable /tmp path lets any local user pre-create
     # the target and have `install_bin` (often sudo) install their binary.
-    local build
-    build="$(mktemp -d "${TMPDIR:-/tmp}/am-bootstrap-build.XXXXXX")" || die "mktemp failed"
-    trap 'rm -rf "$build"' RETURN
+    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/am-bootstrap-build.XXXXXX")" || die "mktemp failed"
+    trap 'rm -rf "$WORK_DIR"' EXIT
     # Rebuild first, keep-existing only as a fallback. The other order made
     # --local a no-op for binaries while still re-pointing dist/current and
     # re-rendering every unit: assets at version N, binaries at N-1, and a green
@@ -164,14 +168,14 @@ install_local() {
             local src="./cmd/$b"
             [[ "$b" == "activity-mesh-daemon" ]] && src="./server"
             info "building $b from source"
-            (cd "$RELEASE_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$RESOLVED_VERSION" -o "$build/$b" "$src") || die "go build $b failed"
-            install_bin "$build/$b" "$PREFIX/$b"
+            (cd "$RELEASE_DIR" && CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$RESOLVED_VERSION" -o "$WORK_DIR/$b" "$src") || die "go build $b failed"
         elif [[ -x "$PREFIX/$b" ]]; then
             warn "no Go toolchain — keeping existing $PREFIX/$b (may be older than $RESOLVED_VERSION)"
         else
             die "$b not in $PREFIX and Go toolchain unavailable"
         fi
     done
+    BIN_SRC="$WORK_DIR"
 }
 
 install_assets() {
@@ -315,6 +319,12 @@ for d in "$STORE_DIR" "$STATE_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
 done
 
 install_assets "$RELEASE_DIR"
+
+for b in activity-log activity-watcher activity-mesh-daemon; do
+    if [[ -f "$BIN_SRC/$b" ]]; then
+        install_bin "$BIN_SRC/$b" "$PREFIX/$b"
+    fi
+done
 
 if [[ ! -f "$CONFIG_DIR/watcher.yaml" ]]; then
     cp "$ASSETS_LINK/configs/watcher.yaml" "$CONFIG_DIR/watcher.yaml" || die "install watcher.yaml failed"

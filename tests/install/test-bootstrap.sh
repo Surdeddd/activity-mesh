@@ -13,6 +13,8 @@ trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
+sum256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+BOOTSTRAP="$REPO_ROOT/installers/bootstrap.sh"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 case "$(uname -m)" in
@@ -39,7 +41,7 @@ done
 RELEASE="$WORK/release"
 mkdir -p "$RELEASE"
 (cd "$STAGE" && tar -czf "$RELEASE/$ARCHIVE" .)
-(cd "$RELEASE" && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$ARCHIVE" || shasum -a 256 "$ARCHIVE"; } > checksums.txt)
+(cd "$RELEASE" && sum256 "$ARCHIVE" > checksums.txt)
 
 echo "== serving fake release on localhost =="
 PORT=$(( (RANDOM % 20000) + 20000 ))
@@ -120,6 +122,28 @@ pass "registries + watcher.yaml seeded"
 HOME="$FAKE_HOME" "$PREFIX_DIR/activity-log" query --since 24h --format text | grep -q "installed on" \
     || fail "smoke event not queryable"
 pass "smoke emit is queryable"
+
+echo "== an archive without the runtime layout must not touch the install =="
+OLD_STAGE="$WORK/stage-old"
+mkdir -p "$OLD_STAGE"
+for b in activity-log activity-watcher activity-mesh-daemon; do
+    printf '#!/bin/sh\necho "%s 0.3.2"\n' "$b" > "$OLD_STAGE/$b"
+    chmod +x "$OLD_STAGE/$b"
+done
+cp -R "$REPO_ROOT/installers" "$REPO_ROOT/registries" "$REPO_ROOT/configs" "$OLD_STAGE/"
+echo "0.3.2" > "$OLD_STAGE/VERSION"
+OLD_ARCHIVE="activity-mesh_0.3.2_${OS}_${ARCH}.tar.gz"
+(cd "$OLD_STAGE" && tar -czf "$RELEASE/$OLD_ARCHIVE" .)
+(cd "$RELEASE" && sum256 "$OLD_ARCHIVE" >> checksums.txt)
+BIN_BEFORE="$(cksum < "$PREFIX_DIR/activity-log")"
+CURRENT_BEFORE="$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")"
+HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version v0.3.2 --no-services > "$WORK/bootstrap-old.out" 2>&1 && RC_OLD=0 || RC_OLD=$?
+[ "$RC_OLD" -ne 0 ] || fail "bootstrap must refuse an archive without health/"
+[ "$(cksum < "$PREFIX_DIR/activity-log")" = "$BIN_BEFORE" ] || fail "binaries were replaced before the archive layout was validated"
+[ "$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")" = "$CURRENT_BEFORE" ] || fail "dist/current re-pointed by a refused archive"
+grep -q "refusing to install" "$WORK/bootstrap-old.out" || fail "no layout diagnostics: $(tail -2 "$WORK/bootstrap-old.out")"
+pass "an archive without health/ is refused before anything is installed"
 
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'

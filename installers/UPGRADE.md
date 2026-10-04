@@ -13,9 +13,11 @@ pwsh installers/bootstrap.ps1
 ```
 
 It re-downloads the release archive (all three binaries on macOS/Linux;
-`activity-log.exe` on Windows), verifies the sha256, installs a fresh
+`activity-log.exe` on Windows), verifies the sha256, refuses an archive that
+lacks the runtime layout before anything is changed, installs a fresh
 versioned assets dir (`~/.local/share/activity-mesh/dist/<version>/`),
-re-points `dist/current`, re-renders supervisor units, and restarts services.
+re-points `dist/current`, then replaces the binaries, re-renders supervisor
+units, and restarts services.
 It does **not** touch:
 
 - `~/.local/share/activity-mesh/index.db` (rebuildable from JSONL)
@@ -34,6 +36,8 @@ bash installers/bootstrap.sh --version v0.4.0
 
 Downloads the exact `activity-mesh_<ver>_<os>_<arch>` archive attached to
 that release. All binaries and runtime assets are versioned together.
+Without `--version`, bootstrap installs the newest release, prereleases
+included.
 
 ## Semver compatibility
 
@@ -63,11 +67,13 @@ while another host still runs a `v=1`-only build is unsupported.
 ## Rolling back
 
 ```bash
-bash installers/bootstrap.sh --version v0.3.2
+bash installers/bootstrap.sh --version v0.4.0-rc.7
 ```
 
-Binaries are replaced atomically and `dist/current` re-points to the older
-assets; units re-render and restart.
+Roll back only to a release that ships the full runtime layout (v0.4.0-rc.1
+or later). An older archive is refused before the installed binaries or
+`dist/current` are touched. `dist/current` re-points to the older assets,
+the binaries are replaced, and units re-render and restart.
 
 ## Rebuilding the index
 
