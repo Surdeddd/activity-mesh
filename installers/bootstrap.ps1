@@ -61,7 +61,9 @@ $tag = $Version
 if (-not $BaseUrl) {
     if ($tag -eq 'latest') {
         try {
-            $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -TimeoutSec 30
+            $rels = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases?per_page=1" -TimeoutSec 30
+            $rel = @($rels) | Where-Object { -not $_.draft } | Select-Object -First 1
+            if (-not $rel) { throw "no published release" }
             $tag = $rel.tag_name
         } catch { Fail "cannot resolve latest release tag: $($_.Exception.Message)" }
     }

@@ -60,9 +60,11 @@ done
 echo "== running bootstrap in hermetic HOME =="
 FAKE_HOME="$WORK/home"
 PREFIX_DIR="$WORK/bin"
-mkdir -p "$FAKE_HOME"
+mkdir -p "$FAKE_HOME/.local/bin"
+printf '#!/bin/sh\necho "activity-log 0.0.1 (stale)"\n' > "$FAKE_HOME/.local/bin/activity-log"
+chmod +x "$FAKE_HOME/.local/bin/activity-log"
 set +e
-HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" \
+HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" PATH="$PREFIX_DIR:$PATH" \
     ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
     bash "$BOOTSTRAP" --version "v$VER" --no-services \
     > "$WORK/bootstrap.out" 2>&1
@@ -119,10 +121,11 @@ else
     grep -qxF "Environment=ACTIVITY_MESH_BIN=$PREFIX_DIR/activity-log" "$UNITS_DIR/activity-mesh-watcher.service" \
         || fail "watcher unit must point ACTIVITY_MESH_BIN at the installed CLI"
 fi
-if grep -q "shadows" "$WORK/bootstrap.out"; then
-    fail "shadow warning without a ~/.local/bin/activity-log"
-fi
 pass "watcher unit points ACTIVITY_MESH_BIN at the installed CLI"
+if grep -E "resolve activity-log to|no activity-log on PATH|shadows" "$WORK/bootstrap.out" >&2; then
+    fail "PATH warning although $PREFIX_DIR/activity-log wins on PATH"
+fi
+pass "no PATH warning when the installed activity-log wins (an off-PATH ~/.local/bin copy is ignored)"
 
 if [ "$OS" = "darwin" ]; then
     for unit in health heartbeat; do
@@ -252,10 +255,11 @@ if [ ! -f "$RELEASE/$LINUX_ARCHIVE" ]; then
     (cd "$RELEASE" && sum256 "$LINUX_ARCHIVE" >> checksums.txt)
 fi
 LINUX_HOME="$WORK/home-linux"
-mkdir -p "$LINUX_HOME/.local/bin"
-printf '#!/bin/sh\necho "activity-log 0.0.1 (stale)"\n' > "$LINUX_HOME/.local/bin/activity-log"
-chmod +x "$LINUX_HOME/.local/bin/activity-log"
-env -u USER HOME="$LINUX_HOME" PREFIX="$WORK/bin-linux" PATH="$UNAME_SHIM:$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+STALE_BIN="$WORK/stale-bin"
+mkdir -p "$LINUX_HOME" "$STALE_BIN"
+printf '#!/bin/sh\necho "activity-log 0.0.1 (stale)"\n' > "$STALE_BIN/activity-log"
+chmod +x "$STALE_BIN/activity-log"
+env -u USER HOME="$LINUX_HOME" PREFIX="$WORK/bin-linux" PATH="$STALE_BIN:$UNAME_SHIM:$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
     bash "$BOOTSTRAP" --version "v$VER" > "$WORK/bootstrap-linux.out" 2>&1 && RC_LINUX=0 || RC_LINUX=$?
 [ "$RC_LINUX" -eq 0 ] || { cat "$WORK/bootstrap-linux.out" >&2; fail "linux services install exited $RC_LINUX"; }
 for unit in watcher daemon; do
@@ -267,9 +271,9 @@ grep -qx "loginctl enable-linger $(id -un)" "$WORK/supervisor.log" || fail "enab
 pass "linux install works with USER unset"
 grep -qxF "Environment=ACTIVITY_MESH_BIN=$WORK/bin-linux/activity-log" "$LINUX_HOME/.config/systemd/user/activity-mesh-watcher.service" \
     || fail "systemd watcher unit must point ACTIVITY_MESH_BIN at the installed CLI"
-grep -q "another activity-log at ~/.local/bin shadows" "$WORK/bootstrap-linux.out" \
-    || fail "no warning about the stale ~/.local/bin/activity-log"
-pass "systemd watcher unit carries ACTIVITY_MESH_BIN; a stale ~/.local/bin/activity-log is flagged"
+grep -qF "resolve activity-log to $STALE_BIN/activity-log, not $WORK/bin-linux/activity-log" "$WORK/bootstrap-linux.out" \
+    || fail "no warning naming the activity-log that wins on PATH"
+pass "systemd watcher unit carries ACTIVITY_MESH_BIN; the activity-log that wins on PATH is named"
 
 if [ "$OS" = "darwin" ]; then
     echo "== macOS services path (launchctl shimmed) =="
@@ -330,11 +334,20 @@ pass "the script runs from stdin"
 
 echo "== & and \\ in substituted values survive template rendering =="
 ODD_HOME="$WORK/home-r&d\\x"
+ODD_UNITS="$(nosvc_units "$ODD_HOME")"
+if [ "$OS" = "darwin" ]; then
+    ODD_SYNC_REF="$WORK/home-r&amp;d\\x/Sync/activity"
+else
+    ODD_SYNC_REF="$ODD_HOME/Sync/activity"
+fi
 mkdir -p "$ODD_HOME"
 HOME="$ODD_HOME" PREFIX="$WORK/bin-odd" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
     bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-odd.out" 2>&1 && RC_ODD=0 || RC_ODD=$?
 [ "$RC_ODD" -eq 0 ] || { cat "$WORK/bootstrap-odd.out" >&2; fail "bootstrap with & and \\ in HOME exited $RC_ODD"; }
-grep -rqF "$ODD_HOME/Sync/activity" "$(nosvc_units "$ODD_HOME")" || fail "template rendering mangled a path holding & or \\"
+grep -rqF "$ODD_SYNC_REF" "$ODD_UNITS" || fail "template rendering mangled a path holding & or \\"
+if [ "$OS" = "darwin" ]; then
+    plutil -lint "$ODD_UNITS"/*.plist > "$WORK/plutil.out" 2>&1 || fail "rendered plists are not valid: $(grep -v ': OK$' "$WORK/plutil.out")"
+fi
 pass "& and \\ in substituted values survive template rendering"
 ODD_CONFIG="$ODD_HOME/.local/share/activity-mesh/config.json"
 ODD_CONFIG_BEFORE="$(cksum < "$ODD_CONFIG")"
@@ -342,7 +355,7 @@ HOME="$ODD_HOME" PREFIX="$WORK/bin-odd" ACTIVITY_MESH_BASE_URL="http://127.0.0.1
     bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-odd2.out" 2>&1 && RC_ODD2=0 || RC_ODD2=$?
 [ "$RC_ODD2" -eq 0 ] || { cat "$WORK/bootstrap-odd2.out" >&2; fail "re-run with & and \\ in the sync dir exited $RC_ODD2"; }
 [ "$(cksum < "$ODD_CONFIG")" = "$ODD_CONFIG_BEFORE" ] || fail "re-run moved the configured sync dir: $(tr -d '\n' < "$ODD_CONFIG")"
-grep -rqF "$ODD_HOME/Sync/activity" "$(nosvc_units "$ODD_HOME")" || fail "re-run rendered the units with a different sync dir"
+grep -rqF "$ODD_SYNC_REF" "$ODD_UNITS" || fail "re-run rendered the units with a different sync dir"
 pass "a re-run keeps a sync dir holding & and \\"
 
 echo "== an undecodable sync_dir stops bootstrap and names ACTIVITY_MESH_SYNC =="

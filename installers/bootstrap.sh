@@ -268,20 +268,21 @@ install_assets() {
 }
 
 render_template() {
-    local tmpl="$1" dest="$2"
+    local tmpl="$1" dest="$2" c kv k v
     [[ -f "$tmpl" ]] || die "template not found: $tmpl"
-    local c; c="$(cat "$tmpl")"
-    c="${c//\{\{BIN_PATH\}\}/$LOG_BIN}"
-    c="${c//\{\{WATCHER_BIN\}\}/$WATCHER_BIN}"
-    c="${c//\{\{DAEMON_BIN\}\}/$DAEMON_BIN}"
-    c="${c//\{\{STORE_DIR\}\}/$STORE_DIR}"
-    c="${c//\{\{STATE_DIR\}\}/$STATE_DIR}"
-    c="${c//\{\{SYNC_DIR\}\}/$SYNC_DIR}"
-    c="${c//\{\{CONFIG_DIR\}\}/$CONFIG_DIR}"
-    c="${c//\{\{TELEGRAM_ENV\}\}/$TELEGRAM_ENV}"
-    c="${c//\{\{ASSETS_DIR\}\}/$ASSETS_LINK}"
-    c="${c//\{\{HOME\}\}/$HOME}"
-    c="${c//\{\{USER\}\}/${USER:-$(id -un)}}"
+    c="$(cat "$tmpl")"
+    for kv in "BIN_PATH=$LOG_BIN" "WATCHER_BIN=$WATCHER_BIN" "DAEMON_BIN=$DAEMON_BIN" \
+        "STORE_DIR=$STORE_DIR" "STATE_DIR=$STATE_DIR" "SYNC_DIR=$SYNC_DIR" "CONFIG_DIR=$CONFIG_DIR" \
+        "TELEGRAM_ENV=$TELEGRAM_ENV" "ASSETS_DIR=$ASSETS_LINK" "HOME=$HOME" "USER=${USER:-$(id -un)}"; do
+        k="${kv%%=*}"
+        v="${kv#*=}"
+        if [[ "$tmpl" == *.plist.tmpl ]]; then
+            v="${v//&/&amp;}"
+            v="${v//</&lt;}"
+            v="${v//>/&gt;}"
+        fi
+        c="${c//\{\{$k\}\}/$v}"
+    done
     if printf '%s' "$c" | grep -q '{{[A-Z_]*}}'; then
         die "unresolved placeholder in $tmpl: $(printf '%s' "$c" | grep -o '{{[A-Z_]*}}' | sort -u | tr '\n' ' ')"
     fi
@@ -381,8 +382,14 @@ done
 
 install_assets "$RELEASE_DIR"
 commit_bins
-if [[ -e "$HOME/.local/bin/activity-log" && ! "$HOME/.local/bin/activity-log" -ef "$LOG_BIN" ]]; then
-    warn "another activity-log at ~/.local/bin shadows $LOG_BIN"
+wins="$(command -v activity-log 2>/dev/null || true)"
+if [[ -z "$wins" && -x "$HOME/.local/bin/activity-log" ]]; then
+    wins="$HOME/.local/bin/activity-log"
+fi
+if [[ -z "$wins" ]]; then
+    warn "no activity-log on PATH — shells and hooks will not find $LOG_BIN (add $PREFIX to PATH)"
+elif [[ ! "$wins" -ef "$LOG_BIN" ]]; then
+    warn "shells and hooks resolve activity-log to $wins, not $LOG_BIN"
 fi
 
 if [[ ! -f "$CONFIG_DIR/watcher.yaml" ]]; then
