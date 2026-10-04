@@ -118,24 +118,77 @@ test_env_dirs() {
     pass "the env dirs are the ones removed and purged; the default dirs stay"
 }
 
+expect_refused() {
+    local name="$1" value="$2" sentinel_before
+    sentinel_before="$(sum_of "$U_HOME/sentinel.txt")"
+    uninstall_run "$S/out-refused.txt" "$name=$value" -- --purge --dry-run
+    [ "$RC" -ne 0 ] || { cat "$S/out-refused.txt" >&2; fail "$name=$value must be refused"; }
+    grep -q "$name" "$S/out-refused.txt" || fail "the refusal of $name=$value does not name the variable: $(cat "$S/out-refused.txt")"
+    if grep -q 'DRY' "$S/out-refused.txt"; then fail "$name=$value was refused only after the plan started: $(cat "$S/out-refused.txt")"; fi
+    [ -d "$U_HOME/dist" ] && [ "$(sum_of "$U_HOME/sentinel.txt")" = "$sentinel_before" ] || fail "HOME was modified by $name=$value"
+    [ -e "$U_PREFIX/activity-log" ] || fail "binaries were removed before the refusal of $name=$value"
+}
+
 test_unsafe_dirs() {
-    local before
-    echo "== a store or state dir that is / or HOME is refused =="
+    local v homes state_values tilde='~'
+    echo "== a store or state dir that is, or would take, HOME / the sync dir / / with it is refused =="
     new_sandbox unsafe
     printf 'keep\n' > "$U_HOME/sentinel.txt"
-    mkdir -p "$U_HOME/dist"
-    before="$(sum_of "$U_HOME/sentinel.txt")"
-    uninstall_run "$S/out-home.txt" ACTIVITY_MESH_HOME="$U_HOME" -- --purge
-    [ "$RC" -ne 0 ] || fail "ACTIVITY_MESH_HOME=\$HOME must be refused"
-    grep -q 'ACTIVITY_MESH_HOME' "$S/out-home.txt" || fail "the refusal does not name ACTIVITY_MESH_HOME: $(cat "$S/out-home.txt")"
-    [ -d "$U_HOME/dist" ] && [ "$(sum_of "$U_HOME/sentinel.txt")" = "$before" ] || fail "HOME was modified"
-    [ -e "$U_PREFIX/activity-log" ] || fail "binaries were removed before the refusal"
-    uninstall_run "$S/out-root.txt" ACTIVITY_MESH_STATE=/ -- --purge
-    [ "$RC" -ne 0 ] || fail "ACTIVITY_MESH_STATE=/ must be refused"
-    grep -q 'ACTIVITY_MESH_STATE' "$S/out-root.txt" || fail "the refusal does not name ACTIVITY_MESH_STATE: $(cat "$S/out-root.txt")"
-    uninstall_run "$S/out-dot.txt" ACTIVITY_MESH_HOME=. -- --purge --dry-run
-    [ "$RC" -ne 0 ] || fail "ACTIVITY_MESH_HOME=. must be refused"
-    pass "directories that would take HOME or / with them are refused before anything changes"
+    mkdir -p "$U_HOME/dist" "$S/other" "$U_HOME/.local/share" "$U_HOME/.local/state" "$U_HOME/.config" "$U_HOME/Sync/activity"
+    ln -s "$U_HOME" "$S/homelink"
+    homes=(
+        "$U_HOME" "$U_HOME/" "$U_HOME//" "$U_HOME/." "$U_HOME/./" "$S/other/../home" "$S/homelink" "$S/homelink/"
+        / // /. /.. "$S" "$U_HOME/.."
+        "$U_HOME/.local/share" "$U_HOME/.local" "$U_HOME/.config" "$U_HOME/Sync" "$U_HOME/Sync/activity" "$U_HOME/Sync/activity/"
+        relative-dir ./relative-dir .. "$tilde" "$tilde/activity-mesh"
+    )
+    state_values=(
+        / "$U_HOME//" "$S/homelink/" "$U_HOME/.local/state" "$U_HOME/Sync/activity" "$U_HOME/.." relative-state "$tilde"
+    )
+    for v in "${homes[@]}"; do
+        expect_refused ACTIVITY_MESH_HOME "$v"
+    done
+    for v in "${state_values[@]}"; do
+        expect_refused ACTIVITY_MESH_STATE "$v"
+    done
+    pass "HOME, its parents and symlinks to it, the sync dir and its parents, the XDG parents of the default dirs, / and relative values are all refused, in every spelling, before anything is planned"
+
+    uninstall_run "$S/out-ok.txt" ACTIVITY_MESH_HOME="$S/not-created-yet" ACTIVITY_MESH_STATE="$S/not-created-either" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-ok.txt" >&2; fail "a dedicated directory that does not exist yet was refused"; }
+    pass "a dedicated directory is not refused, whether or not it exists yet"
+}
+
+test_store_spellings() {
+    local real canon settings
+    echo "== trailing slashes and symlinked stores still find and remove their registrations =="
+    if ! have jq; then skip "jq not found"; return 0; fi
+    new_sandbox spell
+    real="$S/real-store"
+    fake_store "$real" "$S/real-state"
+    ln -s "$real" "$S/store-link"
+    canon="$(cd -P "$real" && pwd -P)"
+    mkdir -p "$U_HOME/.claude"
+    settings="$U_HOME/.claude/settings.json"
+    cat > "$settings" <<JSON
+{"hooks": {"SessionStart": [
+  {"matcher": "", "hooks": [{"type": "command", "command": "$S/store-link/dist/current/hooks/via-link.sh"}]},
+  {"matcher": "", "hooks": [{"type": "command", "command": "$canon/dist/1.0.0/hooks/via-canonical.sh"}]},
+  {"matcher": "x", "hooks": [{"type": "command", "command": "/opt/keep.sh"}]}
+]}}
+JSON
+    uninstall_run "$S/out.txt" ACTIVITY_MESH_HOME="$S/store-link//" ACTIVITY_MESH_STATE="$S/real-state/" --
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall exited $RC"; }
+    "$TOOLS/jq" -e '[.hooks.SessionStart[].hooks[].command] == ["/opt/keep.sh"]' "$settings" >/dev/null \
+        || fail "hooks registered through the symlink or the canonical path survived: $(cat "$settings")"
+    [ ! -e "$real/dist" ] || fail "dist behind the symlinked store was not removed"
+    [ -f "$real/index.db" ] && [ -f "$S/real-state/health.log" ] || fail "data was removed without --purge"
+    pass "a store given with trailing slashes or through a symlink is matched under both spellings"
+
+    uninstall_run "$S/out-purge.txt" ACTIVITY_MESH_HOME="$S/store-link/" ACTIVITY_MESH_STATE="$S/real-state//" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out-purge.txt" >&2; fail "--purge exited $RC"; }
+    [ ! -e "$real" ] && [ ! -e "$S/real-state" ] || fail "--purge left the symlinked store or the state dir behind"
+    [ -d "$U_HOME" ] || fail "HOME disappeared"
+    pass "--purge removes the directory a symlinked store points to"
 }
 
 test_odd_paths() {
@@ -462,6 +515,7 @@ JSON
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
+test_store_spellings
 test_odd_paths
 test_dry_run
 test_alternate_prefix

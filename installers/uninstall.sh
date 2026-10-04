@@ -40,13 +40,61 @@ STATE_DIR="${ACTIVITY_MESH_STATE:-$HOME/.local/state/activity-mesh}"
 SYNC_DIR="${ACTIVITY_MESH_SYNC:-$HOME/Sync/activity}"
 CONFIG_DIR="$HOME/.config/activity-mesh"
 
+norm_lex() {
+    local p="$1"
+    while [[ "$p" == *//* ]]; do p="${p//\/\///}"; done
+    while [[ "$p" == */ && "$p" != "/" ]]; do p="${p%/}"; done
+    printf '%s\n' "$p"
+}
+
+canon_path() {
+    local p="$1" c
+    if c="$(cd -P -- "$p" 2>/dev/null && pwd -P)"; then
+        printf '%s\n' "$c"
+        return 0
+    fi
+    if [[ "$p" == "/" ]]; then
+        printf '/\n'
+        return 0
+    fi
+    c="$(canon_path "$(dirname -- "$p")")"
+    printf '%s/%s\n' "${c%/}" "$(basename -- "$p")"
+}
+
+covers() { [[ "$1" == "/" || "$2" == "$1" || "$2" == "$1"/* ]]; }
+
+CANON_HOME="$(canon_path "$(norm_lex "$HOME")")"
+CANON_SYNC="$(canon_path "$(norm_lex "$SYNC_DIR")")"
+
 guard_dir() {
-    case "$2" in
-        .|..|/|"$HOME"|"$HOME"/) err "refusing to uninstall: $1=$2 is not a dedicated directory"; exit 1 ;;
+    local name="$1" raw="$2" managed
+    case "$raw" in
+        /*) ;;
+        *) err "refusing to uninstall: $name=$raw is not an absolute path"; exit 1 ;;
     esac
+    GUARD_LEX="$(norm_lex "$raw")"
+    GUARD_CANON="$(canon_path "$GUARD_LEX")"
+    if covers "$GUARD_CANON" "$CANON_HOME"; then
+        err "refusing to uninstall: $name=$raw is your home directory or one of its parents"
+        exit 1
+    fi
+    if covers "$GUARD_CANON" "$CANON_SYNC"; then
+        err "refusing to uninstall: $name=$raw is the sync dir $CANON_SYNC or one of its parents"
+        exit 1
+    fi
+    for managed in "$HOME/.local/share/activity-mesh" "$HOME/.local/state/activity-mesh" "$CONFIG_DIR"; do
+        managed="$(canon_path "$(norm_lex "$managed")")"
+        if [[ "$GUARD_CANON" != "$managed" ]] && covers "$GUARD_CANON" "$managed"; then
+            err "refusing to uninstall: $name=$raw would take $managed with it"
+            exit 1
+        fi
+    done
 }
 guard_dir ACTIVITY_MESH_HOME "$STORE_DIR"
+STORE_LEX="$GUARD_LEX"
+STORE_CANON="$GUARD_CANON"
 guard_dir ACTIVITY_MESH_STATE "$STATE_DIR"
+STATE_CANON="$GUARD_CANON"
 
 uninstall_macos() {
     local unit plist
@@ -76,14 +124,15 @@ uninstall_linux() {
 [[ "$OS" == "darwin" ]] && uninstall_macos
 [[ "$OS" == "linux"  ]] && uninstall_linux
 
-DIST_DIR="$STORE_DIR/dist"
+DIST_A="$STORE_LEX/dist"
+DIST_B="$STORE_CANON/dist"
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 CLAUDE_JSON="$HOME/.claude.json"
 CODEX_CONFIG="$HOME/.codex/config.toml"
 HERMES_CONFIG="$HOME/.hermes/config.yaml"
 
 JQ_STRIP_HOOKS='
-def ours: ((.command? // "") | (type == "string") and startswith($d));
+def ours: ((.command? // "") | (type == "string") and (startswith($d1) or startswith($d2)));
 def prune: if type == "array" then
     [ .[] | . as $g
       | if ((($g.hooks? // []) | type) == "array") and (($g.hooks // []) | map(ours) | any)
@@ -128,15 +177,15 @@ edit_config() {
 unhook_claude() {
     local f="$CLAUDE_SETTINGS" tmp
     [[ -f "$f" ]] || return 0
-    grep -qF -- "$DIST_DIR/" "$f" || return 0
+    grep -qF -e "$DIST_A/" -e "$DIST_B/" "$f" || return 0
     if ! command -v jq >/dev/null 2>&1; then
-        warn "jq not found — remove the hook commands under $DIST_DIR/ from $f by hand"
+        warn "jq not found — remove the hook commands under $DIST_B/ from $f by hand"
         return 0
     fi
     tmp="$(mktemp)"
-    if ! jq --arg d "$DIST_DIR/" "$JQ_STRIP_HOOKS" "$f" > "$tmp" 2>/dev/null; then
+    if ! jq --arg d1 "$DIST_A/" --arg d2 "$DIST_B/" "$JQ_STRIP_HOOKS" "$f" > "$tmp" 2>/dev/null; then
         rm -f "$tmp"
-        warn "cannot parse $f — remove the hook commands under $DIST_DIR/ by hand"
+        warn "cannot parse $f — remove the hook commands under $DIST_B/ by hand"
         return 0
     fi
     if [[ "$(jq -S . "$f")" == "$(jq -S . "$tmp")" ]]; then
@@ -144,7 +193,7 @@ unhook_claude() {
         return 0
     fi
     if [[ $DRY_RUN -eq 1 ]]; then
-        dry "remove the hook commands under $DIST_DIR/ from $f"
+        dry "remove the hook commands under $DIST_B/ from $f"
     else
         edit_config "$f" "$tmp" || true
     fi
@@ -154,14 +203,14 @@ unhook_claude() {
 unregister_claude_mcp() {
     local f="$CLAUDE_JSON" tmp
     [[ -f "$f" ]] || return 0
-    grep -qF -- "$DIST_DIR/" "$f" || return 0
+    grep -qF -e "$DIST_A/" -e "$DIST_B/" "$f" || return 0
     if ! command -v jq >/dev/null 2>&1; then
-        warn "jq not found — if $f registers activity-mesh from $DIST_DIR/, run: claude mcp remove activity-mesh --scope user"
+        warn "jq not found — if $f registers activity-mesh from $DIST_B/, run: claude mcp remove activity-mesh --scope user"
         return 0
     fi
-    jq -e --arg d "$DIST_DIR/" '[.mcpServers["activity-mesh"]? | ((.command? // empty), ((.args? // [])[]?)) | strings | select(startswith($d))] | length > 0' "$f" >/dev/null 2>&1 || return 0
+    jq -e --arg d1 "$DIST_A/" --arg d2 "$DIST_B/" '[.mcpServers["activity-mesh"]? | ((.command? // empty), ((.args? // [])[]?)) | strings | select(startswith($d1) or startswith($d2))] | length > 0' "$f" >/dev/null 2>&1 || return 0
     if [[ $DRY_RUN -eq 1 ]]; then
-        dry "remove the activity-mesh MCP server registered from $DIST_DIR/ ($f)"
+        dry "remove the activity-mesh MCP server registered from $DIST_B/ ($f)"
         return 0
     fi
     if command -v claude >/dev/null 2>&1; then
@@ -213,7 +262,7 @@ codex_strip() {
             else
                 buf="$buf$pend$line"$'\n'
                 pend=""
-                case "$line" in *"$DIST_DIR/"*) hit=1 ;; esac
+                case "$line" in *"$DIST_A/"*|*"$DIST_B/"*) hit=1 ;; esac
             fi
         else
             printf '%s\n' "$line" >> "$out"
@@ -229,14 +278,14 @@ codex_strip() {
 unregister_codex_mcp() {
     local f="$CODEX_CONFIG" tmp
     [[ -f "$f" ]] || return 0
-    grep -qF -- "$DIST_DIR/" "$f" || return 0
+    grep -qF -e "$DIST_A/" -e "$DIST_B/" "$f" || return 0
     tmp="$(mktemp)"
     if ! codex_strip "$f" "$tmp"; then
         rm -f "$tmp"
         return 0
     fi
     if [[ $DRY_RUN -eq 1 ]]; then
-        dry "remove [mcp_servers.activity-mesh] (registered from $DIST_DIR/) from $f"
+        dry "remove [mcp_servers.activity-mesh] (registered from $DIST_B/) from $f"
     else
         edit_config "$f" "$tmp" || true
     fi
@@ -245,8 +294,8 @@ unregister_codex_mcp() {
 
 warn_hermes_mcp() {
     [[ -f "$HERMES_CONFIG" ]] || return 0
-    grep -qF -- "$DIST_DIR/" "$HERMES_CONFIG" || return 0
-    warn "$HERMES_CONFIG points into $DIST_DIR/ — remove its activity-mesh entry under mcp_servers by hand"
+    grep -qF -e "$DIST_A/" -e "$DIST_B/" "$HERMES_CONFIG" || return 0
+    warn "$HERMES_CONFIG points into $DIST_B/ — remove its activity-mesh entry under mcp_servers by hand"
 }
 
 unhook_claude
@@ -266,18 +315,18 @@ for bin_name in activity-log activity-watcher activity-mesh-daemon; do
     if [[ "$PREFIX" != "$HOME/.local/bin" ]]; then remove_bin "$HOME/.local/bin/$bin_name"; fi
 done
 
-if [[ -d "$STORE_DIR/dist" || $DRY_RUN -eq 1 ]]; then
-    run_argv rm -rf "$STORE_DIR/dist"
-    ok "removed runtime assets $STORE_DIR/dist"
+if [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
+    run_argv rm -rf "$DIST_B"
+    ok "removed runtime assets $DIST_B"
 fi
 
 if [[ $PURGE -eq 1 ]]; then
-    for d in "$STORE_DIR" "$STATE_DIR" "$CONFIG_DIR"; do
+    for d in "$STORE_CANON" "$STATE_CANON" "$CONFIG_DIR"; do
         [[ -d "$d" ]] && { run_argv rm -rf "$d"; ok "purged $d"; }
     done
     warn "left $SYNC_DIR alone — it's the cross-host source-of-truth, delete by hand if intended"
 elif [[ $KEEP_DATA -eq 1 ]]; then
-    ok "preserved data: $STORE_DIR $STATE_DIR $SYNC_DIR $CONFIG_DIR"
+    ok "preserved data: $STORE_CANON $STATE_CANON $SYNC_DIR $CONFIG_DIR"
 fi
 
 ok "uninstall complete"

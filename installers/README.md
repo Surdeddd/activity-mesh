@@ -115,8 +115,14 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   `~/.local/bin`, where earlier installs put them.
 - **Store and state dirs** follow `ACTIVITY_MESH_HOME` and `ACTIVITY_MESH_STATE`
   exactly like bootstrap (defaults `~/.local/share/activity-mesh` and
-  `~/.local/state/activity-mesh`). A value that is `/`, `.`, `..` or your home
-  directory is refused before anything is removed.
+  `~/.local/state/activity-mesh`). Each value must be an absolute path. It is
+  normalized first (trailing slashes, `.` and `..`, symlinks resolved) and
+  refused, before anything is planned or removed, when it is `/`, your home
+  directory or one of its parents (also through a symlink), the sync dir or one
+  of its parents, or a directory that holds the default `activity-mesh` store,
+  state or config dirs (`~/.local/share`, `~/.config`, ...). What is removed is
+  the normalized path, and registrations are matched under both the spelling you
+  gave and the resolved one.
 - **Hooks and MCP registrations** that point into `<store>/dist/` would be dead
   once `dist/` is gone, so they are removed first: the Claude Code hooks in
   `~/.claude/settings.json` (`CLAUDE_SETTINGS` overrides the path), the
