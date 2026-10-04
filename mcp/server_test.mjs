@@ -1,16 +1,26 @@
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, symlinkSync, copyFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, readFileSync, symlinkSync, copyFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const SERVER = resolve(HERE, "server.mjs");
 
+const tmpDirs = [];
+function scratch(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+after(() => {
+  for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+});
+
 function makeMockBin(scenario = "ok", tsIso, tsIso2, eventList) {
-  const dir = mkdtempSync(join(tmpdir(), "amesh-mock-"));
+  const dir = scratch("amesh-mock-");
   const bin = join(dir, "activity-log");
   const t1 = tsIso || "2026-05-04T10:00:00.000000Z";
   const t2 = tsIso2 || tsIso || "2026-05-04T11:00:00.000000Z";
@@ -279,7 +289,7 @@ test("resolveBin maps darwin to darwin-named binaries", async () => {
 });
 
 test("server answers when launched through a symlinked file", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "amesh-link-"));
+  const dir = scratch("amesh-link-");
   const link = join(dir, "server-link.mjs");
   symlinkSync(SERVER, link);
   const { replies } = await rpcCallAt(link, { ACTIVITY_LOG_BIN: makeMockBin() }, initMsg);
@@ -288,7 +298,7 @@ test("server answers when launched through a symlinked file", async () => {
 });
 
 test("server answers when launched through a symlinked directory (dist/current layout)", async () => {
-  const root = mkdtempSync(join(tmpdir(), "amesh-dist-"));
+  const root = scratch("amesh-dist-");
   const versioned = join(root, "dist", "9.9.9");
   mkdirSync(join(versioned, "mcp"), { recursive: true });
   copyFileSync(SERVER, join(versioned, "mcp", "server.mjs"));
@@ -300,16 +310,41 @@ test("server answers when launched through a symlinked directory (dist/current l
   assert.equal(replies[0].result.serverInfo.version, "9.9.9");
 });
 
-test("importing the module does not start the server", async () => {
-  const p = spawn(process.execPath, ["--input-type=module", "-e",
-    `const m = await import(${JSON.stringify(SERVER)}); console.log(typeof m.handle);`],
-    { stdio: ["ignore", "pipe", "pipe"] });
+async function importProbe(args) {
+  const p = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
   let out = "", err = "";
   p.stdout.on("data", d => out += d);
   p.stderr.on("data", d => err += d);
   await new Promise(res => p.on("close", res));
-  assert.equal(out.trim(), "function");
+  return { out: out.trim(), err };
+}
+
+test("importing the module without an entry script does not start the server", async () => {
+  const { out, err } = await importProbe(["--input-type=module", "-e",
+    `const m = await import(${JSON.stringify(SERVER)}); console.log(typeof m.handle);`]);
+  assert.equal(out, "function");
   assert.ok(!err.includes("starting"), `an importer must not trigger main(): ${err}`);
+});
+
+test("importing the module from another script does not start the server", async () => {
+  const importer = join(scratch("amesh-import-"), "importer.mjs");
+  writeFileSync(importer, `import * as m from ${JSON.stringify(pathToFileURL(SERVER).href)};\nconsole.log(typeof m.handle);\n`);
+  const { out, err } = await importProbe([importer]);
+  assert.equal(out, "function");
+  assert.ok(!err.includes("starting"), `a script that merely imports the server must not trigger main(): ${err}`);
+});
+
+test("importing the module through symlinks from a symlinked script does not start the server", async () => {
+  const dir = scratch("amesh-import-");
+  const serverLink = join(dir, "server-link.mjs");
+  symlinkSync(SERVER, serverLink);
+  const real = join(dir, "real-importer.mjs");
+  writeFileSync(real, `import * as m from ${JSON.stringify(pathToFileURL(serverLink).href)};\nconsole.log(typeof m.handle);\n`);
+  const importerLink = join(dir, "importer-link.mjs");
+  symlinkSync(real, importerLink);
+  const { out, err } = await importProbe([importerLink]);
+  assert.equal(out, "function");
+  assert.ok(!err.includes("starting"), `symlinks must not make an importer look like the entry point: ${err}`);
 });
 
 for (const [window, since] of [["1h", "1h"], ["12h", "12h"], ["48h", "48h"], ["7d", "7d"], ["30d", "30d"], ["99999h", "99999h"]]) {
