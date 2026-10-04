@@ -90,7 +90,8 @@ else
     skip "mempalace CLI not on PATH — skipping"
 fi
 
-MEMORY_FILE="$HOME/.claude/projects/-Users-maksimkravcov/memory/MEMORY.md"
+MEMORY_KEY="$(printf '%s' "$HOME" | sed 's/[^A-Za-z0-9]/-/g')"
+MEMORY_FILE="$HOME/.claude/projects/$MEMORY_KEY/memory/MEMORY.md"
 if [ -f "$MEMORY_FILE" ]; then
     if grep -qF "$NONCE" "$MEMORY_FILE"; then
         bad "MEMORY.md contains nonce — activity events leaked into state truth!"

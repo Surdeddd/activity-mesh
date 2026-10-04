@@ -6,7 +6,7 @@ DRY_RUN=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) echo "usage: install.sh [--dry-run]"; exit 0 ;;
     *) echo "unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -20,6 +20,22 @@ if [[ -z "$NODE_BIN" ]]; then echo "ERR: node not on PATH (need 20+)" >&2; exit 
 
 say() { printf '%s\n' "$*"; }
 plan() { if [[ $DRY_RUN -eq 1 ]]; then say "  [dry-run] $*"; else say "  $*"; fi; }
+
+write_through() {
+  local real="$1" n=0 t mode tmp
+  while [[ -L "$real" && $n -lt 20 ]]; do
+    t="$(readlink "$real")"
+    case "$t" in /*) real="$t" ;; *) real="$(dirname "$real")/$t" ;; esac
+    n=$((n + 1))
+  done
+  mode="$(stat -c %a "$real" 2>/dev/null || stat -f %Lp "$real" 2>/dev/null)" || mode=""
+  tmp="$(mktemp "$real.XXXXXX")" || return 1
+  if cat > "$tmp" && { [[ -z "$mode" ]] || chmod "$mode" "$tmp"; } && mv -f "$tmp" "$real"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
 
 wire_claude() {
   # `claude mcp add` is the only supported way to register a user-scoped server:
@@ -57,8 +73,8 @@ wire_claude() {
   local tmp; tmp=$(mktemp)
   if jq --arg cmd "$NODE_BIN" --arg srv "$SERVER" \
        '.mcpServers["activity-mesh"] = {command:$cmd, args:[$srv]}' \
-       "$target" > "$tmp"; then
-    mv "$tmp" "$target"
+       "$target" > "$tmp" && write_through "$target" < "$tmp"; then
+    rm -f "$tmp"
     plan "wrote activity-mesh entry via jq"
   else
     rm -f "$tmp"
@@ -67,25 +83,70 @@ wire_claude() {
   fi
 }
 
+codex_block() {
+  printf '[mcp_servers.activity-mesh]\ncommand = "%s"\nargs = ["%s"]\n' "$NODE_BIN" "$SERVER"
+}
+
+codex_replace() {
+  local cfg="$1" out="$2" line norm skipping=0 replaced=0
+  : > "$out"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    norm="${line//[[:space:]]/}"
+    norm="${norm%%#*}"
+    case "$norm" in
+      '[mcp_servers.activity-mesh]'|'[mcp_servers."activity-mesh"]'|"[mcp_servers.'activity-mesh']")
+        if [[ $replaced -eq 0 ]]; then
+          codex_block >> "$out"
+          printf '\n' >> "$out"
+          replaced=1
+        fi
+        skipping=1
+        continue ;;
+      '['*) skipping=0 ;;
+    esac
+    if [[ $skipping -eq 0 ]]; then printf '%s\n' "$line" >> "$out"; fi
+  done < "$cfg"
+  [[ $replaced -eq 1 ]]
+}
+
 wire_codex() {
-  local cfg="$HOME/.codex/config.toml"
+  local cfg="$HOME/.codex/config.toml" has=0
   say "Codex → $cfg"
+  if [[ -f "$cfg" ]] && codex_replace "$cfg" /dev/null; then has=1; fi
   if [[ $DRY_RUN -eq 1 ]]; then
-    plan "would append [mcp_servers.activity-mesh] block"
+    if [[ $has -eq 1 ]]; then
+      plan "would replace the existing [mcp_servers.activity-mesh] block"
+    else
+      plan "would append [mcp_servers.activity-mesh] block"
+    fi
     return
   fi
   mkdir -p "$(dirname "$cfg")"
-  touch "$cfg"
-  if grep -q '^\[mcp_servers\.activity-mesh\]' "$cfg" 2>/dev/null; then
-    plan "already present, skipping"
+  [[ -f "$cfg" ]] || : > "$cfg"
+  if [[ $has -eq 1 ]]; then
+    local tmp bak
+    tmp="$(mktemp)"
+    if ! codex_replace "$cfg" "$tmp"; then
+      rm -f "$tmp"
+      say "  WARN: could not rewrite $cfg — replace the [mcp_servers.activity-mesh] block by hand"
+      return
+    fi
+    if cmp -s "$cfg" "$tmp"; then
+      rm -f "$tmp"
+      plan "already up to date"
+      return
+    fi
+    bak="$cfg.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$cfg" "$bak"
+    if write_through "$cfg" < "$tmp"; then
+      plan "replaced the activity-mesh block (backup at $bak)"
+    else
+      say "  WARN: could not write $cfg (backup at $bak)"
+    fi
+    rm -f "$tmp"
     return
   fi
-  cat >> "$cfg" <<TOML
-
-[mcp_servers.activity-mesh]
-command = "$NODE_BIN"
-args = ["$SERVER"]
-TOML
+  { printf '\n'; codex_block; } >> "$cfg"
   plan "appended activity-mesh block"
 }
 

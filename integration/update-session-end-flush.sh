@@ -3,11 +3,34 @@
 set -uo pipefail
 
 HOOK="${SESSION_END_HOOK:-$HOME/.claude/hooks/session-end-flush.sh}"
-DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
 err() { echo "update-flush: $*" >&2; }
 say() { echo "update-flush: $*"; }
+
+DRY_RUN=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help) echo "usage: update-session-end-flush.sh [--dry-run]   (SESSION_END_HOOK=<file> overrides ~/.claude/hooks/session-end-flush.sh)"; exit 0 ;;
+        *) err "unknown argument: $arg"; exit 2 ;;
+    esac
+done
+
+write_through() {
+    local real="$1" n=0 t mode tmp
+    while [ -L "$real" ] && [ "$n" -lt 20 ]; do
+        t="$(readlink "$real")"
+        case "$t" in /*) real="$t" ;; *) real="$(dirname "$real")/$t" ;; esac
+        n=$((n + 1))
+    done
+    mode="$(stat -c %a "$real" 2>/dev/null || stat -f %Lp "$real" 2>/dev/null)" || mode=""
+    tmp="$(mktemp "$real.XXXXXX")" || return 1
+    if cat > "$tmp" && { [ -z "$mode" ] || chmod "$mode" "$tmp"; } && mv -f "$tmp" "$real"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
 
 [ -f "$HOOK" ] || { err "hook not found: $HOOK"; exit 1; }
 command -v python3 >/dev/null 2>&1 || { err "python3 required"; exit 1; }
@@ -75,12 +98,11 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP="${HOOK}.bak-${STAMP}"
 cp "$HOOK" "$BACKUP" || { err "backup failed"; rm -f "$TMP"; exit 1; }
 
-if mv "$TMP" "$HOOK"; then
-    chmod +x "$HOOK" 2>/dev/null || true
+if write_through "$HOOK" < "$TMP"; then
+    rm -f "$TMP"
     say "applied. backup at $BACKUP"
     exit 0
 else
-    err "write failed; restoring backup"
-    mv "$BACKUP" "$HOOK" 2>/dev/null
+    err "write failed; $HOOK is untouched (backup at $BACKUP)"
     rm -f "$TMP"; exit 1
 fi
