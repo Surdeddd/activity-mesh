@@ -442,6 +442,61 @@ TOML
     pass "a table that points at a repo checkout is left alone"
 }
 
+test_codex_inline_tables() {
+    local store cfg before
+    echo "== a registration the scanner cannot strip is reported =="
+    new_sandbox inline
+    store="$U_HOME/.local/share/activity-mesh"
+    fake_store "$store" "$U_HOME/.local/state/activity-mesh"
+    mkdir -p "$U_HOME/.codex"
+    cfg="$U_HOME/.codex/config.toml"
+
+    cat > "$cfg" <<TOML
+[mcp_servers]
+activity-mesh = { command = "node", args = ["$store/dist/current/mcp/server.mjs"] }
+TOML
+    before="$(sum_of "$cfg")"
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    [ "$(sum_of "$cfg")" = "$before" ] || fail "an inline-table entry was edited"
+    grep -q 'config.toml' "$S/out.txt" && grep -q 'by hand' "$S/out.txt" || fail "no warning about the inline-table entry: $(cat "$S/out.txt")"
+    pass "an inline-table entry that points into dist is left in place with a warning"
+
+    cat > "$cfg" <<TOML
+mcp_servers = { activity-mesh = { command = "node", args = ["$store/dist/current/mcp/server.mjs"] } }
+TOML
+    uninstall_run "$S/out.txt" --
+    grep -q 'by hand' "$S/out.txt" || fail "no warning about the top-level inline table: $(cat "$S/out.txt")"
+    pass "so is a top-level inline table"
+
+    cat > "$cfg" <<TOML
+# args = ["$store/dist/current/mcp/server.mjs"]
+[mcp_servers.other]
+command = "other"
+TOML
+    before="$(sum_of "$cfg")"
+    uninstall_run "$S/out.txt" --
+    [ "$(sum_of "$cfg")" = "$before" ] || fail "a config that only mentions dist in a comment was edited"
+    if grep -q 'by hand' "$S/out.txt"; then fail "a comment that mentions dist triggered a warning: $(cat "$S/out.txt")"; fi
+    pass "a comment that mentions dist is neither edited nor reported"
+
+    cat > "$cfg" <<TOML
+[mcp_servers.activity-mesh]
+command = "node"
+args = ["$store/dist/current/mcp/server.mjs"]
+
+[mcp_servers.helper]
+command = "node"
+args = ["$store/dist/1.0.0/mcp/helper.mjs"]
+TOML
+    uninstall_run "$S/out.txt" --
+    [ "$RC" -eq 0 ] || fail "uninstall exited $RC"
+    if grep -q '^\[mcp_servers\.activity-mesh\]' "$cfg"; then fail "the activity-mesh table survived: $(cat "$cfg")"; fi
+    grep -qF '[mcp_servers.helper]' "$cfg" || fail "an unrelated server was removed: $(cat "$cfg")"
+    grep -q 'by hand' "$S/out.txt" || fail "another server that points into dist was not reported after the strip: $(cat "$S/out.txt")"
+    pass "after the strip, anything else in the file that still points into dist is reported"
+}
+
 test_hermes_warning() {
     local store cfg before
     echo "== a Hermes entry pointing into dist is reported, not edited =="
@@ -539,6 +594,7 @@ test_alternate_prefix
 test_claude_hooks
 test_claude_mcp
 test_codex_mcp
+test_codex_inline_tables
 test_hermes_warning
 test_registrations_dry_run
 test_without_jq

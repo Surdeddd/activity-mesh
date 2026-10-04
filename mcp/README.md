@@ -93,16 +93,25 @@ claude mcp add activity-mesh --scope user -- node ~/.local/share/activity-mesh/d
 
 The installer registers `<checkout>/mcp/server.mjs` with:
 
-- **Claude Code** — `claude mcp add activity-mesh --scope user -- node <server>`,
-  which writes `~/.claude.json`. Without the `claude` CLI on `PATH` it edits
-  `~/.claude.json` with `jq` instead. `~/.claude/.mcp.json` and `mcpServers`
-  in `~/.claude/settings.json` are not read by Claude Code, so nothing is
-  written there.
+- **Claude Code** — `claude mcp add activity-mesh --scope user -- <node> <server>`,
+  which writes `~/.claude.json`; `<node>` is the absolute path of the `node`
+  found on `PATH`, not the bare word `node` (Codex and Hermes get the same
+  absolute path). Without the `claude` CLI on `PATH` it edits `~/.claude.json`
+  with `jq` instead. `~/.claude/.mcp.json` and `mcpServers` in
+  `~/.claude/settings.json` are not read by Claude Code, so nothing is written
+  there.
 - **Codex** — `~/.codex/config.toml`: appends `[mcp_servers.activity-mesh]`, or
-  replaces the existing table in place (written `activity-mesh` or
-  `"activity-mesh"`), after saving `config.toml.bak-<timestamp>`.
-  Sub-tables such as `[mcp_servers.activity-mesh.env]` and every other table
-  are kept.
+  replaces the existing table in place (written `activity-mesh`,
+  `"activity-mesh"` or `'activity-mesh'`), after saving
+  `config.toml.bak-<timestamp>`. A replace resets the table's own keys:
+  `command` and `args` are rewritten, and anything else you set directly inside
+  `[mcp_servers.activity-mesh]` (`enabled = false`, a startup timeout, ...) is
+  gone from the live file and only in the backup. Sub-tables such as
+  `[mcp_servers.activity-mesh.env]`, every other table, and the comments and
+  blank lines around them are kept. Replace and append both write a new file
+  beside the target and rename it into place, so an interrupted run never
+  leaves a half-written config, and a re-run that would change nothing writes
+  nothing.
 - **Hermes** — `~/.hermes/config.yaml`: appends a stdio MCP entry (same server
   as the other clients); skipped if Hermes is not installed, and printed for
   you to add by hand when the file already has a top-level `mcp_servers:`.

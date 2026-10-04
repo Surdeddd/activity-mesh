@@ -75,32 +75,11 @@ codex_block() {
   printf '[mcp_servers.activity-mesh]\ncommand = "%s"\nargs = ["%s"]\n' "$NODE_BIN" "$SERVER"
 }
 
-codex_replace() {
-  local cfg="$1" out="$2" line norm skipping=0 replaced=0
-  : > "$out"
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    norm="${line//[[:space:]]/}"
-    norm="${norm%%#*}"
-    case "$norm" in
-      '[mcp_servers.activity-mesh]'|'[mcp_servers."activity-mesh"]'|"[mcp_servers.'activity-mesh']")
-        if [[ $replaced -eq 0 ]]; then
-          codex_block >> "$out"
-          printf '\n' >> "$out"
-          replaced=1
-        fi
-        skipping=1
-        continue ;;
-      '['*) skipping=0 ;;
-    esac
-    if [[ $skipping -eq 0 ]]; then printf '%s\n' "$line" >> "$out"; fi
-  done < "$cfg"
-  [[ $replaced -eq 1 ]]
-}
-
 wire_codex() {
-  local cfg="$HOME/.codex/config.toml" has=0
+  local cfg="$HOME/.codex/config.toml" has=0 block tmp bak
   say "Codex → $cfg"
-  if [[ -f "$cfg" ]] && codex_replace "$cfg" /dev/null; then has=1; fi
+  block="$(codex_block)"
+  if [[ -f "$cfg" ]] && toml_edit_server replace "$cfg" /dev/null "$block"; then has=1; fi
   if [[ $DRY_RUN -eq 1 ]]; then
     if [[ $has -eq 1 ]]; then
       plan "would replace the existing [mcp_servers.activity-mesh] block"
@@ -110,32 +89,31 @@ wire_codex() {
     return
   fi
   mkdir -p "$(dirname "$cfg")"
-  [[ -f "$cfg" ]] || : > "$cfg"
+  tmp="$(mktemp)"
   if [[ $has -eq 1 ]]; then
-    local tmp bak
-    tmp="$(mktemp)"
-    if ! codex_replace "$cfg" "$tmp"; then
+    if ! toml_edit_server replace "$cfg" "$tmp" "$block"; then
       rm -f "$tmp"
       say "  WARN: could not rewrite $cfg — replace the [mcp_servers.activity-mesh] block by hand"
       return
     fi
-    if cmp -s "$cfg" "$tmp"; then
-      rm -f "$tmp"
-      plan "already up to date"
-      return
-    fi
-    bak="$cfg.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-    cp "$cfg" "$bak"
-    if write_through "$cfg" < "$tmp"; then
-      plan "replaced the activity-mesh block (backup at $bak)"
-    else
-      say "  WARN: could not write $cfg (backup at $bak)"
-    fi
+  else
+    { if [[ -f "$cfg" ]]; then cat "$cfg"; fi; printf '\n%s\n' "$block"; } > "$tmp"
+  fi
+  if [[ -f "$cfg" ]] && cmp -s "$cfg" "$tmp"; then
     rm -f "$tmp"
+    plan "already up to date"
     return
   fi
-  { printf '\n'; codex_block; } >> "$cfg"
-  plan "appended activity-mesh block"
+  if [[ $has -eq 1 ]]; then
+    bak="$cfg.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp "$cfg" "$bak"
+  fi
+  if write_through "$cfg" < "$tmp"; then
+    if [[ $has -eq 1 ]]; then plan "replaced the activity-mesh block (backup at $bak)"; else plan "appended activity-mesh block"; fi
+  else
+    say "  WARN: could not write $cfg"
+  fi
+  rm -f "$tmp"
 }
 
 wire_hermes() {

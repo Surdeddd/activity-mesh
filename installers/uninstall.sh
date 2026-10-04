@@ -220,64 +220,23 @@ unregister_claude_mcp() {
     rm -f "$tmp"
 }
 
-is_ours_header() {
-    case "$1" in
-        '[mcp_servers.activity-mesh]'|'[mcp_servers."activity-mesh"]'|"[mcp_servers.'activity-mesh']") return 0 ;;
-        '[mcp_servers.activity-mesh.'*|'[mcp_servers."activity-mesh".'*|"[mcp_servers.'activity-mesh'."*) return 0 ;;
-    esac
-    return 1
-}
-
-codex_strip() {
-    local cfg="$1" out="$2" line norm inblock=0 hit=0 removed=0 buf="" pend=""
-    : > "$out"
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        norm="${line//[[:space:]]/}"
-        norm="${norm%%#*}"
-        case "$norm" in
-            '['*)
-                if is_ours_header "$norm"; then
-                    inblock=1
-                    buf="$buf$pend"
-                    pend=""
-                elif [[ $inblock -eq 1 ]]; then
-                    if [[ $hit -eq 1 ]]; then removed=1; else printf '%s' "$buf" >> "$out"; fi
-                    printf '%s' "$pend" >> "$out"
-                    inblock=0; hit=0; buf=""; pend=""
-                fi ;;
-        esac
-        if [[ $inblock -eq 1 ]]; then
-            if [[ -z "$norm" ]]; then
-                pend="$pend$line"$'\n'
-            else
-                buf="$buf$pend$line"$'\n'
-                pend=""
-                case "$line" in *"$DIST_A/"*|*"$DIST_B/"*) hit=1 ;; esac
-            fi
-        else
-            printf '%s\n' "$line" >> "$out"
-        fi
-    done < "$cfg"
-    if [[ $inblock -eq 1 ]]; then
-        if [[ $hit -eq 1 ]]; then removed=1; else printf '%s' "$buf" >> "$out"; fi
-        printf '%s' "$pend" >> "$out"
-    fi
-    [[ $removed -eq 1 ]]
-}
-
 unregister_codex_mcp() {
-    local f="$CODEX_CONFIG" tmp
+    local f="$CODEX_CONFIG" tmp check leftover
     [[ -f "$f" ]] || return 0
     grep -qF -e "$DIST_A/" -e "$DIST_B/" "$f" || return 0
     tmp="$(mktemp)"
-    if ! codex_strip "$f" "$tmp"; then
-        rm -f "$tmp"
-        return 0
+    check="$f"
+    if toml_edit_server strip "$f" "$tmp" "$DIST_A/" "$DIST_B/"; then
+        check="$tmp"
+        if [[ $DRY_RUN -eq 1 ]]; then
+            dry "remove [mcp_servers.activity-mesh] (registered from $DIST_B/) from $f"
+        else
+            edit_config "$f" "$tmp" || true
+        fi
     fi
-    if [[ $DRY_RUN -eq 1 ]]; then
-        dry "remove [mcp_servers.activity-mesh] (registered from $DIST_B/) from $f"
-    else
-        edit_config "$f" "$tmp" || true
+    leftover="$(grep -v '^[[:space:]]*#' "$check" | grep -F -e "$DIST_A/" -e "$DIST_B/" || true)"
+    if [[ -n "$leftover" ]]; then
+        warn "$f still points into $DIST_B/ (an inline table or another entry) — edit it by hand"
     fi
     rm -f "$tmp"
 }

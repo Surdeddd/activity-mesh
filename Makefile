@@ -53,6 +53,7 @@ test-mcp: ## Run MCP server tests (node)
 
 test-install: ## Hermetic bootstrap + integration/hooks/mcp installer + uninstall tests (temp HOME, local fake release, PATH shims)
 	bash tests/install/test-bootstrap.sh
+	bash tests/install/test-cfgedit.sh
 	bash tests/install/test-integration.sh
 	bash tests/install/test-uninstall.sh
 

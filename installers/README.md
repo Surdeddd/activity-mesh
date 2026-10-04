@@ -128,11 +128,14 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   `~/.claude/settings.json` (`CLAUDE_SETTINGS` overrides the path), the
   `activity-mesh` MCP server (`claude mcp remove activity-mesh --scope user`,
   or `jq` on `~/.claude.json` without the `claude` CLI) and the
-  `[mcp_servers.activity-mesh]` table of `~/.codex/config.toml`. Each edited
-  file gets a `.bak-<timestamp>` copy, symlinked files are edited in their
-  target with their permissions kept, and entries that point at a repo checkout
-  are left alone. A Hermes entry is only reported. The JSON files need `jq`;
-  without it you get the command to run by hand.
+  `[mcp_servers.activity-mesh]` table of `~/.codex/config.toml` (with its
+  sub-tables; the comments around it stay). Each edited file gets a
+  `.bak-<timestamp>` copy, symlinked files are edited in their target with
+  their permissions kept, and entries that point at a repo checkout are left
+  alone. A Hermes entry is only reported, and so is anything in `config.toml`
+  that still points into `dist/` after the edit (an inline-table
+  `activity-mesh = { ... }`, another server). The JSON files need `jq`; without
+  it you get the command to run by hand.
 
 ```powershell
 pwsh ./installers/uninstall.ps1         # removes activity-log.exe; -Purge also removes .local\share\activity-mesh and .local\state\activity-mesh
@@ -154,8 +157,10 @@ The scripts that edit your configuration files (`hooks/install.sh`,
 `integration/update-session-end-flush.sh`, `installers/uninstall.sh`) all source
 `installers/lib/cfgedit.sh`, found relative to their own location (`lib/` from
 `installers/`, `../installers/lib/` from `hooks/`, `integration/` and `mcp/`).
-It holds the write-through-symlinks, mode-preserving writer, so there is one
-copy to fix. It ships in the release archive and under
+It holds the write-through-symlinks, mode-preserving writer and the one scanner
+for the `[mcp_servers.activity-mesh]` table of a Codex `config.toml`, so
+install and uninstall agree on what that table is and on keeping the comments
+around it. It ships in the release archive and under
 `dist/<version>/installers/lib/`; `bootstrap.sh` refuses an archive whose
 scripts need it but lack it. A script started without it prints the missing
 path and changes nothing.
@@ -166,11 +171,14 @@ path and changes nothing.
 assembles a fake release archive, serves it over local HTTP, and bootstraps
 into a temp `HOME` with `--no-services`, then asserts binaries, assets, units,
 registries, a queryable smoke event, and hard failure on checksum mismatch.
-The same target runs `tests/install/test-integration.sh` (the
-integration/hooks/MCP installers: symlinked config files, preserved permissions,
-in-place Codex update) and `tests/install/test-uninstall.sh` (env-relocated
-dirs, hook and MCP removal, alternate prefix), each with a temp `HOME` and
-log-only `PATH` shims for `claude`, `launchctl`, `systemctl` and `sudo`.
+The same target runs `tests/install/test-cfgedit.sh` (the shared helper on its
+own: symlink-chain writes, every shape of Codex table), `tests/install/test-integration.sh`
+(the integration/hooks/MCP installers: symlinked config files, preserved
+permissions, in-place Codex update) and `tests/install/test-uninstall.sh`
+(env-relocated and unsafe dirs, hook and MCP removal, alternate prefix), each
+with a temp `HOME` and log-only `PATH` shims for `claude`, `launchctl`,
+`systemctl` and `sudo`; anything that feeds the uninstall an unsafe path runs
+with `--dry-run`.
 `make test-archives` (needs goreleaser) asserts real release archive contents
 per platform. All of them run in CI.
 
