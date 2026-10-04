@@ -276,6 +276,13 @@ test_sync_protection() {
     grep -qF "$U_HOME/Elsewhere/sync alone" "$S/out-e.txt" || fail "the message does not name ACTIVITY_MESH_SYNC: $(grep -i alone "$S/out-e.txt")"
     pass "ACTIVITY_MESH_SYNC wins in the message, and every other sync dir stays protected"
 
+    mkdir -p "$U_HOME/Elsewhere/sync/inner"
+    : > "$U_HOME/Elsewhere/sync/inner/index.db"
+    : > "$U_HOME/Elsewhere/sync/inner/health.log"
+    expect_refused_with "is inside the sync dir" ACTIVITY_MESH_HOME "$U_HOME/Elsewhere/sync/inner" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync"
+    expect_refused_with "is inside the sync dir" ACTIVITY_MESH_STATE "$U_HOME/Elsewhere/sync/inner" ACTIVITY_MESH_SYNC="$U_HOME/Elsewhere/sync"
+    pass "a store or state dir that sits inside a sync dir is refused, even when it looks like activity-mesh's own"
+
     mkdir -p "$U_HOME/R&D/activity"
     printf '{"sync_dir": "%s/R\\u0026D/activity"}\n' "$U_HOME" > "$default_store/config.json"
     expect_refused ACTIVITY_MESH_STATE "$U_HOME/R&D"

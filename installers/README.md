@@ -141,9 +141,10 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
   nothing is changed.
 
   Besides that, as a second line of defence, a value is refused when it is `/`,
-  your home directory or one of its parents, a sync dir or one of its parents,
-  or a directory that holds the default `activity-mesh` store, state or config
-  dirs (`~/.local/share`, `~/.config`, ...). Those are compared by resolved name
+  your home directory or one of its parents, a sync dir, one of its parents or
+  anything inside it, or a directory that holds the default `activity-mesh`
+  store, state or config dirs (`~/.local/share`, `~/.config`, ...). Those are
+  compared by resolved name
   and by device and inode (on macOS also through the `/System/Volumes/Data`
   spelling of each protected path and its parents), and the uninstall stops when
   it cannot read an identity (no `stat`, a HOME that does not exist, a name that

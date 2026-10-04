@@ -126,8 +126,15 @@ guard_dir() {
             refuse "$name=$raw ${P_WHY[i]}"
         fi
     done
+    for ((i = 0; i < ${#S_LEX[@]}; i++)); do
+        if covers_any "${S_LEX[i]}" "${S_CANON[i]}" "$lex" "$canon"; then
+            refuse "$name=$raw is inside the sync dir ${S_LEX[i]}"
+        fi
+    done
 }
 
+S_LEX=()
+S_CANON=()
 SYNC_EFFECTIVE=""
 add_sync() {
     local label="$1" raw effective="$3" tilde='~'
@@ -139,6 +146,8 @@ add_sync() {
     esac
     case "$raw" in /*) ;; *) raw="$PWD/$raw" ;; esac
     resolve_dir "$label" "$raw"
+    S_LEX[${#S_LEX[@]}]="$RES_LEX"
+    S_CANON[${#S_CANON[@]}]="$RES_CANON"
     protect "$RES_LEX" "$RES_CANON" "is the sync dir $RES_LEX or one of its parents"
     if [[ "$effective" == 1 && -z "$SYNC_EFFECTIVE" ]]; then SYNC_EFFECTIVE="$RES_LEX"; fi
 }
