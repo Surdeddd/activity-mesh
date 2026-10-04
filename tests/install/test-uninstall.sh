@@ -1065,6 +1065,26 @@ test_late_dirs() {
     grep -qF "left $(cd -P "$S" && /bin/pwd -P)/later alone" "$S/out.txt" || fail "no line says the late store dir was left alone: $(cat "$S/out.txt")"
     pass "a store or dist dir that did not exist at the check is left alone when it appears during the run, and a line says so"
 
+    new_sandbox latedist
+    mkdir -p "$S/st" "$U_HOME/Library/LaunchAgents"
+    : > "$S/st/index.db"
+    : > "$U_HOME/Library/LaunchAgents/com.activity-mesh.watcher.plist"
+    shimdir="$WORK/shim-latedist"
+    mkdir -p "$shimdir"
+    for c in launchctl systemctl; do
+        printf '%s\n' '#!/bin/sh' "mkdir -p '$S/st/dist/1.0.0'" 'exit 0' > "$shimdir/$c"
+        chmod +x "$shimdir/$c"
+    done
+    set +e
+    env -i HOME="$U_HOME" PATH="$shimdir:$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" ACTIVITY_MESH_HOME="$S/st" \
+        bash "$REPO_ROOT/installers/uninstall.sh" --purge > "$S/out.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge exited $RC"; }
+    [ ! -e "$S/st" ] || fail "the store identified at the check was not purged"
+    if grep -qF 'dist alone' "$S/out.txt"; then fail "a dist that goes with its purged store was reported as left alone: $(cat "$S/out.txt")"; fi
+    pass "a dist that appears inside a store about to be purged goes with the store and is not reported as left alone"
+
     new_sandbox shared
     mkdir -p "$S/both"
     uninstall_run "$S/out.txt" ACTIVITY_MESH_HOME="$S/both" ACTIVITY_MESH_STATE="$S/both" -- --purge

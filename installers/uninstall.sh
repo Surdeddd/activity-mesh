@@ -481,7 +481,7 @@ remove_empty() {
 left_late() { warn "left $1 alone — it appeared after the checks, so it was never identified"; }
 
 if [[ $DIST_PRESENT -eq 0 && $DRY_RUN -eq 0 ]]; then
-    if [[ -d "$DIST_B" ]]; then left_late "$DIST_B"; fi
+    if [[ -d "$DIST_B" && ! ( $PURGE -eq 1 && $STORE_PRESENT -eq 1 ) ]]; then left_late "$DIST_B"; fi
 elif [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
     if [[ $DIST_EMPTY -eq 1 ]]; then
         remove_empty "$DIST_B"
