@@ -777,6 +777,27 @@ test_missing_helper() {
     pass "uninstall.sh names the missing helper and changes nothing"
 }
 
+test_symlinked_script() {
+    local tree bin
+    echo "== uninstall.sh started through a symlink finds its helper =="
+    new_sandbox symlink
+    fake_store "$U_HOME/.local/share/activity-mesh" "$U_HOME/.local/state/activity-mesh"
+    tree="$S/tree/installers"
+    bin="$S/bin"
+    mkdir -p "$tree/lib" "$bin"
+    cp "$REPO_ROOT/installers/uninstall.sh" "$tree/uninstall.sh"
+    cp "$REPO_ROOT/installers/lib/cfgedit.sh" "$tree/lib/cfgedit.sh"
+    ln -s "$tree/uninstall.sh" "$bin/uninstall-link"
+    ln -s uninstall-link "$bin/uninstall-chain"
+    set +e
+    env -i HOME="$U_HOME" PATH="$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" bash "$bin/uninstall-chain" > "$S/out.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "uninstall.sh exited $RC through a chain of symlinks"; }
+    [ ! -e "$U_HOME/.local/share/activity-mesh/dist" ] || fail "the run through a symlink did not remove dist"
+    pass "uninstall.sh finds its helper through a chain of symlinks"
+}
+
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
@@ -793,6 +814,7 @@ test_hermes_warning
 test_registrations_dry_run
 test_without_jq
 test_missing_helper
+test_symlinked_script
 
 echo
 echo "ALL UNINSTALL TESTS PASSED"

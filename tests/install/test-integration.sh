@@ -553,6 +553,75 @@ test_missing_helper() {
     pass "every install script names the missing helper and changes nothing; --help still works"
 }
 
+test_symlinked_scripts() {
+    local d="$WORK/sl" tree="$WORK/sl/tree" dist="$WORK/sl/dist-tree" f cmd
+    echo "== a script started through a symlink finds its helper and registers its own directory =="
+    mkdir -p "$tree/hooks" "$tree/installers/lib" "$tree/integration" "$tree/mcp" "$d/bin" "$d/home/.claude" "$d/home/.codex"
+    for f in hooks/install.sh hooks/session-start-digest.sh hooks/user-prompt-router.sh installers/lib/cfgedit.sh \
+             integration/install.sh integration/update-session-end-flush.sh mcp/install.sh; do
+        cp "$REPO_ROOT/$f" "$tree/$f"
+        chmod +x "$tree/$f"
+    done
+    : > "$tree/mcp/server.mjs"
+    HOME_UNDER_TEST="$d/home"; RUN_PATH="$SHIM:$BASE_PATH"
+
+    if have jq; then
+        printf '{"hooks":{}}\n' > "$d/settings.json"
+        ln -s "$tree/hooks/install.sh" "$d/bin/hooks-install"
+        ln -s hooks-install "$d/bin/hooks-install-chain"
+        run_capture "$d/out-hooks.txt" sandbox CLAUDE_SETTINGS="$d/settings.json" bash "$d/bin/hooks-install-chain"
+        [ "$RC" -eq 0 ] || { cat "$d/out-hooks.txt" >&2; fail "hooks/install.sh exited $RC through a chain of symlinks"; }
+        cmd="$("$TOOLS/jq" -r '.hooks.SessionStart[0].hooks[0].command' "$d/settings.json")"
+        [ "$cmd" = "$tree/hooks/session-start-digest.sh" ] || fail "the SessionStart hook was registered as $cmd, not under the script's own directory"
+        pass "hooks/install.sh through a chain of symlinks registers the hooks next to the real script"
+
+        mkdir -p "$dist/dist/0.4.0"
+        cp -R "$tree/hooks" "$tree/installers" "$dist/dist/0.4.0/"
+        ln -s 0.4.0 "$dist/dist/current"
+        printf '{"hooks":{}}\n' > "$d/settings-current.json"
+        ln -s "$dist/dist/current/hooks/install.sh" "$d/bin/hooks-install-current"
+        run_capture "$d/out-current.txt" sandbox CLAUDE_SETTINGS="$d/settings-current.json" bash "$d/bin/hooks-install-current"
+        [ "$RC" -eq 0 ] || { cat "$d/out-current.txt" >&2; fail "hooks/install.sh exited $RC through a link into dist/current"; }
+        cmd="$("$TOOLS/jq" -r '.hooks.SessionStart[0].hooks[0].command' "$d/settings-current.json")"
+        [ "$cmd" = "$dist/dist/current/hooks/session-start-digest.sh" ] || fail "the hook path lost its dist/current spelling: $cmd"
+        printf '{"hooks":{}}\n' > "$d/settings-direct.json"
+        run_capture "$d/out-direct.txt" sandbox CLAUDE_SETTINGS="$d/settings-direct.json" bash "$dist/dist/current/hooks/install.sh"
+        cmd="$("$TOOLS/jq" -r '.hooks.SessionStart[0].hooks[0].command' "$d/settings-direct.json")"
+        [ "$cmd" = "$dist/dist/current/hooks/session-start-digest.sh" ] || fail "run from dist/current directly, the hook path lost its spelling: $cmd"
+        pass "a registered hook path keeps the dist/current spelling, which survives upgrades"
+    else
+        skip "jq not found — hooks/install.sh not exercised"
+    fi
+
+    if have python3; then
+        seed_claude_md "$d/CLAUDE.md"
+        ln -s ../tree/integration/install.sh "$d/bin/integration-install"
+        run_capture "$d/out-integration.txt" sandbox CLAUDE_MD="$d/CLAUDE.md" bash "$d/bin/integration-install"
+        [ "$RC" -eq 0 ] || { cat "$d/out-integration.txt" >&2; fail "integration/install.sh exited $RC through a relative symlink"; }
+        grep -qF 'activity-mesh:integration:end' "$d/CLAUDE.md" || fail "integration/install.sh through a symlink did not patch the target"
+        printf '#!/bin/bash\nSTAGE_OUT=a\nOUT=b\nmv "$STAGE_OUT" "$OUT"\n' > "$d/hook.sh"
+        ln -s "$tree/integration/update-session-end-flush.sh" "$d/bin/flush-update"
+        run_capture "$d/out-flush.txt" sandbox SESSION_END_HOOK="$d/hook.sh" bash "$d/bin/flush-update"
+        [ "$RC" -eq 0 ] || { cat "$d/out-flush.txt" >&2; fail "update-session-end-flush.sh exited $RC through a symlink"; }
+        grep -qF '# activity-mesh: emit session-summary event' "$d/hook.sh" || fail "update-session-end-flush.sh through a symlink did not patch the hook"
+        pass "integration/install.sh and update-session-end-flush.sh find their helper through a symlink"
+    else
+        skip "python3 not found — integration/install.sh not exercised"
+    fi
+
+    if have node; then
+        : > "$WORK/shim.log"
+        ln -s "$tree/mcp/install.sh" "$d/bin/mcp-install"
+        run_capture "$d/out-mcp.txt" sandbox bash "$d/bin/mcp-install"
+        [ "$RC" -eq 0 ] || { cat "$d/out-mcp.txt" >&2; fail "mcp/install.sh exited $RC through a symlink"; }
+        grep -qxF "claude mcp add activity-mesh --scope user -- $TOOLS/node $tree/mcp/server.mjs" "$WORK/shim.log" \
+            || fail "mcp/install.sh through a symlink registered another server path: $(cat "$WORK/shim.log")"
+        pass "mcp/install.sh through a symlink registers the server that sits next to the real script"
+    else
+        skip "node not found — mcp/install.sh not exercised"
+    fi
+}
+
 if have python3; then test_integration_install; else skip "python3 not found — integration/install.sh needs it"; fi
 if have jq; then test_hooks_install; else skip "jq not found — hooks/install.sh needs it"; fi
 if have python3; then test_session_end_flush; else skip "python3 not found — update-session-end-flush.sh needs it"; fi
@@ -561,6 +630,7 @@ test_conflict_free
 test_no_author_paths
 test_single_helper
 test_missing_helper
+test_symlinked_scripts
 
 echo
 echo "ALL INTEGRATION INSTALL TESTS PASSED"

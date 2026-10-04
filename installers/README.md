@@ -169,6 +169,9 @@ The scripts that edit your configuration files (`hooks/install.sh`,
 `integration/update-session-end-flush.sh`, `installers/uninstall.sh`) all source
 `installers/lib/cfgedit.sh`, found relative to their own location (`lib/` from
 `installers/`, `../installers/lib/` from `hooks/`, `integration/` and `mcp/`).
+A script started through a symlink is followed to the real file first, so it
+finds the helper and registers the hooks and server that sit next to it; a
+`dist/current` link in the directory path is kept as written.
 It holds the write-through-symlinks, mode-preserving writer, the one scanner
 for the `[mcp_servers.activity-mesh]` table of a Codex `config.toml`, so
 install and uninstall agree on what that table is and on keeping the comments

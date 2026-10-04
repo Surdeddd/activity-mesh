@@ -11,7 +11,14 @@ for arg in "$@"; do
   esac
 done
 
-REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF="${BASH_SOURCE[0]}"
+hops=0
+while [[ -L "$SELF" && $hops -lt 20 ]]; do
+  link="$(readlink "$SELF")"
+  case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname -- "$SELF")/$link" ;; esac
+  hops=$((hops + 1))
+done
+REPO="$(cd -- "$(dirname -- "$SELF")/.." && pwd)"
 SERVER="$REPO/mcp/server.mjs"
 NODE_BIN="$(command -v node || true)"
 

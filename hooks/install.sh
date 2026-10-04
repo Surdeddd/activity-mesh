@@ -2,7 +2,14 @@
 
 set -uo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$SELF" ] && [ "$hops" -lt 20 ]; do
+    link="$(readlink "$SELF")"
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname "$SELF")/$link" ;; esac
+    hops=$((hops + 1))
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 SESSION_HOOK="$HERE/session-start-digest.sh"
 PROMPT_HOOK="$HERE/user-prompt-router.sh"

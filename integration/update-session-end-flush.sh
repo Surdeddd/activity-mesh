@@ -16,7 +16,14 @@ for arg in "$@"; do
     esac
 done
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${BASH_SOURCE[0]}"
+hops=0
+while [ -L "$SELF" ] && [ "$hops" -lt 20 ]; do
+    link="$(readlink "$SELF")"
+    case "$link" in /*) SELF="$link" ;; *) SELF="$(dirname "$SELF")/$link" ;; esac
+    hops=$((hops + 1))
+done
+HERE="$(cd "$(dirname "$SELF")" && pwd)"
 CFGEDIT="$HERE/../installers/lib/cfgedit.sh"
 [ -f "$CFGEDIT" ] || { err "missing helper $CFGEDIT"; exit 1; }
 # shellcheck source=../installers/lib/cfgedit.sh
