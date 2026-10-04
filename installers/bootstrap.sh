@@ -72,16 +72,43 @@ ensure_prefix() {
     sudo mkdir -p "$PREFIX" || die "cannot create prefix dir $PREFIX"
 }
 
-install_bin() {
-    local src="$1" dest="$2"
-    ensure_prefix
-    if [[ ! -w "$(dirname "$dest")" ]]; then
-        info "elevating: sudo install -m 0755 $src $dest"
-        sudo install -m 0755 "$src" "$dest" || die "install $dest failed"
+as_prefix_owner() {
+    if [[ -w "$PREFIX" ]]; then
+        "$@"
     else
-        install -m 0755 "$src" "$dest" || die "install $dest failed"
+        info "elevating: sudo $*"
+        sudo "$@"
     fi
-    ok "binary installed → $dest"
+}
+
+stage_bins() {
+    local b
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        [[ -f "$BIN_SRC/$b" ]] || continue
+        ensure_prefix
+        as_prefix_owner install -m 0755 "$BIN_SRC/$b" "$PREFIX/.$b.new" || die "cannot stage $PREFIX/.$b.new"
+    done
+}
+
+commit_bins() {
+    local b
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        [[ -f "$BIN_SRC/$b" ]] || continue
+        as_prefix_owner mv -f "$PREFIX/.$b.new" "$PREFIX/$b" || die "cannot move $PREFIX/$b into place"
+        ok "binary installed → $PREFIX/$b"
+    done
+}
+
+cleanup() {
+    local b
+    for b in activity-log activity-watcher activity-mesh-daemon; do
+        if [[ -e "$PREFIX/.$b.new" ]]; then
+            as_prefix_owner rm -f "$PREFIX/.$b.new" >/dev/null 2>&1 || true
+        fi
+    done
+    if [[ -n "$WORK_DIR" ]]; then
+        rm -rf "$WORK_DIR" || true
+    fi
 }
 
 verify_signature() {
@@ -135,7 +162,6 @@ install_release() {
     RESOLVED_VERSION="${tag#v}"
     local archive="activity-mesh_${RESOLVED_VERSION}_${OS}_${ARCH}.tar.gz"
     WORK_DIR="$(mktemp -d)" || die "mktemp failed"
-    trap 'rm -rf "$WORK_DIR"' EXIT
     local tmp="$WORK_DIR"
     info "fetching $BASE_URL/$archive"
     curl -fsSL "$BASE_URL/$archive"      -o "$tmp/$archive"      || die "archive download failed: $archive"
@@ -166,9 +192,8 @@ install_local() {
     RESOLVED_VERSION="$(tr -d '[:space:]' < "$root/VERSION" 2>/dev/null || echo dev)-local"
     RELEASE_DIR="$(cd "$root" && pwd)"
     # Private build dir: a predictable /tmp path lets any local user pre-create
-    # the target and have `install_bin` (often sudo) install their binary.
+    # the target and have `stage_bins` (often sudo) install their binary.
     WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/am-bootstrap-build.XXXXXX")" || die "mktemp failed"
-    trap 'rm -rf "$WORK_DIR"' EXIT
     # Rebuild first, keep-existing only as a fallback. The other order made
     # --local a no-op for binaries while still re-pointing dist/current and
     # re-rendering every unit: assets at version N, binaries at N-1, and a green
@@ -322,11 +347,13 @@ if [[ $DRY_RUN -eq 1 ]]; then
     exit 0
 fi
 
+trap cleanup EXIT
 if [[ $LOCAL_MODE -eq 1 ]]; then
     install_local
 else
     install_release
 fi
+stage_bins
 
 for d in "$STORE_DIR" "$STATE_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
     mkdir -p "$d" || die "mkdir $d failed"
@@ -334,12 +361,7 @@ for d in "$STORE_DIR" "$STATE_DIR" "$SYNC_DIR" "$CONFIG_DIR"; do
 done
 
 install_assets "$RELEASE_DIR"
-
-for b in activity-log activity-watcher activity-mesh-daemon; do
-    if [[ -f "$BIN_SRC/$b" ]]; then
-        install_bin "$BIN_SRC/$b" "$PREFIX/$b"
-    fi
-done
+commit_bins
 if [[ -e "$HOME/.local/bin/activity-log" && ! "$HOME/.local/bin/activity-log" -ef "$LOG_BIN" ]]; then
     warn "another activity-log at ~/.local/bin shadows $LOG_BIN"
 fi

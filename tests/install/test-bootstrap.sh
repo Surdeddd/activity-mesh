@@ -78,6 +78,7 @@ pass "bootstrap completed via curl-pipe-equivalent flow"
 for b in activity-log activity-watcher activity-mesh-daemon; do
     [ -x "$PREFIX_DIR/$b" ] || fail "$b not installed to PREFIX"
 done
+[ -z "$(find "$PREFIX_DIR" -name '.*.new' 2>/dev/null)" ] || fail "staged binaries left in PREFIX after a successful install"
 pass "3 binaries installed"
 
 ASSETS="$FAKE_HOME/.local/share/activity-mesh/dist/$VER"
@@ -164,6 +165,64 @@ HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:
 [ "$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")" = "$CURRENT_BEFORE" ] || fail "dist/current re-pointed by a refused archive"
 grep -q "refusing to install" "$WORK/bootstrap-old.out" || fail "no layout diagnostics: $(tail -2 "$WORK/bootstrap-old.out")"
 pass "an archive without health/ is refused before anything is installed"
+
+echo "== a refused sudo for a read-only prefix changes nothing =="
+if [ "$(id -u)" -eq 0 ]; then
+    echo "SKIP: root ignores directory permissions"
+else
+    RO_HOME="$WORK/home-ro"
+    RO_BIN="$WORK/bin-ro"
+    RO_STORE="$RO_HOME/.local/share/activity-mesh"
+    mkdir -p "$RO_HOME"
+    HOME="$RO_HOME" PREFIX="$RO_BIN" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+        bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-ro1.out" 2>&1 && RC_RO1=0 || RC_RO1=$?
+    [ "$RC_RO1" -eq 0 ] || { cat "$WORK/bootstrap-ro1.out" >&2; fail "read-only prefix: first install exited $RC_RO1"; }
+    NEXT_ARCHIVE="activity-mesh_9.9.9_${OS}_${ARCH}.tar.gz"
+    cp "$RELEASE/$ARCHIVE" "$RELEASE/$NEXT_ARCHIVE"
+    (cd "$RELEASE" && sum256 "$NEXT_ARCHIVE" >> checksums.txt)
+    SUDO_FAIL="$WORK/shim-sudo-fail"
+    mkdir -p "$SUDO_FAIL"
+    printf '#!/bin/sh\nexit 1\n' > "$SUDO_FAIL/sudo"
+    chmod +x "$SUDO_FAIL/sudo"
+    RO_BINS_BEFORE="$(cat "$RO_BIN/activity-log" "$RO_BIN/activity-watcher" "$RO_BIN/activity-mesh-daemon" | cksum)"
+    RO_CURRENT_BEFORE="$(readlink "$RO_STORE/dist/current")"
+    RO_CONFIG_BEFORE="$(cksum < "$RO_STORE/config.json")"
+    chmod 555 "$RO_BIN"
+    HOME="$RO_HOME" PREFIX="$RO_BIN" PATH="$SUDO_FAIL:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+        bash "$BOOTSTRAP" --version v9.9.9 --no-services > "$WORK/bootstrap-ro2.out" 2>&1 && RC_RO2=0 || RC_RO2=$?
+    chmod 755 "$RO_BIN"
+    [ "$RC_RO2" -ne 0 ] || fail "bootstrap must fail when sudo is refused for a read-only prefix"
+    [ "$(readlink "$RO_STORE/dist/current")" = "$RO_CURRENT_BEFORE" ] \
+        || fail "dist/current switched to $(readlink "$RO_STORE/dist/current") although the binaries could not be installed"
+    [ "$(cat "$RO_BIN/activity-log" "$RO_BIN/activity-watcher" "$RO_BIN/activity-mesh-daemon" | cksum)" = "$RO_BINS_BEFORE" ] \
+        || fail "binaries changed by a refused install"
+    [ "$(cksum < "$RO_STORE/config.json")" = "$RO_CONFIG_BEFORE" ] || fail "config.json changed by a refused install"
+    [ ! -e "$RO_STORE/dist/9.9.9" ] || fail "assets or units of the refused version were installed"
+    [ -z "$(find "$RO_BIN" -name '.*.new' 2>/dev/null)" ] || fail "staged binaries left behind: $(find "$RO_BIN" -name '.*.new')"
+    pass "a refused sudo for a read-only prefix changes nothing"
+fi
+
+echo "== a failure after staging leaves no staged binaries behind =="
+BAD_STAGE="$WORK/stage-bad"
+cp -R "$STAGE" "$BAD_STAGE"
+rm "$BAD_STAGE/registries/scopes.yaml"
+for b in activity-log activity-watcher activity-mesh-daemon; do
+    printf '#!/bin/sh\necho "%s 0.0.8"\n' "$b" > "$BAD_STAGE/$b"
+done
+BAD_ARCHIVE="activity-mesh_0.0.8_${OS}_${ARCH}.tar.gz"
+(cd "$BAD_STAGE" && tar -czf "$RELEASE/$BAD_ARCHIVE" .)
+(cd "$RELEASE" && sum256 "$BAD_ARCHIVE" >> checksums.txt)
+BINS_BEFORE="$(cat "$PREFIX_DIR/activity-log" "$PREFIX_DIR/activity-watcher" "$PREFIX_DIR/activity-mesh-daemon" | cksum)"
+CURRENT_BEFORE="$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")"
+HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version v0.0.8 --no-services > "$WORK/bootstrap-bad.out" 2>&1 && RC_BAD=0 || RC_BAD=$?
+[ "$RC_BAD" -ne 0 ] || fail "bootstrap must fail when an asset is missing after copy"
+grep -q "required asset missing" "$WORK/bootstrap-bad.out" || fail "unexpected failure: $(tail -2 "$WORK/bootstrap-bad.out")"
+[ -z "$(find "$PREFIX_DIR" -name '.*.new' 2>/dev/null)" ] || fail "staged binaries left behind: $(find "$PREFIX_DIR" -name '.*.new')"
+[ "$(cat "$PREFIX_DIR/activity-log" "$PREFIX_DIR/activity-watcher" "$PREFIX_DIR/activity-mesh-daemon" | cksum)" = "$BINS_BEFORE" ] \
+    || fail "binaries changed by a failed install"
+[ "$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")" = "$CURRENT_BEFORE" ] || fail "dist/current switched by a failed install"
+pass "a failure after staging leaves no staged binaries behind"
 
 echo "== a re-run keeps the configured sync dir =="
 CUSTOM_SYNC="$FAKE_HOME/Dropbox/activity"
