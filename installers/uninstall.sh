@@ -480,15 +480,15 @@ remove_empty() {
 
 left_late() { warn "left $1 alone — it appeared after the checks, so it was never identified"; }
 
-if [[ $DIST_PRESENT -eq 1 || $DRY_RUN -eq 1 ]]; then
+if [[ $DIST_PRESENT -eq 0 && $DRY_RUN -eq 0 ]]; then
+    if [[ -d "$DIST_B" ]]; then left_late "$DIST_B"; fi
+elif [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
     if [[ $DIST_EMPTY -eq 1 ]]; then
         remove_empty "$DIST_B"
     else
         run_argv rm -rf "$DIST_B"
         ok "removed runtime assets $DIST_B"
     fi
-elif [[ -d "$DIST_B" ]]; then
-    left_late "$DIST_B"
 fi
 
 purge_dir() {
@@ -497,6 +497,7 @@ purge_dir() {
         if [[ -d "$canon" ]]; then left_late "$canon"; fi
         return 0
     fi
+    [[ -d "$canon" ]] || return 0
     while [[ -L "$p" && $hops -lt 20 && "$(canon_path "$p")" == "$canon" ]]; do
         links[${#links[@]}]="$p"
         target="$(readlink "$p")"

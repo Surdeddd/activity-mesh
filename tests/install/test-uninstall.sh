@@ -1064,6 +1064,13 @@ test_late_dirs() {
     [ -f "$late/dist/1.0.0/keep" ] || fail "a dist dir that appeared after the checks was removed: $(cat "$S/out.txt")"
     grep -qF "left $(cd -P "$S" && /bin/pwd -P)/later alone" "$S/out.txt" || fail "no line says the late store dir was left alone: $(cat "$S/out.txt")"
     pass "a store or dist dir that did not exist at the check is left alone when it appears during the run, and a line says so"
+
+    new_sandbox shared
+    mkdir -p "$S/both"
+    uninstall_run "$S/out.txt" ACTIVITY_MESH_HOME="$S/both" ACTIVITY_MESH_STATE="$S/both" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge exited $RC when the store and the state dir are one empty dir"; }
+    [ ! -e "$S/both" ] || fail "the shared empty dir was left behind"
+    pass "a dir named as both the store and the state dir is removed once, and its second turn finds nothing to do"
 }
 
 test_residuals() {
