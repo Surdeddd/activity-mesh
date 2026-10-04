@@ -120,13 +120,25 @@ func TestEnforceRegistryAbsentFilesPass(t *testing.T) {
 	}
 }
 
-func TestEnforceRegistryBrokenYAMLPasses(t *testing.T) {
-	sync := t.TempDir()
-	if err := os.WriteFile(filepath.Join(sync, "scopes.yaml"), []byte("::: not yaml"), 0o644); err != nil {
-		t.Fatal(err)
+func TestEnforceRegistryBrokenYAMLFailsClosed(t *testing.T) {
+	cases := []struct{ file, broken string }{
+		{"scopes.yaml", "scopes: [\n"},
+		{"kinds.yaml", "kinds: [\n"},
 	}
-	if err := enforceRegistry(sync, "note", "any"); err != nil {
-		t.Fatalf("broken registry must warn, not block emit: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			syncDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(syncDir, tc.file), []byte(tc.broken), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := enforceRegistry(syncDir, "note", "any")
+			if err == nil {
+				t.Fatalf("a present but unparsable %s must block emit, got no error", tc.file)
+			}
+			if !strings.Contains(err.Error(), tc.file) {
+				t.Fatalf("the error must name %s so the operator knows which registry is broken: %v", tc.file, err)
+			}
+		})
 	}
 }
 
