@@ -62,7 +62,7 @@ Signature verification is not implemented on Windows — the script says so.
 | `--dry-run` | off | print the plan, do nothing |
 | `--version vX.Y.Z` | `latest` | pin a release tag (`latest` = newest release, prereleases included) |
 | `--prefix DIR` | `/usr/local/bin` | binary install dir |
-| `--no-services` | off | render units but do not register them (tests, containers) |
+| `--no-services` | off | render units but do not register them (tests, containers); on macOS they go to `dist/<version>/units/`, not `~/Library/LaunchAgents` (launchd loads that dir at every login) |
 | `--local` | off | use the repo checkout as the asset source and rebuild all three binaries with Go (falls back to the installed binaries only when no toolchain is present) |
 | `--require-signature` | off | fail unless the cosign signature of checksums.txt verifies |
 

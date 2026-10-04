@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+shopt -u patsub_replacement 2>/dev/null || true
 
 REPO="${ACTIVITY_MESH_REPO:-Surdeddd/activity-mesh}"
 VERSION="${VERSION:-latest}"
@@ -9,7 +10,7 @@ DRY_RUN=0
 NO_SERVICES=0
 LOCAL_MODE=0
 REQUIRE_SIG=0
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -25,6 +26,7 @@ while [[ $# -gt 0 ]]; do
         *) printf '\033[31m✗\033[0m unknown arg: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
+case "$PREFIX" in /*) ;; *) PREFIX="$PWD/$PREFIX" ;; esac
 
 if [[ -t 1 ]]; then
     G='\033[32m'; R='\033[31m'; Y='\033[33m'; B='\033[34m'; N='\033[0m'
@@ -99,15 +101,16 @@ verify_signature() {
         info "signature NOT verified (no .pem in release); sha256 checksum was verified"
         return 0
     }
-    if cosign verify-blob \
+    local cosign_err
+    if cosign_err="$(cosign verify-blob \
         --certificate "$dir/checksums.txt.pem" \
         --signature "$dir/checksums.txt.sig" \
-        --certificate-identity-regexp "^https://github.com/${REPO}/" \
+        --certificate-identity-regexp "^https://github\\.com/${REPO}/\\.github/workflows/release\\.yml@refs/tags/v" \
         --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-        "$dir/checksums.txt" >/dev/null 2>&1; then
+        "$dir/checksums.txt" 2>&1 >/dev/null)"; then
         ok "cosign signature verified (checksums.txt)"
     else
-        die "cosign signature verification FAILED for checksums.txt"
+        die "cosign signature verification FAILED for checksums.txt: $cosign_err"
     fi
 }
 
@@ -131,12 +134,14 @@ install_release() {
     fi
     RESOLVED_VERSION="${tag#v}"
     local archive="activity-mesh_${RESOLVED_VERSION}_${OS}_${ARCH}.tar.gz"
-    local tmp; tmp="$(mktemp -d)"
+    WORK_DIR="$(mktemp -d)" || die "mktemp failed"
+    trap 'rm -rf "$WORK_DIR"' EXIT
+    local tmp="$WORK_DIR"
     info "fetching $BASE_URL/$archive"
     curl -fsSL "$BASE_URL/$archive"      -o "$tmp/$archive"      || die "archive download failed: $archive"
     curl -fsSL "$BASE_URL/checksums.txt" -o "$tmp/checksums.txt" || die "checksums.txt download failed"
     local want got
-    want="$(grep " $archive\$" "$tmp/checksums.txt" | awk '{print $1}')"
+    want="$(awk -v f="$archive" '$2==f{print $1}' "$tmp/checksums.txt")"
     [[ -n "$want" ]] || die "no checksum entry for $archive"
     if command -v sha256sum >/dev/null 2>&1; then got="$(sha256sum "$tmp/$archive" | awk '{print $1}')"
     else got="$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')"; fi
@@ -241,6 +246,9 @@ render_template() {
 
 install_macos_units() {
     local agents="$HOME/Library/LaunchAgents"
+    if [[ $NO_SERVICES -eq 1 ]]; then
+        agents="$ASSETS_ROOT/$RESOLVED_VERSION/units"
+    fi
     mkdir -p "$agents" || die "mkdir $agents failed"
     local tdir="$ASSETS_LINK/installers/templates"
     for unit in watcher daemon health heartbeat compact weekly-digest; do
@@ -295,7 +303,7 @@ install_linux_units() {
     done
     info "periodic jobs (health/heartbeat/compact/weekly-digest) run from $ASSETS_LINK/health/ — schedule them with systemd timers or cron (see installers/README.md)"
     if [[ $NO_SERVICES -eq 0 ]]; then
-        loginctl enable-linger "$USER" 2>/dev/null \
+        loginctl enable-linger "${USER:-$(id -un)}" 2>/dev/null \
             || warn "enable-linger failed (services pause when logged out)"
     fi
 }

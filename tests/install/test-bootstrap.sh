@@ -16,6 +16,9 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 sum256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+nosvc_units() {
+    if [ "$OS" = "darwin" ]; then echo "$1/.local/share/activity-mesh/dist/$VER/units"; else echo "$1/.config/systemd/user"; fi
+}
 BOOTSTRAP="$REPO_ROOT/installers/bootstrap.sh"
 
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -61,7 +64,7 @@ mkdir -p "$FAKE_HOME"
 set +e
 HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" \
     ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
-    bash "$REPO_ROOT/installers/bootstrap.sh" --version "v$VER" --no-services \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services \
     > "$WORK/bootstrap.out" 2>&1
 RC=$?
 set -e
@@ -84,15 +87,17 @@ done
 [ -L "$FAKE_HOME/.local/share/activity-mesh/dist/current" ] || fail "current symlink missing"
 pass "versioned runtime assets installed"
 
+UNITS_DIR="$(nosvc_units "$FAKE_HOME")"
 if [ "$OS" = "darwin" ]; then
-    UNITS_DIR="$FAKE_HOME/Library/LaunchAgents"
     N_UNITS=6
+    if [ -n "$(find "$FAKE_HOME/Library/LaunchAgents" -name "*activity-mesh*" 2>/dev/null || true)" ]; then
+        fail "--no-services wrote plists into ~/Library/LaunchAgents (launchd loads them at login)"
+    fi
 else
-    UNITS_DIR="$FAKE_HOME/.config/systemd/user"
     N_UNITS=2
 fi
-COUNT=$(find "$UNITS_DIR" -name "*activity-mesh*" 2>/dev/null | wc -l | tr -d " ")
-[ "$COUNT" -eq "$N_UNITS" ] || fail "expected $N_UNITS rendered units, got $COUNT"
+COUNT=$(find "$UNITS_DIR" -name "*activity-mesh*" 2>/dev/null | wc -l | tr -d " " || true)
+[ "$COUNT" -eq "$N_UNITS" ] || fail "expected $N_UNITS rendered units in $UNITS_DIR, got $COUNT"
 if grep -rq "{{[A-Z_]*}}" "$UNITS_DIR"; then
     fail "unresolved placeholder in rendered units"
 fi
@@ -172,15 +177,16 @@ grep -rqF "$CUSTOM_SYNC" "$UNITS_DIR" || fail "units re-rendered without the con
 [ -f "$CUSTOM_SYNC/kinds.yaml" ] || fail "registries not seeded into the configured sync dir"
 pass "a re-run keeps the configured sync dir"
 
-echo "== linux services path (supervisors shimmed) =="
+echo "== linux services path (supervisors shimmed, USER unset) =="
 SHIM="$WORK/shim"
-mkdir -p "$SHIM"
+UNAME_SHIM="$WORK/shim-uname"
+mkdir -p "$SHIM" "$UNAME_SHIM"
 for c in systemctl loginctl launchctl sudo; do
     printf '#!/bin/sh\necho "%s $*" >> "%s"\n' "$c" "$WORK/supervisor.log" > "$SHIM/$c"
     chmod +x "$SHIM/$c"
 done
-printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exec /usr/bin/uname "$@" ;; esac\n' > "$SHIM/uname"
-chmod +x "$SHIM/uname"
+printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exec /usr/bin/uname "$@" ;; esac\n' > "$UNAME_SHIM/uname"
+chmod +x "$UNAME_SHIM/uname"
 LINUX_ARCHIVE="activity-mesh_${VER}_linux_amd64.tar.gz"
 if [ ! -f "$RELEASE/$LINUX_ARCHIVE" ]; then
     cp "$RELEASE/$ARCHIVE" "$RELEASE/$LINUX_ARCHIVE"
@@ -190,7 +196,7 @@ LINUX_HOME="$WORK/home-linux"
 mkdir -p "$LINUX_HOME/.local/bin"
 printf '#!/bin/sh\necho "activity-log 0.0.1 (stale)"\n' > "$LINUX_HOME/.local/bin/activity-log"
 chmod +x "$LINUX_HOME/.local/bin/activity-log"
-HOME="$LINUX_HOME" PREFIX="$WORK/bin-linux" PATH="$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+env -u USER HOME="$LINUX_HOME" PREFIX="$WORK/bin-linux" PATH="$UNAME_SHIM:$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
     bash "$BOOTSTRAP" --version "v$VER" > "$WORK/bootstrap-linux.out" 2>&1 && RC_LINUX=0 || RC_LINUX=$?
 [ "$RC_LINUX" -eq 0 ] || { cat "$WORK/bootstrap-linux.out" >&2; fail "linux services install exited $RC_LINUX"; }
 for unit in watcher daemon; do
@@ -198,11 +204,26 @@ for unit in watcher daemon; do
         || fail "activity-mesh-$unit.service not restarted: $(tr '\n' ';' < "$WORK/supervisor.log")"
 done
 pass "linux install restarts both units, so an upgrade runs the new binaries"
+grep -qx "loginctl enable-linger $(id -un)" "$WORK/supervisor.log" || fail "enable-linger not called for $(id -un) with USER unset"
+pass "linux install works with USER unset"
 grep -qxF "Environment=ACTIVITY_MESH_BIN=$WORK/bin-linux/activity-log" "$LINUX_HOME/.config/systemd/user/activity-mesh-watcher.service" \
     || fail "systemd watcher unit must point ACTIVITY_MESH_BIN at the installed CLI"
 grep -q "another activity-log at ~/.local/bin shadows" "$WORK/bootstrap-linux.out" \
     || fail "no warning about the stale ~/.local/bin/activity-log"
 pass "systemd watcher unit carries ACTIVITY_MESH_BIN; a stale ~/.local/bin/activity-log is flagged"
+
+if [ "$OS" = "darwin" ]; then
+    echo "== macOS services path (launchctl shimmed) =="
+    : > "$WORK/supervisor.log"
+    MAC_HOME="$WORK/home-mac"
+    mkdir -p "$MAC_HOME"
+    HOME="$MAC_HOME" PREFIX="$WORK/bin-mac" PATH="$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+        bash "$BOOTSTRAP" --version "v$VER" > "$WORK/bootstrap-mac.out" 2>&1 && RC_MAC=0 || RC_MAC=$?
+    [ "$RC_MAC" -eq 0 ] || { cat "$WORK/bootstrap-mac.out" >&2; fail "macOS services install exited $RC_MAC"; }
+    BOOTED=$(grep -c "^launchctl bootstrap gui/$(id -u) $MAC_HOME/Library/LaunchAgents/com\.activity-mesh\." "$WORK/supervisor.log" || true)
+    [ "$BOOTED" -eq 6 ] || fail "expected 6 launchd units bootstrapped from ~/Library/LaunchAgents, got $BOOTED"
+    pass "macOS install renders into ~/Library/LaunchAgents and bootstraps all 6 units"
+fi
 
 echo "== ACTIVITY_MESH_HOME / ACTIVITY_MESH_STATE steer bootstrap and the binaries alike =="
 ENV_HOME="$WORK/home-env"
@@ -218,6 +239,45 @@ grep -qF "\"store_dir\": \"$WORK/env-store\"" "$WORK/env-store/config.json" 2>/d
 [ -d "$WORK/env-state" ] || fail "ACTIVITY_MESH_STATE ignored"
 pass "ACTIVITY_MESH_HOME / ACTIVITY_MESH_STATE steer bootstrap and the binaries alike"
 
+echo "== an archive missing from checksums.txt fails with a diagnostic =="
+cp "$RELEASE/$ARCHIVE" "$RELEASE/activity-mesh_0.0.9_${OS}_${ARCH}.tar.gz"
+HOME="$WORK/home-nosum" PREFIX="$WORK/bin-nosum" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version v0.0.9 --no-services > "$WORK/bootstrap-nosum.out" 2>&1 && RC_NOSUM=0 || RC_NOSUM=$?
+[ "$RC_NOSUM" -ne 0 ] || fail "bootstrap must fail when checksums.txt has no entry for the archive"
+grep -q "no checksum entry for activity-mesh_0.0.9_${OS}_${ARCH}.tar.gz" "$WORK/bootstrap-nosum.out" \
+    || fail "silent exit on a missing checksum entry: $(tail -2 "$WORK/bootstrap-nosum.out")"
+pass "a missing checksum entry fails with a diagnostic"
+
+echo "== a relative --prefix is made absolute =="
+mkdir -p "$WORK/cwd" "$WORK/home-rel"
+(cd "$WORK/cwd" && HOME="$WORK/home-rel" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" --prefix ./relbin --no-services > "$WORK/bootstrap-rel.out" 2>&1) && RC_REL=0 || RC_REL=$?
+[ "$RC_REL" -eq 0 ] || { cat "$WORK/bootstrap-rel.out" >&2; fail "bootstrap with a relative --prefix exited $RC_REL"; }
+REL_UNITS="$(nosvc_units "$WORK/home-rel")"
+DAEMON_REF="$(grep -rhoE '[^ >=]*relbin/activity-mesh-daemon' "$REL_UNITS" 2>/dev/null | head -1 || true)"
+case "$DAEMON_REF" in
+    /*) [ -x "$DAEMON_REF" ] || fail "units point at $DAEMON_REF, which is not the installed daemon" ;;
+    "") fail "no unit in $REL_UNITS references the daemon" ;;
+    *) fail "relative --prefix leaked into the units: '$DAEMON_REF'" ;;
+esac
+pass "a relative --prefix is made absolute"
+
+echo "== curl | bash shape (script on stdin) =="
+PIPE_OUT="$(HOME="$WORK/home-pipe" bash -s -- --dry-run < "$BOOTSTRAP" 2>&1)" || fail "stdin dry-run failed: $PIPE_OUT"
+if printf '%s\n' "$PIPE_OUT" | grep -q "unbound variable"; then
+    fail "stdin run trips set -u: $(printf '%s\n' "$PIPE_OUT" | grep "unbound variable")"
+fi
+pass "the script runs from stdin"
+
+echo "== & and \\ in substituted values survive template rendering =="
+ODD_HOME="$WORK/home-r&d\\x"
+mkdir -p "$ODD_HOME"
+HOME="$ODD_HOME" PREFIX="$WORK/bin-odd" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-odd.out" 2>&1 && RC_ODD=0 || RC_ODD=$?
+[ "$RC_ODD" -eq 0 ] || { cat "$WORK/bootstrap-odd.out" >&2; fail "bootstrap with & and \\ in HOME exited $RC_ODD"; }
+grep -rqF "$ODD_HOME/Sync/activity" "$(nosvc_units "$ODD_HOME")" || fail "template rendering mangled a path holding & or \\"
+pass "& and \\ in substituted values survive template rendering"
+
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'
 import sys, pathlib
@@ -230,7 +290,7 @@ mkdir -p "$FAKE_HOME2"
 set +e
 HOME="$FAKE_HOME2" PREFIX="$WORK/bin2" \
     ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
-    bash "$REPO_ROOT/installers/bootstrap.sh" --version "v$VER" --no-services \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services \
     > "$WORK/bootstrap2.out" 2>&1
 RC2=$?
 set -e
