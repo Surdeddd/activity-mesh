@@ -2,6 +2,8 @@
 
 ## Symptoms
 - `secrets-bypass` or `redactor-coverage` check tier 3+
+- Both checks scan every line of every shard file, Syncthing conflict copies
+  included; the message names the first file with a hit
 - Visual confirmation in shard or audit log
 
 ## Diagnosis
@@ -30,6 +32,14 @@ grep -nE 'sk-ant-|sk-[A-Za-z0-9]{40}|ghp_|xox[abcerspu]-|AKIA|glpat-|hf_|-----BE
    activity-log redact-shard --dry-run   # confirm the count first
    activity-log redact-shard
    ```
+   On a host with no shard of its own, `redact-shard` exits 1 with
+   `no shard for this host at <path>`: there is nothing to scrub there.
+   It rewrites only the live `events-<host>.jsonl`, never a Syncthing conflict
+   copy (`events-<host>.sync-conflict-*.jsonl`). If the value is in a copy,
+   resolve the copy on the host that owns the shard: lines whose ULID is
+   already in the live shard can go with the copy; append any line whose ULID
+   is missing to the live shard and run `redact-shard` again; then delete the
+   copy, and Syncthing removes it on every peer.
    If the value survives, it is not in the compiled pack. Check with:
    ```sh
    printf '%s' '<leaked-value>' | activity-log redact --stdin
@@ -48,14 +58,19 @@ grep -nE 'sk-ant-|sk-[A-Za-z0-9]{40}|ghp_|xox[abcerspu]-|AKIA|glpat-|hf_|-----BE
    systemctl --user restart activity-mesh-daemon                    # Linux
    ```
    The daemon replays every shard from offset 0; an empty DB also resets any
-   stale cursors (`reconcileWithCursors`).
+   stale cursors (`reconcileWithCursors`). The rebuild also clears rows that a
+   daemon older than 0.4.0-rc.8 indexed from a conflict copy: without it,
+   deleting such a copy leaves the events that daemon re-pointed at the copy
+   missing from the index until the next rebuild.
 5. Append an incident line to
    `~/.local/share/activity-mesh/audit/redactions-YYYY-MM.jsonl` (plain JSONL,
    mode 0600). `redact-shard` writes no audit row of its own. `age` encryption
    of the audit dir is a v2 item — see ROADMAP.
 
 ## Verification
-- `activity-log redact-shard --dry-run` reports `0 of N` on **every** host.
-- `grep -c '<leaked-fragment>' ~/Sync/activity/events-*.jsonl` → 0 on every host.
+- `activity-log redact-shard --dry-run` reports `0 of N` on **every** host that
+  has a shard (a host without one exits 1, see step 3).
+- `grep -c '<leaked-fragment>' ~/Sync/activity/events-*.jsonl` → 0 on every host
+  (the glob includes conflict copies).
 - `secrets-bypass` returns tier 1 ok.
 - Issuer dashboard shows credential revoked + new one provisioned.

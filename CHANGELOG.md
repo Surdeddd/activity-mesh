@@ -5,6 +5,289 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-rc.8] — 2026-10-04
+
+Fixes from a full audit of every subsystem on top of rc.7. The watcher stops
+losing events to its own timeout, health alerts stop paging for bugs in the
+checks, a credential is redacted before the summary is cut, and the installer,
+MCP server and uninstall are hardened.
+
+### Security
+- **A credential cut by the 500-character cap no longer reaches the shard.**
+  The summary was truncated before redaction, so a `db_url` near the limit
+  lost its `@host`, the rule stopped matching, and the password went to the
+  synced shard in plain text, on CLI emit and on `/push` alike. The whole
+  event is now redacted first and the summary capped afterwards; redaction
+  markers can no longer push it past 500 characters, and the audit log also
+  records hits beyond the cap.
+- **Redaction catches more.** Home paths with a non-ASCII user name
+  (`/Users/josé`, `C:\Users\Максим`) are redacted, and so is every
+  occurrence of every configured home, nested or overlapping ones included.
+  Hex secrets longer than 64 digits, hex values behind a quoted name
+  (`"SLACK_SIGNING_SECRET": "…"`), `SECRET_KEY_BASE`, and hex string values
+  under a secret-named key of a structured `/push` field are caught too.
+  `git@host:owner/repo` SSH remotes are no longer redacted as email
+  addresses; any other `user@host:path/` still is.
+- **The daemon answers only `localhost` and IP-literal hosts.** A page on an
+  attacker's domain re-pointed at 127.0.0.1 (DNS rebinding) passed the
+  `Origin == Host` check and could read `/recent` and `/search` and write
+  `/push`. Every route now answers 421 to any other `Host` header.
+- **`secrets-bypass` and `redactor-coverage` scan every line.** secrets-bypass
+  looked at the last 30 minutes of a 6-hour cadence (and at most 200 lines),
+  so most leaks were never seen; the "random" sample of redactor-coverage was
+  always the oldest 100 lines. Both now scan whole shard files, Syncthing
+  conflict copies included, since a copy is replicated like a live shard. A
+  historical hit keeps `secrets-bypass` critical until the line is scrubbed
+  (RB-2).
+- **`uninstall.sh` follows `ACTIVITY_MESH_HOME` and `ACTIVITY_MESH_STATE`, and
+  `--purge` removes only directories that positively look like
+  activity-mesh's own.** Honouring the variables lets a typo point `rm -rf`
+  anywhere, so every candidate is checked before anything changes. `dist`
+  always, and with `--purge` the store, state and config dir, must not be a
+  mount point or a volume root and may hold only what activity-mesh creates
+  there; the store, state and config dir must also hold a file activity-mesh
+  writes. An empty directory is removed with `rmdir`, never `rm -rf`; if
+  something has appeared in it since the check, the uninstall stops and
+  deletes nothing more. A value that is your home or one of its parents, a
+  sync dir, a parent of one or anything inside one, or a parent of the default
+  dirs is refused, compared by resolved name and by device and inode (on macOS
+  also through the `/System/Volumes/Data` spelling), and the uninstall stops
+  when it cannot read an identity. Blanks around a sync dir value are trimmed,
+  and a purge through a chain of links removes every link of the chain. A
+  refusal names what is in the way; see
+  [installers/README.md](installers/README.md#uninstall).
+
+### Fixed
+- **The watcher no longer loses events to its own emit timeout.** It killed
+  `activity-log emit` after 10 seconds, while a loaded machine needs minutes,
+  so the share of lost watcher events grew from 7% in August to 27% in early
+  October. The limit is now 10 minutes, and an emit that printed its ULID
+  counts as written even when it exits late: the CLI appends the event before
+  it prints the ID.
+- **Files inside a moved-in or copied-in directory are reported.** They
+  produce no events of their own, so they are announced once the directory is
+  watched, within the per-source budget. A directory on the skip list
+  (`node_modules`, `.git`, `dist`, `build`, `vendor`, `target`, ...) is
+  ignored when it appears at runtime, as at startup, so a source folder
+  literally named one of those stays invisible by design.
+- **A source keeps reporting after its root is replaced.** Renaming or
+  deleting the watched root left the source deaf until a restart. It now waits
+  for the root to come back, re-attaches with a fresh watcher, announces what
+  the new root holds, and logs a failed re-attach once per outage.
+- **The watcher uses the CLI its unit points at.** `ACTIVITY_MESH_BIN`, set by
+  the installed units, wins over `activity_log_bin` in `watcher.yaml`, so a
+  custom `--prefix` no longer emits through a missing or stale
+  `~/.local/bin/activity-log`.
+- **Health alerts stop paging for check bugs.** Since mid-September an alert
+  went out almost every run, about four a day, and each cause was a bug in a
+  check; the items below fix them. On top of that, the same set of failing
+  checks is sent at most once per 24 hours (`ACTIVITY_MESH_ALERT_REPEAT_S`), a
+  new failure goes out at once, an all-clear resets it, and every alert sent
+  is recorded in `alerts.log`.
+- **A health run cannot be stalled by one check.** Checks forked a process per
+  line, and a run took 5 to 21 minutes; the checks now read shards and logs in
+  one pass. `master.sh` enforces its own per-check timeout
+  (`ACTIVITY_MESH_CHECK_TIMEOUT_S`, default 120 s) without GNU `timeout`,
+  which macOS lacks, and reports a check past it at tier 2 as "timed out".
+  Without `lib.sh` it exits with a message instead of crashing, and the
+  snapshot is saved before the notifier runs.
+- **`adoption-ratio` is informational.** It counted the heartbeat as a writing
+  agent and paged on the ratio. It now leaves self-monitoring out, looks at 7
+  days, reports a fractional ratio and stays at tier 1.
+- **`canary` tells a sleeping laptop from a broken writer.** It counted
+  canaries per 24 hours, so every night of sleep looked like a launchd
+  failure. It now fails only when the newest canary is older than
+  `ACTIVITY_MESH_CANARY_STALE_S` (2 h) while the machine has been awake longer
+  than that, and a burst of other events can no longer push the canaries out
+  of the lines it reads.
+- **`silence` and `sync-lag` stop blaming the network for sleep.** silence
+  waits `ACTIVITY_MESH_WAKE_GRACE_S` (30 min) after boot or wake before
+  judging, and sync-lag counts delivery from the wake when the file arrived
+  after it. The per-host silence thresholds were keyed on names no real shard
+  has; `ACTIVITY_MESH_SILENCE_MAX_S` (12 h) now applies to every host, which
+  was already the effective value.
+- **`hook-health` and `ingester-error` read the right logs.** hook-health
+  counted clock-sync failures from `heartbeat.log`; it now reads only the
+  three hook logs, over the 6-hour run window instead of one hour.
+  ingester-error read an `ingest.log` that nothing writes; it now counts
+  daemon ingest errors in `daemon.err`, pre-push ingest included, and lost
+  watcher events in `watcher.err`: failed emits plus dropped rollups.
+- **`schema-drift` and `ulid-collision` judge every event they should.**
+  schema-drift flagged `org/name` kinds, which emit always allows, and
+  ulid-collision saw only the last 1000 lines; it now scans whole shards. One
+  shared timestamp parser converts `+03:00`-style offsets to UTC and survives
+  non-string values in every check that windows events by time.
+- **The daemon-down alert is plain text in one language.** The dead-man
+  heartbeat sent markdown with an English and a Russian copy glued together
+  and claimed history was being lost, although CLI writes do not need the
+  daemon. Its canary now records why the probe failed (`why=…`, `busy=…`).
+- **The weekly digest reports real numbers.** Alerts come from `alerts.log`
+  (the count was always 0), the token budget compares the average injection
+  with the 500-token per-fire cap and the largest session with the 2000-token
+  cap, canary timeouts on a busy machine are listed but not counted as
+  failures, and the "self-heals" line, which had no source, is gone.
+- **Health and heartbeat no longer start at login.** After a reboot, health
+  ran for 21 minutes in the boot peak and the heartbeat recorded a miss while
+  the daemon was still indexing. Both launchd units now wait for their
+  calendar slot.
+- **The prompt router keeps its token caps.** It checked the 2000-token
+  session cap before adding the next injection, so sessions reached about
+  2400, and the `…[truncated]` marker pushed an injection past 500. An
+  injection now gets the smaller of 500 and what is left of the 2000, marker
+  included, and with less than 100 left the router stays silent without
+  querying. A zero-padded counter is read as decimal; `0800` used to crash the
+  hook.
+- **`/push` refuses lines the index could not read back.** A payload nested
+  deeper than 32 levels, a number outside the float64 range, a fractional
+  `duration_ms`, `exit_code` or `clock_offset_ms`, a non-string `priority`, a
+  non-integer `v`, trailing data or a bare `null` now gets 400, and large
+  integers stay exact instead of being rounded through float64. Such a line
+  used to be appended but never indexed, so every retry appended it again.
+- **Retries of one ULID append once.** `/push` is serialized and indexes its
+  own shard before the duplicate check, so concurrent retries, and a retry
+  after a crash between the append and the indexing, get `duplicate: true`.
+- **`/health` answers during a slow start.** The daemon opens its port before
+  the initial ingest; after a reboot the port opened 14.5 minutes late and the
+  heartbeat counted a miss. Events from healthy shards are counted even when
+  another shard fails to ingest.
+- **Pushed timestamps are stored as canonical UTC.** `+03:00` and nanosecond
+  forms are rewritten to `2006-01-02T15:04:05.000000Z` so they sort like every
+  other event. A time whose UTC form would leave the years 0000–9999 is
+  refused, because no reader could parse the stored form.
+- **`--limit N` returns the newest events.** `query` sorted by the raw `ts`
+  text, so offset and nanosecond forms landed out of order, and the index
+  ordered by whole seconds, so a limit could drop the newest event within a
+  second. The CLI now orders by the parsed time, then sequence and ULID; the
+  index by second, then canonical `ts`, then ULID.
+- **One malformed line no longer stops indexing.** A line nested deeper than
+  SQLite accepts rolled back the whole pass, and `IngestDir` gave up at the
+  first failing shard, so every later host went unindexed while `/health`
+  said ok. Such lines are skipped and counted in
+  `activity_mesh_skipped_lines_total`, which now also counts lines SQLite
+  rejects; the other shards are indexed, and vanished shards are still swept.
+- **Syncthing conflict copies are not read as shards.**
+  `events-<host>.sync-conflict-….jsonl` matched the shard glob: `query` and
+  `status` double-counted, the index re-pointed rows at the copy, and silence,
+  sync-lag and the digest showed the copy as a host. The CLI, the index, the
+  daemon's watcher and the health checks skip copies now; the `conflict`
+  check still reports them at tier 4.
+- **`redact-shard` expands `~` and keeps numbers exact.** `--sync-dir '~/…'`
+  read a path that did not exist and reported success; a host without a shard
+  is now an error (exit 1) instead of `0 of 0`. A rewritten line keeps its
+  number literals byte for byte, and a line with trailing data is left as it
+  is.
+- **`curl | bash` no longer downgrades and half-installs.** GitHub's
+  `releases/latest` skips prereleases and pointed at v0.3.2, so the
+  documented install replaced 0.4.0-rc binaries with 0.3.2 ones and then
+  failed on the missing `health/`. `bootstrap.sh` (and `bootstrap.ps1`) now
+  take the newest release including prereleases and refuse an archive without
+  the full runtime layout before anything changes. The binaries are staged
+  first (any `sudo` prompt happens there), `dist/current` is switched, and
+  only then are the binaries renamed into place, so a bad archive or a refused
+  password changes nothing.
+- **A bootstrap re-run keeps the configured sync dir.** Every run reset
+  `sync_dir` to `~/Sync/activity`; it is now read from `config.json` with its
+  JSON escapes decoded, and a value that cannot be decoded stops bootstrap
+  with a hint to set `ACTIVITY_MESH_SYNC`.
+- **Linux upgrades restart the services**, so an upgrade runs the new
+  binaries instead of leaving the old processes up.
+- **`bootstrap.sh` follows `ACTIVITY_MESH_HOME` and `ACTIVITY_MESH_STATE`** and
+  passes them on to the binaries it runs; the install test no longer writes
+  into live directories when those variables are exported.
+- **Smaller bootstrap fixes.** `--no-services` on macOS renders units into
+  `dist/<version>/units/` instead of `~/Library/LaunchAgents`, which launchd
+  loads at every login; the cosign identity is pinned to the release workflow
+  on a tag; a missing checksum entry names the archive; `curl | bash` no
+  longer fails on `BASH_SOURCE`; a relative `--prefix` is made absolute; an
+  unset `USER` is tolerated; values with `&`, `\`, `<` or `>` survive
+  rendering (XML-escaped in plists); the download dir is removed on exit; and
+  the `PATH` warning names the `activity-log` that actually wins.
+- **The MCP server starts when launched through a symlink** such as
+  `dist/current`, which is how the installer registers it; it used to exit
+  without a word.
+- **The MCP digest refuses windows it does not know.** `activity_digest`
+  takes `today`, `yesterday`, `<N>h`, `<N>d` (up to five digits) and
+  `since:<ULID>`; anything else used to return a 24-hour digest. Tool failures
+  come back as `isError: true` results, an unknown tool is JSON-RPC error
+  -32602, a request line that is not an object with a method gets -32600 (a
+  `null` line used to crash the server), resource URIs are percent-decoded,
+  and a scope named `constructor` no longer breaks the digest.
+- **Install scripts write through symlinks and keep permissions.** A
+  `CLAUDE.md`, `settings.json` or session-end hook kept in a dotfiles repo was
+  replaced by a regular file with other permissions; edits now land in the
+  link's target, atomically, with its mode. The `MEMORY.md` path is derived
+  from `$HOME` instead of the author's; the Codex
+  `[mcp_servers.activity-mesh]` table is replaced in place (sub-tables,
+  neighbours and comments kept, a backup written, a re-run changes nothing)
+  instead of being appended a second time, and a dotted or inline definition
+  elsewhere is refused with the block to paste; `--help` prints usage instead
+  of applying the patch, and an unknown flag exits 2. The five scripts share
+  one helper, `installers/lib/cfgedit.sh`, which ships in the archive, and a
+  script started through a symlinked directory finds the files next to the
+  real script.
+- **The uninstall removes what the install registered.** It also removes the
+  binaries from `~/.local/bin`, and the Claude Code hooks and MCP
+  registrations (`claude mcp remove`, `~/.claude.json`, the Codex table) that
+  point into the `dist/` it deletes, backing up each edited file;
+  registrations that point elsewhere, such as a repo checkout, stay, and a
+  Hermes entry is only reported. `uninstall.ps1 -Purge` also removes the state
+  dir.
+
+### Changed
+- **A registry file that is present but invalid blocks writes.** A
+  `kinds.yaml` or `scopes.yaml` that is present but invalid — unreadable, not
+  valid YAML, or rejected by the loader's checks (a name declared twice, an
+  unknown status or severity, an unsupported `schema_version`) — blocks emit
+  and `/push`; an absent file means no check. The code has behaved this way since rc.2; it is now a
+  decision (fail-closed, asserted by `TestEnforceRegistryBrokenYAMLFailsClosed`)
+  and supersedes the rc.1 note that "a broken registry file warns and never
+  blocks writes". Failed watcher emits show up in `ingester-error`.
+- **Alerts and the digest use one language:** Russian by default, English
+  with `ACTIVITY_MESH_LANG=en`, never both glued into one text.
+- **Docs follow the code.** ARCHITECTURE describes all 20 health checks, the
+  per-check timeout, the alert repeat rule, the Host filter and the `/push`
+  contract as they are now; RB-4 and RB-5 give the real hook-health window,
+  the silence threshold and the offline registry; RB-2 covers the
+  `redact-shard` exit code and secrets in conflict copies. README shows the
+  real `make build` matrix (a cross-compile smoke check; releases build the
+  full set) and what `make verify` runs; `installers/README.md` and
+  `installers/UPGRADE.md` describe the install order and the uninstall rules,
+  and `mcp/README.md` the digest windows, error shapes and what
+  `mcp/install.sh` writes.
+
+### Added
+- `make test-health` and a `health-tests` CI job run a hermetic regression
+  suite for the health checks (bash and jq, temp dirs only); `make verify`
+  includes it. `make test-install` also runs the new suites for the shared
+  helper, the integration installers and the uninstall.
+
+### Upgrade notes
+- **Re-run bootstrap on every host.** It re-renders the units: health and
+  heartbeat stop running at login, and the watcher gets `ACTIVITY_MESH_BIN`.
+  An existing `~/.config/activity-mesh/watcher.yaml` keeps its old
+  `activity_log_bin` line, which is harmless once the unit sets
+  `ACTIVITY_MESH_BIN`. Pass `TELEGRAM_ENV` again if your alerts use a file
+  other than `~/.config/activity-mesh/telegram.env`; every run renders the
+  default otherwise.
+- **HTTP clients must address the daemon by IP or `localhost`.** A DNS name
+  (`<host>.local`, a Tailscale name) now gets 421. Check
+  `ACTIVITY_MESH_HEALTH_URL` on every host before upgrading; the heartbeat
+  template sets `http://127.0.0.1:7459/health`.
+- **Rebuild the index after resolving conflict copies.** Rows that an older
+  daemon indexed from a Syncthing conflict copy stay until the copy is
+  deleted or the index is rebuilt, and deleting the copy also drops the
+  events that daemon re-pointed at it from the index until the next rebuild
+  (see "Rebuilding the index" in [installers/UPGRADE.md](installers/UPGRADE.md)).
+- **The first health run after the upgrade may repeat one alert**, because the
+  stored alert signature now covers only tier 2 and above.
+- **`/push` is stricter.** Clients that sent a non-integer `v`, fractional
+  integer fields, a non-string `priority` or trailing data get 400; the hooks
+  in this repo write through the CLI and are not affected.
+- **`redact-shard` exits 1 on a host without a shard**, and
+  **`uninstall.sh --purge` may refuse a directory it used to delete**, listing
+  what is in the way; remove such a directory by hand if that is what you
+  want.
+
 ## [0.4.0-rc.7] — 2026-09-13
 
 ### Fixed
