@@ -35,6 +35,22 @@ ok()   { printf '%b✓%b %s\n' "$G" "$N" "$*" >&2; }
 warn() { printf '%b⚠%b %s\n' "$Y" "$N" "$*" >&2; }
 info() { printf '%bi%b %s\n' "$B" "$N" "$*" >&2; }
 die()  { printf '%b✗%b %s\n' "$R" "$N" "$*" >&2; printf '%b✗%b bootstrap FAILED — installation is incomplete\n' "$R" "$N" >&2; exit 1; }
+json_unescape() {
+    local s="$1" out=""
+    while [[ "$s" == *\\* ]]; do
+        out="$out${s%%\\*}"
+        s="${s#*\\}"
+        case "$s" in
+            \"*) out="$out\""; s="${s:1}" ;;
+            \\*) out="$out\\"; s="${s:1}" ;;
+            u0026*) out="$out&"; s="${s:5}" ;;
+            u003[cC]*) out="$out<"; s="${s:5}" ;;
+            u003[eE]*) out="$out>"; s="${s:5}" ;;
+            *) return 1 ;;
+        esac
+    done
+    printf '%s' "$out$s"
+}
 
 case "$(uname -s)" in
     Darwin) OS="darwin" ;;
@@ -56,8 +72,11 @@ STORE_DIR="${ACTIVITY_MESH_HOME:-$HOME/.local/share/activity-mesh}"
 STATE_DIR="${ACTIVITY_MESH_STATE:-$HOME/.local/state/activity-mesh}"
 SYNC_DIR="${ACTIVITY_MESH_SYNC:-$HOME/Sync/activity}"
 if [[ -z "${ACTIVITY_MESH_SYNC:-}" && -f "$STORE_DIR/config.json" ]]; then
-    prev="$(sed -n 's/.*"sync_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STORE_DIR/config.json" | head -1)"
-    [[ -n "$prev" ]] && SYNC_DIR="$prev"
+    prev="$(sed -n -E 's/.*"sync_dir"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' "$STORE_DIR/config.json" | head -1)"
+    if [[ -n "$prev" ]]; then
+        SYNC_DIR="$(json_unescape "$prev")" \
+            || die "cannot decode sync_dir in $STORE_DIR/config.json — set ACTIVITY_MESH_SYNC to the sync dir and re-run"
+    fi
 fi
 CONFIG_DIR="$HOME/.config/activity-mesh"
 ASSETS_ROOT="$STORE_DIR/dist"

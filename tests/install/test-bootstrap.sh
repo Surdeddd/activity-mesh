@@ -336,6 +336,25 @@ HOME="$ODD_HOME" PREFIX="$WORK/bin-odd" ACTIVITY_MESH_BASE_URL="http://127.0.0.1
 [ "$RC_ODD" -eq 0 ] || { cat "$WORK/bootstrap-odd.out" >&2; fail "bootstrap with & and \\ in HOME exited $RC_ODD"; }
 grep -rqF "$ODD_HOME/Sync/activity" "$(nosvc_units "$ODD_HOME")" || fail "template rendering mangled a path holding & or \\"
 pass "& and \\ in substituted values survive template rendering"
+ODD_CONFIG="$ODD_HOME/.local/share/activity-mesh/config.json"
+ODD_CONFIG_BEFORE="$(cksum < "$ODD_CONFIG")"
+HOME="$ODD_HOME" PREFIX="$WORK/bin-odd" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-odd2.out" 2>&1 && RC_ODD2=0 || RC_ODD2=$?
+[ "$RC_ODD2" -eq 0 ] || { cat "$WORK/bootstrap-odd2.out" >&2; fail "re-run with & and \\ in the sync dir exited $RC_ODD2"; }
+[ "$(cksum < "$ODD_CONFIG")" = "$ODD_CONFIG_BEFORE" ] || fail "re-run moved the configured sync dir: $(tr -d '\n' < "$ODD_CONFIG")"
+grep -rqF "$ODD_HOME/Sync/activity" "$(nosvc_units "$ODD_HOME")" || fail "re-run rendered the units with a different sync dir"
+pass "a re-run keeps a sync dir holding & and \\"
+
+echo "== an undecodable sync_dir stops bootstrap and names ACTIVITY_MESH_SYNC =="
+ESC_STORE="$WORK/home-esc/.local/share/activity-mesh"
+mkdir -p "$ESC_STORE"
+printf '{\n  "sync_dir": "%s/esc\\tsync",\n  "store_dir": "%s"\n}\n' "$WORK" "$ESC_STORE" > "$ESC_STORE/config.json"
+HOME="$WORK/home-esc" PREFIX="$WORK/bin-esc" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-esc.out" 2>&1 && RC_ESC=0 || RC_ESC=$?
+[ "$RC_ESC" -ne 0 ] || fail "bootstrap must stop on a sync_dir it cannot decode"
+grep -q "ACTIVITY_MESH_SYNC" "$WORK/bootstrap-esc.out" || fail "no hint to set ACTIVITY_MESH_SYNC: $(tail -2 "$WORK/bootstrap-esc.out")"
+[ ! -e "$WORK/bin-esc" ] || fail "binaries installed despite an undecodable sync_dir"
+pass "an undecodable sync_dir stops bootstrap and names ACTIVITY_MESH_SYNC"
 
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'
