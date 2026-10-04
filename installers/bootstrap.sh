@@ -331,6 +331,9 @@ for b in activity-log activity-watcher activity-mesh-daemon; do
         install_bin "$BIN_SRC/$b" "$PREFIX/$b"
     fi
 done
+if [[ -e "$HOME/.local/bin/activity-log" && ! "$HOME/.local/bin/activity-log" -ef "$LOG_BIN" ]]; then
+    warn "another activity-log at ~/.local/bin shadows $LOG_BIN"
+fi
 
 if [[ ! -f "$CONFIG_DIR/watcher.yaml" ]]; then
     cp "$ASSETS_LINK/configs/watcher.yaml" "$CONFIG_DIR/watcher.yaml" || die "install watcher.yaml failed"

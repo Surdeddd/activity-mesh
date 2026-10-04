@@ -169,6 +169,7 @@ func TestExpandHome(t *testing.T) {
 }
 
 func TestLoadConfigBasic(t *testing.T) {
+	t.Setenv("ACTIVITY_MESH_BIN", "")
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "watcher.yaml")
 	yaml := `
@@ -242,6 +243,7 @@ sources:
 }
 
 func TestLoadConfigDefaults(t *testing.T) {
+	t.Setenv("ACTIVITY_MESH_BIN", "")
 	dir := t.TempDir()
 	p := filepath.Join(dir, "w.yaml")
 	if err := os.WriteFile(p, []byte("sources:\n  - name: a\n    path: /tmp\n    emit:\n      kind: x\n      scope: y\n"), 0o644); err != nil {
@@ -257,6 +259,20 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.ActivityLogBin != defaultActivityLog {
 		t.Errorf("default bin: %s", cfg.ActivityLogBin)
+	}
+}
+
+func TestFillDefaultsPrefersEnvBinary(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "activity-log")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ACTIVITY_MESH_BIN", bin)
+	c := Config{ActivityLogBin: "~/.local/bin/activity-log"}
+	c.fillDefaults()
+	if c.ActivityLogBin != bin {
+		t.Fatalf("the unit-rendered ACTIVITY_MESH_BIN must win over watcher.yaml: got %q want %q", c.ActivityLogBin, bin)
 	}
 }
 

@@ -62,6 +62,9 @@ type Config struct {
 }
 
 func (c *Config) fillDefaults() {
+	if env := os.Getenv("ACTIVITY_MESH_BIN"); env != "" {
+		c.ActivityLogBin = env
+	}
 	if c.ActivityLogBin == "" {
 		c.ActivityLogBin = defaultActivityLog
 	}

@@ -105,6 +105,19 @@ grep -rq "$PREFIX_DIR" "$UNITS_DIR" || fail "units do not reference the installe
 pass "units rendered from versioned assets/prefix, no checkout references"
 
 if [ "$OS" = "darwin" ]; then
+    grep -A1 '<key>ACTIVITY_MESH_BIN</key>' "$UNITS_DIR/com.activity-mesh.watcher.plist" \
+        | grep -qF "<string>$PREFIX_DIR/activity-log</string>" \
+        || fail "watcher unit must point ACTIVITY_MESH_BIN at the installed CLI"
+else
+    grep -qxF "Environment=ACTIVITY_MESH_BIN=$PREFIX_DIR/activity-log" "$UNITS_DIR/activity-mesh-watcher.service" \
+        || fail "watcher unit must point ACTIVITY_MESH_BIN at the installed CLI"
+fi
+if grep -q "shadows" "$WORK/bootstrap.out"; then
+    fail "shadow warning without a ~/.local/bin/activity-log"
+fi
+pass "watcher unit points ACTIVITY_MESH_BIN at the installed CLI"
+
+if [ "$OS" = "darwin" ]; then
     for unit in health heartbeat; do
         plist="$UNITS_DIR/com.activity-mesh.$unit.plist"
         [ -f "$plist" ] || fail "rendered $unit unit missing: $plist"
@@ -173,7 +186,9 @@ if [ ! -f "$RELEASE/$LINUX_ARCHIVE" ]; then
     (cd "$RELEASE" && sum256 "$LINUX_ARCHIVE" >> checksums.txt)
 fi
 LINUX_HOME="$WORK/home-linux"
-mkdir -p "$LINUX_HOME"
+mkdir -p "$LINUX_HOME/.local/bin"
+printf '#!/bin/sh\necho "activity-log 0.0.1 (stale)"\n' > "$LINUX_HOME/.local/bin/activity-log"
+chmod +x "$LINUX_HOME/.local/bin/activity-log"
 HOME="$LINUX_HOME" PREFIX="$WORK/bin-linux" PATH="$SHIM:$PATH" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
     bash "$BOOTSTRAP" --version "v$VER" > "$WORK/bootstrap-linux.out" 2>&1 && RC_LINUX=0 || RC_LINUX=$?
 [ "$RC_LINUX" -eq 0 ] || { cat "$WORK/bootstrap-linux.out" >&2; fail "linux services install exited $RC_LINUX"; }
@@ -182,6 +197,11 @@ for unit in watcher daemon; do
         || fail "activity-mesh-$unit.service not restarted: $(tr '\n' ';' < "$WORK/supervisor.log")"
 done
 pass "linux install restarts both units, so an upgrade runs the new binaries"
+grep -qxF "Environment=ACTIVITY_MESH_BIN=$WORK/bin-linux/activity-log" "$LINUX_HOME/.config/systemd/user/activity-mesh-watcher.service" \
+    || fail "systemd watcher unit must point ACTIVITY_MESH_BIN at the installed CLI"
+grep -q "another activity-log at ~/.local/bin shadows" "$WORK/bootstrap-linux.out" \
+    || fail "no warning about the stale ~/.local/bin/activity-log"
+pass "systemd watcher unit carries ACTIVITY_MESH_BIN; a stale ~/.local/bin/activity-log is flagged"
 
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'
