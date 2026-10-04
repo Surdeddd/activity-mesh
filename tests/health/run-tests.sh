@@ -439,9 +439,23 @@ grep -q 'jq не найден' "$C/notified" 2>/dev/null || err "the alert must 
 grep -q 'jq not found' "$C/notified" 2>/dev/null && err "English glued into the Russian alert: $(cat "$C/notified")"
 grep -q ' master fail$' "$STATE/alerts.log" 2>/dev/null || err "the alert is not recorded in alerts.log"
 : > "$C/notified"
+rm -f "$STATE/health-last-alert"
 run_master ACTIVITY_MESH_JQ=/nonexistent/jq ACTIVITY_MESH_LANG=en
 grep -q 'jq not found' "$C/notified" 2>/dev/null || err "English alert expected with ACTIVITY_MESH_LANG=en: $(cat "$C/notified" 2>/dev/null)"
 grep -q 'не найден' "$C/notified" 2>/dev/null && err "Russian glued into the English alert: $(cat "$C/notified")"
+end_case
+
+begin_case "master: an aggregation failure is sent once per repeat window, and a real failure after it still pages"
+mkdir -p "$C/h/checks"
+cp "$HEALTH/master.sh" "$HEALTH/lib.sh" "$C/h/"
+printf '%s\n' '. "$(dirname "$0")/../lib.sh"' 'am_start' 'am_emit flaky 2 warn "something off"' > "$C/h/checks/flaky.sh"
+run_master ACTIVITY_MESH_JQ=/nonexistent/jq
+run_master ACTIVITY_MESH_JQ=/nonexistent/jq
+sent=$(grep -o 'jq не найден' "$C/notified" 2>/dev/null | wc -l | tr -d ' ')
+[ "$sent" = 1 ] || err "two runs without jq sent $sent alerts, want 1"
+run_master
+grep -q 'flaky=warn' "$C/notified" 2>/dev/null || err "a tier-2 failure after the aggregation alert was not sent: $(cat "$C/notified" 2>/dev/null)"
+[ "$(wc -l < "$STATE/alerts.log" 2>/dev/null | tr -d ' ')" = 2 ] || err "alerts.log should record the 2 alerts that went out"
 end_case
 
 begin_case "master: a hung check is cut off and reported, the run still completes"

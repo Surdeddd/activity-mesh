@@ -104,6 +104,25 @@ summary=$(printf '{"ok":%d,"warn":%d,"fail":%d,"critical":%d,"max_tier":%d}' \
 doc=$(printf '{"generated_at":"%s","host":"%s","checks":%s,"summary":%s}' \
     "$NOW_TS" "$HOST" "$results_json" "$summary")
 
+LAST_ALERT="$ACTIVITY_MESH_STATE/health-last-alert"
+
+alert_once() {
+    local sig="$1" msg="$2" severity="$3" now prev_ts=0 prev_sig=""
+    now=$(date +%s)
+    if [ -f "$LAST_ALERT" ]; then
+        IFS=$'\t' read -r prev_ts prev_sig < "$LAST_ALERT" || true
+        case "$prev_ts" in ''|*[!0-9]*) prev_ts=0 ;; esac
+    fi
+    if [ "$sig" = "$prev_sig" ] && [ $(( now - prev_ts )) -lt "$ALERT_REPEAT_S" ]; then
+        printf 'info: repeat alert suppressed (%s, first sent %ss ago)\n' "$sig" $(( now - prev_ts )) >&2
+    elif am_notify "$msg" "$severity"; then
+        printf '%s\t%s\n' "$now" "$sig" > "$LAST_ALERT" 2>/dev/null || true
+        am_record_alert master "$severity"
+    else
+        printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
+    fi
+}
+
 if printf '%s' "$doc" | "$AM_JQ" -e . >/dev/null 2>&1; then
     if [ "$PRETTY" -eq 1 ]; then
         printf '%s\n' "$doc" | "$AM_JQ" .
@@ -117,11 +136,7 @@ else
         command -v "$AM_JQ" >/dev/null 2>&1 || why=$(am_t "jq not found" "jq не найден")
         msg=$(am_t "activity-mesh: the health run on $HOST failed, no snapshot written: $why" \
             "activity-mesh: проверка здоровья на $HOST не удалась, снимок не записан: $why")
-        if am_notify "$msg" fail; then
-            am_record_alert master fail
-        else
-            printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
-        fi
+        alert_once master=aggregation-failed "$msg" fail
     fi
     exit 0
 fi
@@ -130,34 +145,19 @@ SNAP_DIR="$ACTIVITY_MESH_STATE"
 mkdir -p "$SNAP_DIR" 2>/dev/null || true
 printf '%s\n' "$doc" > "$SNAP_DIR/last-health.json" 2>/dev/null || true
 
-LAST_ALERT="$ACTIVITY_MESH_STATE/health-last-alert"
 if [ "$DRY_RUN" -eq 0 ]; then
     if [ "$max_tier" -ge 2 ]; then
         failing=$(printf '%s' "$results_json" | "$AM_JQ" -r \
             '[.[] | select(.status != "ok") | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
         sig=$(printf '%s' "$results_json" | "$AM_JQ" -r \
             '[.[] | select((.tier // 3) >= 2) | "\(.name)=\(.status)"] | join(", ")' 2>/dev/null || true)
-        now=$(date +%s); prev_ts=0; prev_sig=""
-        if [ -f "$LAST_ALERT" ]; then
-            IFS=$'\t' read -r prev_ts prev_sig < "$LAST_ALERT" || true
-            case "$prev_ts" in ''|*[!0-9]*) prev_ts=0 ;; esac
-        fi
-        if [ "$sig" = "$prev_sig" ] && [ $(( now - prev_ts )) -lt "$ALERT_REPEAT_S" ]; then
-            printf 'info: repeat alert suppressed (%s, first sent %ss ago)\n' "$sig" $(( now - prev_ts )) >&2
-        else
-            fmt=$(am_t 'activity-mesh: %d ok, %d warnings, %d failures, %d severe (tier %d, %s)\n%s' \
-                'activity-mesh: в норме %d, предупреждений %d, отказов %d, критичных %d (уровень %d, %s)\n%s')
-            # shellcheck disable=SC2059
-            msg=$(printf "$fmt" "$ok" "$warn" "$fail" "$critical" "$max_tier" "$HOST" "$failing")
-            severity=warn
-            { [ "$fail" -gt 0 ] || [ "$critical" -gt 0 ]; } && severity=fail
-            if am_notify "$msg" "$severity"; then
-                printf '%s\t%s\n' "$now" "$sig" > "$LAST_ALERT" 2>/dev/null || true
-                am_record_alert master "$severity"
-            else
-                printf 'warn: health alert undeliverable (no notify cmd, no telegram creds)\n' >&2
-            fi
-        fi
+        fmt=$(am_t 'activity-mesh: %d ok, %d warnings, %d failures, %d severe (tier %d, %s)\n%s' \
+            'activity-mesh: в норме %d, предупреждений %d, отказов %d, критичных %d (уровень %d, %s)\n%s')
+        # shellcheck disable=SC2059
+        msg=$(printf "$fmt" "$ok" "$warn" "$fail" "$critical" "$max_tier" "$HOST" "$failing")
+        severity=warn
+        { [ "$fail" -gt 0 ] || [ "$critical" -gt 0 ]; } && severity=fail
+        alert_once "$sig" "$msg" "$severity"
     else
         rm -f "$LAST_ALERT" 2>/dev/null || true
     fi
