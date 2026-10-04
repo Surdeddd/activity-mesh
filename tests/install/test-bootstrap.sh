@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/amesh-install-test.XXXXXX")"
+TMP_BASE="${TMPDIR:-/tmp}"
+WORK="$(mktemp -d "${TMP_BASE%/}/amesh-install-test.XXXXXX")"
 SERVER_PID=""
 cleanup() {
     [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
@@ -144,6 +145,18 @@ HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:
 [ "$(readlink "$FAKE_HOME/.local/share/activity-mesh/dist/current")" = "$CURRENT_BEFORE" ] || fail "dist/current re-pointed by a refused archive"
 grep -q "refusing to install" "$WORK/bootstrap-old.out" || fail "no layout diagnostics: $(tail -2 "$WORK/bootstrap-old.out")"
 pass "an archive without health/ is refused before anything is installed"
+
+echo "== a re-run keeps the configured sync dir =="
+CUSTOM_SYNC="$FAKE_HOME/Dropbox/activity"
+HOME="$FAKE_HOME" "$PREFIX_DIR/activity-log" init --sync-dir "$CUSTOM_SYNC" --yes >/dev/null
+HOME="$FAKE_HOME" PREFIX="$PREFIX_DIR" ACTIVITY_MESH_BASE_URL="http://127.0.0.1:$PORT" \
+    bash "$BOOTSTRAP" --version "v$VER" --no-services > "$WORK/bootstrap-rerun.out" 2>&1 && RC_RERUN=0 || RC_RERUN=$?
+[ "$RC_RERUN" -eq 0 ] || { cat "$WORK/bootstrap-rerun.out" >&2; fail "re-run exited $RC_RERUN"; }
+grep -qF "\"sync_dir\": \"$CUSTOM_SYNC\"" "$FAKE_HOME/.local/share/activity-mesh/config.json" \
+    || fail "re-run reset sync_dir: $(tr -d '\n' < "$FAKE_HOME/.local/share/activity-mesh/config.json")"
+grep -rqF "$CUSTOM_SYNC" "$UNITS_DIR" || fail "units re-rendered without the configured sync dir"
+[ -f "$CUSTOM_SYNC/kinds.yaml" ] || fail "registries not seeded into the configured sync dir"
+pass "a re-run keeps the configured sync dir"
 
 echo "== corrupted checksum must fail hard =="
 python3 - "$RELEASE/checksums.txt" <<'PYEOF'

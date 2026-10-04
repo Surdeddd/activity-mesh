@@ -53,6 +53,10 @@ DAEMON_BIN="$PREFIX/activity-mesh-daemon"
 STORE_DIR="$HOME/.local/share/activity-mesh"
 STATE_DIR="$HOME/.local/state/activity-mesh"
 SYNC_DIR="${ACTIVITY_MESH_SYNC:-$HOME/Sync/activity}"
+if [[ -z "${ACTIVITY_MESH_SYNC:-}" && -f "$STORE_DIR/config.json" ]]; then
+    prev="$(sed -n 's/.*"sync_dir"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STORE_DIR/config.json" | head -1)"
+    [[ -n "$prev" ]] && SYNC_DIR="$prev"
+fi
 CONFIG_DIR="$HOME/.config/activity-mesh"
 ASSETS_ROOT="$STORE_DIR/dist"
 ASSETS_LINK="$ASSETS_ROOT/current"
