@@ -860,7 +860,7 @@ test_volume_roots() {
     fi
     if [ -d /dev/shm ] && [ "$(fs_id /dev/shm | cut -d: -f1)" != "$(fs_id /dev | cut -d: -f1)" ]; then
         expect_refused ACTIVITY_MESH_STATE /dev/shm
-        pass "a mount point is refused (/dev/shm)"
+        pass "a mount point is refused whether or not it is empty (/dev/shm)"
     fi
 }
 
@@ -873,17 +873,18 @@ test_foreign_dirs() {
     : > "$S/half/index.db"
     mkdir -p "$S/hidden/.git"
     : > "$S/hidden/index.db"
-    mkdir -p "$S/emptydir" "$S/logs/archive" "$S/many/a" "$S/many/b" "$S/many/c" "$S/many/d" "$S/many/e" "$S/many/f" "$S/many/g"
+    mkdir -p "$S/dsonly" "$S/logs/archive" "$S/many/a" "$S/many/b" "$S/many/c" "$S/many/d" "$S/many/e" "$S/many/f" "$S/many/g"
+    : > "$S/dsonly/.DS_Store"
     : > "$S/logs/a.log"
     : > "$S/many/index.db"
     expect_refused_with "bin/, lib/, share/" ACTIVITY_MESH_HOME "$S/decoy"
     expect_refused_with "bin/, lib/, share/" ACTIVITY_MESH_STATE "$S/decoy"
     expect_refused_with "Documents/" ACTIVITY_MESH_HOME "$S/half"
     expect_refused_with ".git/" ACTIVITY_MESH_HOME "$S/hidden"
-    expect_refused_with "empty dir" ACTIVITY_MESH_HOME "$S/emptydir"
-    expect_refused_with "empty dir" ACTIVITY_MESH_STATE "$S/emptydir"
+    expect_refused_with "it holds only: .DS_Store" ACTIVITY_MESH_HOME "$S/dsonly"
+    expect_refused_with "it holds only: .DS_Store" ACTIVITY_MESH_STATE "$S/dsonly"
     expect_refused_with "archive/" ACTIVITY_MESH_STATE "$S/logs"
-    pass "foreign subdirectories, a foreign hidden directory, a dir with markers and a foreign subdir, and an empty dir are all refused, naming what is in the way"
+    pass "foreign subdirectories, a foreign hidden directory, a dir with markers and a foreign subdir, and a dir that holds nothing but a hidden file are all refused, naming what is in the way"
 
     expect_refused_with "(and 2 more)" ACTIVITY_MESH_HOME "$S/many"
     grep -qF "a/, b/, c/, d/, e/ (and 2 more)" "$S/out-refused.txt" || fail "the first five unexpected entries are not listed: $(cat "$S/out-refused.txt")"
@@ -1120,6 +1121,69 @@ test_decoy_layout() {
     pass "the helper next to the real script is the one that is sourced"
 }
 
+test_empty_dirs() {
+    local cs store state cfg shimdir
+    echo "== a directory with no entries at all is removed with rmdir, never with rm -rf =="
+    ident_sandbox empties
+    cs="$(cd -P "$S" && /bin/pwd -P)"
+    mkdir -p "$S/e-store" "$S/e-state" "$S/e-dist/dist"
+    : > "$S/e-dist/index.db"
+    uninstall_run "$S/out-dry.txt" ACTIVITY_MESH_HOME="$S/e-store" ACTIVITY_MESH_STATE="$S/e-state" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-dry.txt" >&2; fail "an empty store and state dir were refused (rc $RC)"; }
+    grep -qxF "DRY rmdir $cs/e-store" "$S/out-dry.txt" && grep -qxF "DRY rmdir $cs/e-state" "$S/out-dry.txt" \
+        || fail "the empty dirs are not planned for rmdir: $(grep DRY "$S/out-dry.txt")"
+    if grep -qE "^DRY rm -rf $cs/e-(store|state)\$" "$S/out-dry.txt"; then fail "an empty dir is planned for rm -rf: $(grep DRY "$S/out-dry.txt")"; fi
+    [ -d "$S/e-store" ] && [ -d "$S/e-state" ] || fail "the dry run removed something"
+    uninstall_run "$S/out-dist.txt" ACTIVITY_MESH_HOME="$S/e-dist" -- --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-dist.txt" >&2; fail "an empty dist dir was refused (rc $RC)"; }
+    grep -qxF "DRY rmdir $cs/e-dist/dist" "$S/out-dist.txt" || fail "an empty dist dir is not planned for rmdir: $(grep DRY "$S/out-dist.txt")"
+    pass "an empty store, state or dist dir is accepted, and planned for rmdir"
+
+    new_sandbox fresh
+    store="$U_HOME/.local/share/activity-mesh"
+    state="$U_HOME/.local/state/activity-mesh"
+    cfg="$U_HOME/.config/activity-mesh"
+    mkdir -p "$store/dist/0.4.0" "$store/audit" "$state" "$cfg"
+    ln -s 0.4.0 "$store/dist/current"
+    : > "$store/config.json"
+    : > "$store/seq-macbook"
+    cs="$(cd -P "$S" && /bin/pwd -P)"
+    uninstall_run "$S/out-dry.txt" -- --purge --dry-run
+    [ "$RC" -eq 0 ] || { cat "$S/out-dry.txt" >&2; fail "a bootstrap --no-services shaped install was refused (rc $RC)"; }
+    grep -qxF "DRY rmdir $cs/home/.local/state/activity-mesh" "$S/out-dry.txt" && grep -qxF "DRY rmdir $cs/home/.config/activity-mesh" "$S/out-dry.txt" \
+        && grep -qxF "DRY rm -rf $cs/home/.local/share/activity-mesh" "$S/out-dry.txt" || fail "the dry run does not plan rmdir for the empty dirs and rm -rf for the store: $(grep DRY "$S/out-dry.txt")"
+    uninstall_run "$S/out.txt" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge of a bootstrap --no-services shaped install exited $RC"; }
+    [ ! -e "$store" ] && [ ! -e "$state" ] && [ ! -e "$cfg" ] || fail "--purge left the store, the empty state dir or the empty config dir behind"
+    [ -d "$U_HOME" ] || fail "HOME disappeared"
+    grep -qF "removed the empty dir $cs/home/.local/state/activity-mesh" "$S/out.txt" || fail "the empty state dir was not reported as removed: $(cat "$S/out.txt")"
+    pass "a store with dist/current and config.json plus an empty state dir and an empty config dir is purged whole"
+
+    new_sandbox emptychain
+    mkdir -p "$S/e-real"
+    ln -s e-real "$S/c2"
+    ln -s c2 "$S/c1"
+    uninstall_run "$S/out.txt" ACTIVITY_MESH_HOME="$S/c1" -- --purge
+    [ "$RC" -eq 0 ] || { cat "$S/out.txt" >&2; fail "--purge of an empty store behind a chain of links exited $RC"; }
+    [ ! -e "$S/e-real" ] && [ ! -L "$S/c1" ] && [ ! -L "$S/c2" ] || fail "the empty dir or a link of its chain was left behind"
+    pass "the links that led to an empty dir go with it"
+
+    new_sandbox raced
+    mkdir -p "$U_HOME/.local/state/activity-mesh"
+    shimdir="$WORK/shim-rmdir"
+    mkdir -p "$shimdir"
+    printf '%s\n' '#!/bin/sh' ': > "$1/appeared-after-the-check"' 'for r in /bin/rmdir /usr/bin/rmdir; do [ -x "$r" ] && exec "$r" "$@"; done' 'exit 127' > "$shimdir/rmdir"
+    chmod +x "$shimdir/rmdir"
+    set +e
+    env -i HOME="$U_HOME" PATH="$shimdir:$(run_path)" PREFIX="$U_PREFIX" TMPDIR="$WORK/tmp" bash "$REPO_ROOT/installers/uninstall.sh" --purge > "$S/out.txt" 2>&1
+    RC=$?
+    set -e
+    [ "$RC" -ne 0 ] || fail "a failing rmdir must make the uninstall exit non-zero"
+    grep -qF 'left as it is' "$S/out.txt" || fail "no reason is printed when rmdir fails: $(cat "$S/out.txt")"
+    [ -f "$U_HOME/.local/state/activity-mesh/appeared-after-the-check" ] || fail "something that appeared after the check was deleted: rm -rf must never be the fallback"
+    pass "when something appears in an empty dir after the check, rmdir fails, the reason is printed, the uninstall stops and nothing is deleted"
+}
+
 test_default_dirs
 test_env_dirs
 test_unsafe_dirs
@@ -1141,6 +1205,7 @@ test_decoy_layout
 test_volume_roots
 test_foreign_dirs
 test_real_shapes
+test_empty_dirs
 test_link_chains
 test_residuals
 test_fail_closed

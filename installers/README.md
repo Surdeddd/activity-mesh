@@ -132,8 +132,12 @@ bash installers/uninstall.sh --dry-run  # print the plan, change nothing
     `*.err`, `last-health.json`, `last-digest.json`, `decay-state.json`,
     `heartbeat-misses`, `heartbeat-last-alert`, `clock-offset-ms` or `tokens-*`
     in the state dir; `watcher.yaml`, `scopes-cache`, `agents-cache` or
-    `telegram.env` in the config dir. An empty directory has none, so it has to
-    be removed by hand.
+    `telegram.env` in the config dir. A directory with no entries at all
+    (hidden ones included), such as the state dir of an install made with
+    `--no-services`, needs no marker, passes the checks above like any other
+    and is removed with `rmdir`, never `rm -rf`: if something has appeared in it
+    since the check, `rmdir` fails, the uninstall says so and stops, and nothing
+    is deleted.
 
   Without `--purge` only `<store>/dist` is held to this: it may hold only
   version dirs (`0.4.0`, `v0.4.0-rc.7`, `dev-local`) and `current`. A directory

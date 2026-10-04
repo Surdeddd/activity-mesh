@@ -257,6 +257,7 @@ shape_scan() {
 
 identify_dir() {
     local name="$1" raw="$2" kind="$3" dir="$4" what shown="" n
+    IDENT_EMPTY=0
     [[ -d "$dir" && ! -L "$dir" ]] || return 0
     case "$kind" in
         store) what="an activity-mesh store dir" ;;
@@ -272,18 +273,28 @@ identify_dir() {
         if [[ ${#SHAPE_BAD[@]} -gt 5 ]]; then shown="$shown (and $((${#SHAPE_BAD[@]} - 5)) more)"; fi
         refuse "$name=$raw: $dir is not $what, it holds unexpected entries: $shown"
     fi
-    if [[ "$kind" != dist && $SHAPE_MARKERS -eq 0 ]]; then
+    if [[ ${#SHAPE_SEEN[@]} -eq 0 ]]; then
+        IDENT_EMPTY=1
+    elif [[ "$kind" != dist && $SHAPE_MARKERS -eq 0 ]]; then
         for ((n = 0; n < ${#SHAPE_SEEN[@]} && n < 5; n++)); do shown="$shown${shown:+, }${SHAPE_SEEN[n]}"; done
-        if [[ -z "$shown" ]]; then shown="it is empty, and an empty dir has to be removed by hand"; else shown="it holds only: $shown"; fi
-        refuse "$name=$raw: $dir is not $what, it holds none of the files such a dir has ($shown)"
+        refuse "$name=$raw: $dir is not $what, it holds none of the files such a dir has (it holds only: $shown)"
     fi
 }
 
+IDENT_EMPTY=0
+DIST_EMPTY=0
+STORE_EMPTY=0
+STATE_EMPTY=0
+CONFIG_EMPTY=0
 identify_dir ACTIVITY_MESH_HOME "$STORE_DIR" dist "$STORE_CANON/dist"
+DIST_EMPTY=$IDENT_EMPTY
 if [[ $PURGE -eq 1 ]]; then
     identify_dir ACTIVITY_MESH_HOME "$STORE_DIR" store "$STORE_CANON"
+    STORE_EMPTY=$IDENT_EMPTY
     identify_dir ACTIVITY_MESH_STATE "$STATE_DIR" state "$STATE_CANON"
+    STATE_EMPTY=$IDENT_EMPTY
     identify_dir CONFIG_DIR "$CONFIG_DIR" config "$CONFIG_CANON"
+    CONFIG_EMPTY=$IDENT_EMPTY
 fi
 
 uninstall_macos() {
@@ -448,16 +459,32 @@ for bin_name in activity-log activity-watcher activity-mesh-daemon; do
     if [[ "$PREFIX" != "$HOME/.local/bin" ]]; then remove_bin "$HOME/.local/bin/$bin_name"; fi
 done
 
+remove_empty() {
+    if ! run_argv rmdir "$1"; then
+        err "rmdir $1 failed — it is no longer empty, or it cannot be removed; it is left as it is"
+        exit 1
+    fi
+    ok "removed the empty dir $1"
+}
+
 if [[ -d "$DIST_B" || $DRY_RUN -eq 1 ]]; then
-    run_argv rm -rf "$DIST_B"
-    ok "removed runtime assets $DIST_B"
+    if [[ $DIST_EMPTY -eq 1 ]]; then
+        remove_empty "$DIST_B"
+    else
+        run_argv rm -rf "$DIST_B"
+        ok "removed runtime assets $DIST_B"
+    fi
 fi
 
 purge_dir() {
     local p="$2" hops=0 target base
     if [[ -d "$1" ]]; then
-        run_argv rm -rf "$1"
-        ok "purged $1"
+        if [[ "$3" -eq 1 ]]; then
+            remove_empty "$1"
+        else
+            run_argv rm -rf "$1"
+            ok "purged $1"
+        fi
     fi
     while [[ -L "$p" && $hops -lt 20 ]]; do
         target="$(readlink "$p")"
@@ -470,9 +497,9 @@ purge_dir() {
 }
 
 if [[ $PURGE -eq 1 ]]; then
-    purge_dir "$STORE_CANON" "$STORE_LEX"
-    purge_dir "$STATE_CANON" "$STATE_LEX"
-    purge_dir "$CONFIG_CANON" "$CONFIG_LEX"
+    purge_dir "$STORE_CANON" "$STORE_LEX" "$STORE_EMPTY"
+    purge_dir "$STATE_CANON" "$STATE_LEX" "$STATE_EMPTY"
+    purge_dir "$CONFIG_CANON" "$CONFIG_LEX" "$CONFIG_EMPTY"
     warn "left $SYNC_EFFECTIVE alone — it's the cross-host source-of-truth, delete by hand if intended"
 elif [[ $KEEP_DATA -eq 1 ]]; then
     ok "preserved data: $STORE_CANON $STATE_CANON $SYNC_EFFECTIVE $CONFIG_CANON"
