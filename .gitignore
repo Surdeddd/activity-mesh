@@ -50,3 +50,10 @@ memory-bank/
 
 # session notes (remember plugin) — local only
 .remember/
+
+# local agent tooling and run artifacts — never committed
+.superpowers/
+.worktrees/
+.claude/worktrees/
+.claude/settings.local.json
+artifacts/
